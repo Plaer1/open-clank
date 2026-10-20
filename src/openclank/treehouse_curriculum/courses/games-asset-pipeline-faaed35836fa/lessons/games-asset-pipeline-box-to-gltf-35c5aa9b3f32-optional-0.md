@@ -1,0 +1,1 @@
+Actual import preserves the declared ratio, Base/Mark face distinction and one-second quarter-turn with the recorded axis conversion. Record real hierarchy/animation names; source inspection alone cannot confirm an export.

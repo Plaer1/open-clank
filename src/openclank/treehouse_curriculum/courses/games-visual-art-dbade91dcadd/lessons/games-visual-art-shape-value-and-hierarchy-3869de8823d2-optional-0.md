@@ -1,0 +1,1 @@
+The two panels preserve the shapes while changing a named hierarchy variable; the response compares intention with observation.

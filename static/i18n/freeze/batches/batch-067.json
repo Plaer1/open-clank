@@ -1,0 +1,131 @@
+{
+  "id": "batch-067",
+  "group": "treehouse.lesson.house-connections",
+  "surface": "treehouse",
+  "entry_count": 10,
+  "character_count": 2376,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-connections.research-compare.whyThisHelps",
+      "source": "Attribution is what makes research reusable. A conclusion without a source is an opinion; a Compare without a recorded reason is a coin flip you cannot revisit.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:843"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.body",
+      "source": "In a document, add a checkbox task and open it in [Meatbag Tasks](clank://tasks). Complete the task and reopen the source document. Separately, create a [Timeline](clank://timeline) event on a practice track and move it to a different date.\n\n**Observable result:** the source checkbox changes from unchecked to checked, and the Timeline event commits and then moves while keeping the same stable event identity.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:805"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.explanation",
+      "source": "A task can point at a source document. Completing it changes the referenced checkbox in that document from unchecked to checked — the note and the task stay one piece of work. [Timeline](clank://timeline) holds dated events on tracks; an event can be moved to a different valid date or track and keeps its identity.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:805"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.practice.cleanup",
+      "source": "Delete the practice note and its Timeline event when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:837"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.practice.expectedEvidence",
+      "source": "The source checkbox is checked by the task, and the event moves to a new date/track.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:838"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.practice.seed",
+      "source": "One checkbox task in a practice note, and one single-day event on a practice track.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:836"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.practice.title",
+      "source": "Source task and timeline entry",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:835"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.result",
+      "source": "A task that checks a real checkbox in its source document, and a Timeline event you moved.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:805"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.title",
+      "source": "Source-backed Tasks and Timeline entries",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:805"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-connections.tasks-timeline.whyThisHelps",
+      "source": "Work that points back at its source is work you can audit. And a timeline you can reshape is how a plan survives contact with reality without losing its history.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:805"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    }
+  ]
+}

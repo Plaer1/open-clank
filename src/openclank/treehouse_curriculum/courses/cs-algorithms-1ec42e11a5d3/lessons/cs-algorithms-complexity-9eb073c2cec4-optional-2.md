@@ -1,0 +1,1 @@
+Input encoding matters: an integer value N uses about log₂N bits. A loop running N times is not polynomial in bit length merely because it looks linear in N. Profiling measures an implementation/workload; asymptotics describe a scaling model.

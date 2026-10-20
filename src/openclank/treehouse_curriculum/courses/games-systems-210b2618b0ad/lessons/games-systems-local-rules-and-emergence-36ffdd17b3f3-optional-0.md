@@ -1,0 +1,1 @@
+Ring 01001→10110; line 01000→10100; intervened ring 01001→10010. Use old state for every cell. Emergence here means global pattern from local rules, not a proof of chaos or realism.

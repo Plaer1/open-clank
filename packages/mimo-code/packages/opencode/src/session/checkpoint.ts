@@ -15,6 +15,7 @@ import { Instance } from "@/project/instance"
 import { ProjectID } from "@/project/schema"
 import { SessionTable } from "./session.sql"
 import * as Session from "./session"
+import { SessionStatus } from "./status"
 import { MessageV2 } from "./message-v2"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Log, Token } from "../util"
@@ -30,7 +31,7 @@ import {
   memoryPath,
   notesPath,
   globalMemoryPath,
-  migrateProjectMemory,
+  assertCurrentProjectMemory,
 } from "./checkpoint-paths"
 import { readBudgeted, readBudgetedSectionAware } from "./budgeted-read"
 import type { LastMessageInfo } from "./last-message-info"
@@ -40,6 +41,7 @@ import { alignToNonToolResultUser } from "./checkpoint-align"
 import { loadPriorDiscoveredTitles } from "./checkpoint-retry"
 import * as CheckpointContext from "./checkpoint-context"
 import { buildProgressDiff } from "./checkpoint-progress-reconcile"
+import { renderTailDigest } from "./tail-digest"
 
 const log = Log.create({ service: "session.checkpoint" })
 
@@ -150,6 +152,23 @@ const TAIL_MIN_TOKENS = 10_000
 const TAIL_MAX_TOKENS = 20_000
 const TAIL_MIN_TEXT_BLOCK_MESSAGES = 5
 
+// How long a context rebuild waits for an in-flight checkpoint writer to finish
+// before proceeding with whatever is currently on disk (the writer keeps
+// running in the background). Bounded so a slow writer can't make the main
+// agent appear hung — the failure mode that led to manual aborts + worker
+// teardown that killed the writer. Paired with a visible "Preparing
+// conversation context…" busy status during the wait.
+const REBUILD_WAIT_MS = "30 seconds"
+
+// Safety bound for awaiting the FIRST checkpoint writer when no usable
+// checkpoint exists yet (no watermark). Unlike REBUILD_WAIT_MS this is not a
+// "prefer-fresh" nicety — there is nothing else to rebuild from, so we wait for
+// the writer proper. The bound only guards the pathological case where the
+// writer's Deferred never resolves (e.g. its process died); on timeout we
+// defer to compaction. A normal writer settles well inside this.
+const FIRST_CHECKPOINT_WAIT_MS = "5 minutes"
+
+
 // Rebuild-time microcompact (see
 // docs/superpowers/specs/2026-06-03-rebuild-tail-microcompact-design.md).
 //
@@ -157,11 +176,12 @@ const TAIL_MIN_TEXT_BLOCK_MESSAGES = 5
 // survive into the rebuild context. Their tool_use parts are kept (so the
 // LLM still sees what action was taken), but for tools in this whitelist
 // the tool_result content is replaced with a placeholder. Result is either
-// large-and-regeneratable (read/bash/grep/glob/webfetch/websearch) or
+// large-and-regeneratable (read/view_image/bash/grep/glob/webfetch/websearch) or
 // essentially a "done" confirmation (edit/write/multiedit). Tools NOT here
 // carry state the LLM references later (actor/task/question/skill/memory).
 const COMPACTABLE_TOOL_NAMES = new Set<string>([
   "read",
+  "view_image",
   "bash",
   "grep",
   "glob",
@@ -481,6 +501,8 @@ export interface Interface {
     sessionID: SessionID
     boundary: MessageID
     lastMessageInfo?: LastMessageInfo
+    /** Last message present when the boundary was inserted. */
+    digestUpTo?: MessageID
     agentID?: string
     agent: string
     model: { providerID: string; modelID: string }
@@ -494,7 +516,11 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 // Writer state per session
 // ---------------------------------------------------------------------------
 
-export type WriterOutcome = "success" | "failure"
+// "timeout" means the caller's bounded wait expired while the writer was STILL
+// IN FLIGHT — it is deliberately distinct from "failure" (the writer settled
+// unsuccessfully). See waitForWriter for why conflating the two silently
+// disables checkpointing for a session whose writers are merely slow.
+export type WriterOutcome = "success" | "failure" | "timeout"
 
 interface WriterState {
   // Holds the AgentOutcome Deferred returned by Actor.spawn so callers can
@@ -623,8 +649,8 @@ export const layer: Layer.Layer<
       yield* Effect.promise(() => fs.mkdir(taskMemDir, { recursive: true }))
       yield* Effect.promise(() => fs.mkdir(projectMemDir, { recursive: true }))
 
-      // Migrate legacy lowercase memory.md → MEMORY.md before templating/reading.
-      yield* Effect.promise(() => migrateProjectMemory(projectID))
+      // Refuse historical filenames before templating/reading.
+      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
 
       // Test first-run state before bootstrapping; creating the template first
       // made the first-checkpoint prompt branch unreachable.
@@ -883,10 +909,18 @@ export const layer: Layer.Layer<
 
       writers.set(input.sessionID, { writing: result.outcome })
 
-      // Bookkeeping: the parent's last_checkpoint_message_id advances when the
-      // writer settles. Fork into the layer's scope so the watcher survives
-      // tryStartCheckpointWriter returning (background: true semantics) but is still tied
-      // to the layer's lifetime — no orphan fiber on shutdown.
+      // Bookkeeping: the parent's last_checkpoint_message_id (the delta
+      // watermark — the point future rebuilds compute the message tail from)
+      // advances ONLY when the writer SUCCEEDS. This is a transactional
+      // invariant: the on-disk checkpoint content and the watermark move
+      // together, or neither moves. If the writer failed/was cancelled (e.g.
+      // `Aborted process` from worker teardown), advancing the watermark would
+      // "consume" messages the failed checkpoint never actually captured —
+      // silently dropping that span of context from every subsequent rebuild.
+      // Leaving the watermark put means the next writer re-covers the same
+      // delta, so nothing is lost. Fork into the layer's scope so the watcher
+      // survives tryStartCheckpointWriter returning (background: true) but stays
+      // tied to the layer's lifetime — no orphan fiber on shutdown.
       yield* Effect.gen(function* () {
         const outcome = yield* Deferred.await(result.outcome)
         if (outcome.status === "success") {
@@ -899,8 +933,9 @@ export const layer: Layer.Layer<
             ),
           )
         } else {
-          log.warn("checkpoint writer failed; watermark retained for retry", {
+          log.warn("checkpoint writer did not succeed — leaving watermark unchanged so the delta is re-covered", {
             sessionID: input.sessionID,
+            status: outcome.status,
             endMessageID,
           })
         }
@@ -958,10 +993,23 @@ export const layer: Layer.Layer<
       // 5min so a long-but-honest writer is not mistaken for a failure by
       // the prune retry watcher. AgentOutcome → WriterOutcome translation:
       // success → "success", failure / cancelled → "failure".
+      //
+      // The bound expiring is NOT a writer failure. This timeout does not
+      // cancel the writer, and the settle watcher that owns the watermark
+      // advance (see tryStartCheckpointWriter) awaits the SAME Deferred with no
+      // bound — so a slow-but-successful writer still advances
+      // last_checkpoint_message_id after we stop waiting. Reporting "failure"
+      // here made the prune retry watcher count a working writer as broken,
+      // and MAX_WRITER_FAILURES such waits then tripped "gave up after max
+      // consecutive failures", permanently disabling checkpointing for a
+      // session whose every writer had actually succeeded. Report "timeout" so
+      // callers can distinguish "still in flight" from "settled unsuccessfully"
+      // (prune's `result !== "failure"` guard already skips the counter).
       const outcome = yield* Deferred.await(state.writing).pipe(
         Effect.timeout(300_000),
-        Effect.catch(() => Effect.succeed<AgentOutcome>({ status: "failure", error: "timeout" })),
+        Effect.catch(() => Effect.succeed("timeout" as const)),
       )
+      if (outcome === "timeout") return "timeout" as const
       return outcome.status === "success" ? ("success" as const) : ("failure" as const)
     })
 
@@ -1048,9 +1096,9 @@ export const layer: Layer.Layer<
       return lines.join("\n")
     })
 
-    const renderRebuildContext = Effect.fn("SessionCheckpoint.renderRebuildContext")(function* (
+    const renderRebuildContextWithActivity = Effect.fn("SessionCheckpoint.renderRebuildContextWithActivity")(function* (
       sessionID: SessionID,
-      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string },
+      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string; digestUpTo?: MessageID; boundary?: MessageID },
     ) {
       // renderRebuildContext is for the user-facing main agent's context rebuild.
       // Subagent-mode actors (system-spawned writers, model-spawned subagents)
@@ -1061,18 +1109,55 @@ export const layer: Layer.Layer<
       // message-v2.ts populates info.agentID from agent_id column), and the
       // runLoop calls this with that value. Treating "main" as subagent here
       // would skip rebuild → fall through to F39 compaction → context loss.
-      if (opts?.agentID && opts.agentID !== "main") return ""
+      if (opts?.agentID && opts.agentID !== "main") return { text: "", hasActivity: false }
 
+      // Decide whether a usable checkpoint exists using the WATERMARK
+      // (last_checkpoint_message_id), not the on-disk file's text. The writer's
+      // final step advances the watermark, and — per the transactional fix — it
+      // advances ONLY on success. So the watermark is the authoritative "there
+      // is a usable checkpoint" signal, and it's immune to the bootstrap
+      // template (which exists on disk before any writer succeeds).
+      //
+      //   - watermark set  → a prior writer succeeded → a usable checkpoint
+      //                       exists. If a writer is in-flight, await it
+      //                       (bounded) to prefer the fresher version, then
+      //                       rebuild; on timeout use the existing one.
+      //   - watermark unset → no usable checkpoint ever produced (first
+      //                       checkpoint). If a writer is in-flight, AWAIT it
+      //                       (bounded by a large safety timeout so a writer
+      //                       whose Deferred never resolves can't hang forever)
+      //                       rather than rebuilding off the bootstrap template
+      //                       mid-write. Then fall through to normal rendering:
+      //                       if the writer succeeded, the fresh checkpoint is
+      //                       now on disk; if it failed, rendering falls back to
+      //                       whatever else exists (ledger / notes / memory) and,
+      //                       when there is genuinely nothing, returns "" so the
+      //                       caller compacts. We do NOT force "" on failure here
+      //                       — that would suppress valid non-checkpoint context.
       const inFlight = writers.get(sessionID)
       if (inFlight) {
-        log.info("rebuild waiting for in-flight writer", { sessionID })
-        yield* Effect.race(
-          Deferred.await(inFlight.writing).pipe(Effect.as("done" as const)),
-          Effect.sleep("60 seconds").pipe(
-            Effect.tap(() => Effect.sync(() => log.warn("writer wait timeout — using on-disk checkpoint", { sessionID }))),
-            Effect.as("timeout" as const),
-          ),
-        ).pipe(Effect.catch(() => Effect.succeed("error" as const)))
+        const watermarkBefore = yield* lastBoundary(sessionID).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        // Visible busy status so the wait shows progress, never a silent hang
+        // (the historical trigger for a manual abort → worker teardown wedge).
+        yield* bus
+          .publish(SessionStatus.Event.Status, {
+            sessionID,
+            status: { type: "busy", message: "Preparing conversation context…" },
+          })
+          .pipe(Effect.ignore)
+
+        // Prefer the fresher checkpoint: wait for the in-flight writer. When a
+        // usable checkpoint already exists (watermark set) the wait is short
+        // (REBUILD_WAIT_MS) — we can proceed with the existing one on timeout.
+        // When none exists yet (first checkpoint) we wait longer
+        // (FIRST_CHECKPOINT_WAIT_MS) since there's nothing else to rebuild from,
+        // bounded only to survive a writer whose Deferred never resolves.
+        const bound = watermarkBefore ? REBUILD_WAIT_MS : FIRST_CHECKPOINT_WAIT_MS
+        const waited = yield* Effect.race(
+          Deferred.await(inFlight.writing).pipe(Effect.as("settled" as const)),
+          Effect.sleep(bound).pipe(Effect.as("timeout" as const)),
+        ).pipe(Effect.catch(() => Effect.succeed("settled" as const)))
+        log.info("rebuild proceeding after writer wait", { sessionID, waited, hadCheckpoint: !!watermarkBefore })
       }
 
       const cfg = yield* config.get()
@@ -1098,7 +1183,7 @@ export const layer: Layer.Layer<
       )
       const checkpointText = checkpointResult?.text ?? ""
 
-      yield* Effect.promise(() => migrateProjectMemory(projectID))
+      yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
       const memoryResult = yield* Effect.promise(() =>
         readBudgetedSectionAware(memoryPath(projectID), caps.memory ?? 10_000),
       )
@@ -1163,7 +1248,7 @@ export const layer: Layer.Layer<
         actors.length === 0 &&
         recentUserEntries.length === 0
       ) {
-        return ""
+        return { text: "", hasActivity: false }
       }
 
       const lines: string[] = []
@@ -1305,22 +1390,28 @@ export const layer: Layer.Layer<
         lines.push("")
       }
 
+      // Messages already present after the watermark are represented as a
+      // bounded activity list in this same boundary. Slicing by ID avoids
+      // same-millisecond ordering races with the synthetic boundary message.
+      let hasActivity = false
+      if (opts?.digestUpTo && opts.boundary) {
+        const all = yield* session.messages({ sessionID })
+        const activity = renderTailDigest(
+          all.filter((m) => m.info.id > opts.boundary! && m.info.id <= opts.digestUpTo!),
+        )
+        if (activity) {
+          hasActivity = true
+          lines.push("")
+          lines.push(activity)
+        }
+      }
+
       // Section 10: explicit seam framing for LLM continuity post-rebuild.
-      // Compaction-summary pattern: tells the model
-      // that preserved messages below are real history, not pseudo-content,
-      // so it resumes mid-loop instead of asking "what would you like me
-      // to do".
       lines.push("")
       lines.push(
-        "This session is being continued from a previous conversation that hit a checkpoint. The session checkpoint and project memory above cover the earlier portion of the conversation.",
-      )
-      lines.push("")
-      lines.push(
-        "Recent messages are preserved verbatim below — the assistant turn (and any tool results) you'll see is real history, not pseudo-content. Continue your task by responding to the most recent state.",
-      )
-      lines.push("")
-      lines.push(
-        "Resume directly. Do not acknowledge this memory dump, do not recap, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.",
+        hasActivity
+          ? "This session is continued from a checkpoint. The blocks above cover earlier history and the recent activity list. Resume the last task from that list and any live messages after it. Do not recap this dump."
+          : "This session is continued from a checkpoint. The blocks above cover earlier history. Resume the last task from the most recent live messages. Do not recap this dump.",
       )
 
       // Section 11: tail-aware system reminder. Picks the appropriate nudge
@@ -1346,7 +1437,14 @@ export const layer: Layer.Layer<
         }
       }
 
-      return lines.join("\n")
+      return { text: lines.join("\n"), hasActivity }
+    })
+
+    const renderRebuildContext = Effect.fn("SessionCheckpoint.renderRebuildContext")(function* (
+      sessionID: SessionID,
+      opts?: { lastMessageInfo?: LastMessageInfo; agentID?: string },
+    ) {
+      return (yield* renderRebuildContextWithActivity(sessionID, opts)).text
     })
 
     const lastBoundary = Effect.fn("SessionCheckpoint.lastBoundary")(function* (sessionID: SessionID) {
@@ -1369,16 +1467,19 @@ export const layer: Layer.Layer<
       sessionID: SessionID
       boundary: MessageID
       lastMessageInfo?: LastMessageInfo
+      digestUpTo?: MessageID
       agentID?: string
       agent: string
       model: { providerID: string; modelID: string }
       boundaryCreatedAt?: number
     }) {
-      const rebuildContext = yield* renderRebuildContext(input.sessionID, {
+      const rendered = yield* renderRebuildContextWithActivity(input.sessionID, {
         lastMessageInfo: input.lastMessageInfo,
         agentID: input.agentID,
-      }).pipe(Effect.catch(() => Effect.succeed("")))
-      if (!rebuildContext) return false
+        digestUpTo: input.digestUpTo,
+        boundary: input.boundary,
+      }).pipe(Effect.catch(() => Effect.succeed({ text: "", hasActivity: false })))
+      if (!rendered.text) return false
 
       const indexText = yield* renderIndex(input.sessionID).pipe(Effect.catch(() => Effect.succeed("")))
 
@@ -1400,6 +1501,7 @@ export const layer: Layer.Layer<
         checkpointDir: "",
         checkpointNumber: 0,
         coveredUpTo: input.boundary,
+        ...(input.digestUpTo && rendered.hasActivity ? { digestUpTo: input.digestUpTo } : {}),
       })
 
       if (indexText) {
@@ -1419,7 +1521,7 @@ export const layer: Layer.Layer<
         sessionID: input.sessionID,
         type: "text",
         synthetic: true,
-        text: rebuildContext,
+        text: rendered.text,
       })
 
       const actorsText = yield* actorRegistry

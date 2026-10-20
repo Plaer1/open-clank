@@ -19,20 +19,16 @@ from src.tool_security import BUILTIN_EMAIL_TOOLS
 logger = logging.getLogger(__name__)
 
 # ── openthesius MCP bridge exclusion list ──
-# These 9 coding-overlap tools are OWNED by mimo natively and must NOT be
-# exposed over the odysseus→mimo MCP bridge (Phase 3). mimo's own bash,
-# read, write, edit, glob, grep, ls tools replace them. The bridge carries
-# only odysseus life-tools (web_search, web_fetch, manage_calendar, etc.).
+# Direct process tools and unbrokered patch/workspace controls remain owned by
+# mimo and must NOT cross the odysseus→mimo MCP bridge. File read/write/edit/
+# list/search are intentionally *not* excluded: their private lifetools forms
+# are Rust-AgentScope adapters, while mimo's native aliases are forced off by
+# ``_mimo_tool_policy``.
 OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS = {
     "bash",         # mimo: bash tool
     "python",       # mimo: bash tool (python invocation)
-    "read_file",    # mimo: read tool
-    "write_file",   # mimo: write tool
-    "edit_file",    # mimo: edit tool
-    "ls",           # mimo: glob / bash ls
-    "glob",         # mimo: glob tool
-    "grep",         # mimo: grep tool
     "get_workspace", # mimo: cwd via config
+    "apply_patch",  # mimo: apply_patch tool
 }
 
 _REQUIRED_NATIVE_TOOL_ARGS = {
@@ -41,16 +37,19 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "read_file": ("path",),
     "write_file": ("path",),
     "edit_file": ("path",),
+    "publish_file": ("path",),
+    "apply_patch": ("patch_text", "patchText", "patch"),
+    "manage_files": ("action",),
 }
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible function tool schemas
 # ---------------------------------------------------------------------------
-# NOTE: Under openthesius, the 9 coding-overlap tools listed in
-# OPENTHESIUS_BRIDGE_EXCLUDED_TOOLS above must NOT be carried over the
-# MCP bridge — mimo owns them natively. The schemas remain here for
-# odysseus's standalone agent loop (non-openthesius mode).
+# NOTE: native mimo aliases are a distinct, denied execution lane. The same
+# public schema names may be exposed through the private Rust-backed lifetools
+# namespace when the server projects a current AgentScope.
 FUNCTION_TOOL_SCHEMAS = [
+    __import__("src.openclank.code_query", fromlist=["search_code_schema"]).search_code_schema(),
     {
         "type": "function",
         "function": {
@@ -88,6 +87,9 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
+                    "provider": {"type": "string", "description": "Optional explicitly selected provider"},
+                    "mode": {"type": "string", "enum": ["results", "read", "answer"], "description": "Search operation mode"},
+                    "intent": {"type": "string", "enum": ["web", "image"], "description": "Search intent; image returns image sources with page/original/thumbnail URLs"},
                     "time_filter": {"type": "string", "enum": ["day", "week", "month", "year"], "description": "Optional freshness filter for news/latest/today queries"}
                 },
                 "required": ["query"]
@@ -119,7 +121,24 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "path": {"type": "string", "description": "File path to read"},
                     "offset": {"type": "integer", "description": "1-based line to start reading from (optional)"},
-                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"}
+                    "limit": {"type": "integer", "description": "Max number of lines to read from offset (optional)"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Character cursor returned by a truncated read; use without offset/limit"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "publish_file",
+            "description": "Post a downloadable copy of a file you can access. Returns a link and adds the copy to Files, where the user can break the link or delete it. Use audience=owner by default; use public only when the user explicitly wants an anonymous link.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path of the existing local file to publish"},
+                    "audience": {"type": "string", "enum": ["owner", "public"], "description": "owner requires the user's login; public is anonymous and expiring"},
+                    "expires_in_hours": {"type": "integer", "minimum": 1, "maximum": 720, "description": "Optional lifetime; public defaults to 24 hours"}
                 },
                 "required": ["path"]
             }
@@ -129,15 +148,20 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output.",
+            "description": "Search literal file contents through the authenticated Files service. Returns matching file paths, not line occurrences. Case-sensitive by default. Scans are bounded and nonresumable; incomplete results have unknown totals. Regex is unsupported. Hidden files are excluded by default; .gitignore is not applied.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regular expression to search for"},
+                    "pattern": {"type": "string", "description": "Exact literal text; wildcard characters are preserved"},
                     "path": {"type": "string", "description": "Directory or file to search (optional; defaults to the project root)"},
                     "glob": {"type": "string", "description": "Only search files matching this glob, e.g. '*.py' (optional)"},
                     "ignore_case": {"type": "boolean", "description": "Case-insensitive match (optional)"},
-                    "max_results": {"type": "integer", "description": "Max matches to return (optional)"}
+                    "mode": {"type": "string", "enum": ["literal"], "description": "Literal search (default); regex is unsupported"},
+                    "literal": {"type": "boolean", "description": "Compatibility flag for literal matching"},
+                    "include_hidden": {"type": "boolean", "description": "Include hidden files and folders (default false)"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Backward-compatible alias for limit"},
+                    "cursor": {"type": "integer", "enum": [0], "description": "Only 0 is supported; bounded search cannot resume"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum returned file paths"}
                 },
                 "required": ["pattern"]
             }
@@ -147,12 +171,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots.",
+            "description": "Find matching file paths through the authenticated Files service. Glob supports segment-local * and ?, and whole-segment ** across zero or more folders. Bare patterns match filenames at any depth. Case-sensitive by default; bracket/brace/escape syntax is unsupported. Bounded and nonresumable; ordering is unspecified and incomplete totals are unknown.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.ts' or 'src/**/test_*.py'"},
-                    "path": {"type": "string", "description": "Base directory (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Base directory (optional; defaults to the project root)"},
+                    "ignore_case": {"type": "boolean", "description": "Case-insensitive filename matching (default false)"},
+                    "include_hidden": {"type": "boolean", "description": "Include hidden files and folders (default false)"},
+                    "cursor": {"type": "integer", "enum": [0], "description": "Only 0 is supported; bounded search cannot resume"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Maximum returned file paths"}
                 },
                 "required": ["pattern"]
             }
@@ -166,7 +194,9 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Entry cursor from a previous page"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Entries per page"}
                 },
                 "required": []
             }
@@ -176,8 +206,28 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_workspace",
-            "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
+            "description": "Return the absolute path of the active workspace folder. File tools are confined to it; shell invocations are workspace-write-contained with bubblewrap when available. Takes no arguments.",
             "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_files",
+            "description": "Move a regular file without overwriting, move it to recoverable trash, restore it, or list recoverable trash. Delete is always recoverable; use the returned trash_id to restore. Pass expected_fingerprint from read_file to reject stale source data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["move", "delete", "restore", "list_trash"]},
+                    "path": {"type": "string", "description": "Source path, or optional restore destination"},
+                    "destination": {"type": "string", "description": "Destination for move; must not already exist"},
+                    "trash_id": {"type": "string", "description": "Recovery id returned by delete/list_trash"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Trash listing cursor"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Trash entries per page"}
+                },
+                "required": ["action"]
+            }
         }
     },
     {
@@ -189,7 +239,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to write to"},
-                    "content": {"type": "string", "description": "File content to write"}
+                    "content": {"type": "string", "description": "File content to write"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale overwrite"}
                 },
                 "required": ["path", "content"]
             }
@@ -206,9 +257,58 @@ FUNCTION_TOOL_SCHEMAS = [
                     "path": {"type": "string", "description": "File path to edit"},
                     "old_string": {"type": "string", "description": "Exact text to replace (must match the file, including indentation)"},
                     "new_string": {"type": "string", "description": "Replacement text"},
-                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"}
+                    "replace_all": {"type": "boolean", "description": "Replace all occurrences instead of requiring a unique match"},
+                    "expected_fingerprint": {"type": "string", "description": "Optional fingerprint returned by read_file; rejects a stale edit"}
                 },
                 "required": ["path", "old_string", "new_string"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_patch",
+            "description": "Apply a multi-file source-code patch to disk. Use for real project files in the workspace when several edits belong together. Patch must use *** Begin Patch / *** End Patch with Add File, Update File, or Delete File sections. Prefer this over bash redirects/heredocs/sed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch_text": {
+                        "type": "string",
+                        "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
+                    },
+                    "expected_fingerprints": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": "Optional path-to-fingerprint map returned by read_file; rejects stale files"
+                    }
+                },
+                "required": ["patch_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todowrite",
+            "description": "Create and maintain a structured task list for the current coding session. Use during multi-step implementation/debug/refactor work and keep statuses current.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "Current task list. Only one item should be in_progress.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Task description"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                                "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
             }
         }
     },
@@ -412,16 +512,18 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_memory",
-            "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
+            "description": "Manage typed persistent knowledge: list, add, edit, delete, search, or answer an open question in its existing block.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "add", "edit", "delete", "search"],
+                    "action": {"type": "string", "enum": ["list", "add", "edit", "delete", "search", "resolve"],
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
-                    "memory_id": {"type": "string", "description": "Memory ID (for edit/delete)"},
-                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference"],
-                                 "description": "Memory category (for add/list filter)"}
+                    "memory_id": {"type": "string", "description": "Memory ID (for edit/delete), or the open-question ID (for resolve)"},
+                    "answer": {"type": "string", "description": "The answer used to resolve the existing open-question block"},
+                    "answer_memory_id": {"type": "string", "description": "Legacy optional source-memory ID used as answer provenance"},
+                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "unknown", "question"],
+                                 "description": "Memory category (for add/list filter). unknown/question creates an open question."}
                 },
                 "required": ["action"]
             }
@@ -445,13 +547,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ui_control",
-            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), switch_model, set_theme (built-in presets: clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
+            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, files, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), switch_model, set_theme (built-in presets: clanker-dark, clanker-light, dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["toggle", "open_panel", "open_email_reply", "switch_model", "set_theme", "create_theme", "get_toggles"],
                                "description": "The UI action. Use set_theme for presets, create_theme to build a custom theme with any hex colors"},
-                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
+                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, files, email, sessions, notes, brain/memories, skills, settings, cookbook, usage/stats. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
                     "value": {"type": "string", "description": "Value: on/off for toggle, model name for switch_model, theme name for set_theme, or folder for open_email_reply"},
                     "uid": {"type": "string", "description": "Email UID for open_email_reply"},
                     "folder": {"type": "string", "description": "Email folder for open_email_reply (default INBOX)"},
@@ -544,7 +646,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "task_type": {"type": "string", "enum": ["llm", "research", "action"],
                                   "description": "llm = AI runs your prompt; research = runs the deep-research pipeline on the prompt as a question; action = direct built-in function"},
                     "action_name": {"type": "string", "enum": [
-                        "tidy_sessions", "tidy_documents", "consolidate_memory", "tidy_research",
+                        "tidy_sessions", "consolidate_memory", "tidy_research",
                         "summarize_emails", "draft_email_replies", "extract_email_events",
                         "classify_events", "learn_sender_signatures",
                         "test_skills", "audit_skills", "check_email_urgency"
@@ -569,7 +671,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_calendar",
-            "description": "Manage calendar events: list events in a date range, create, update, delete. Each event can carry a tag/category (event_type) and importance level. Resolve relative dates like today/tomorrow against the 'Current date and time' system context, then pass ISO 8601 datetimes in the user's local wall time; for all-day events set all_day=true and pass YYYY-MM-DD. For event reminders/alarms, pass reminder_minutes; the tool creates the Odysseus note reminder, so do not also call manage_notes for the same reminder. Do not set rrule for single-occurrence requests such as 'next Wednesday only'; use rrule only when the user explicitly wants recurrence.",
+            "description": "Manage calendar events: list events in a date range, create, update, delete. Each event can carry a tag/category (event_type) and importance level. Resolve relative dates like today/tomorrow against the 'Current date and time' system context, then pass ISO 8601 datetimes in the user's local wall time; for all-day events set all_day=true and pass YYYY-MM-DD. For event reminders/alarms, pass reminder_minutes; the tool creates the Open Clank note reminder, so do not also call manage_notes for the same reminder. Do not set rrule for single-occurrence requests such as 'next Wednesday only'; use rrule only when the user explicitly wants recurrence.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -589,7 +691,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "end": {"type": "string", "description": "list_events range end (ISO datetime). Use this for month/week requests after resolving the date range; defaults to +14 days only when no range is requested. Prefer end; backend also accepts end_time, end_date, range_end, to, dtend, until."},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
                     "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Priority level (defaults to 'normal')"},
-                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Odysseus reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
+                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Open Clank reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
                     "rrule": {"type": "string", "description": "Recurrence rule in iCalendar RRULE format, e.g. 'FREQ=WEEKLY;BYDAY=MO' for weekly on Monday. Use with create_event or update_event. For update_event, pass an explicit empty string to remove recurrence and make the event single-occurrence."}
                 },
                 "required": ["action"]
@@ -675,15 +777,16 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Use progressive disclosure: 'list' to see what exists, 'view' to "
                 "load full content for a single skill, 'view_ref' for sub-files. "
                 "Use 'patch' for surgical text edits and 'edit' for full rewrites. "
-                "'publish' once you've verified the procedure works. For add, "
-                "always provide an explicit name slug and only tell the user the "
-                "exact name returned by the tool."
+                "Agent-created and edited skills stay staged as drafts until the "
+                "user publishes them in the Skills UI or an audit passes them. "
+                "For add, always provide an explicit name slug and only tell the "
+                "user the exact name returned by the tool."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "publish", "delete", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create; edit = full rewrite (content); patch = old_string→new_string; publish = flip status; delete; search = relevance match on published skills."},
-                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view/view_ref/edit/patch/publish/delete. For add, choose the exact kebab-case name the user should see and report only the returned name."},
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "delete", "search"], "description": "list = published name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create a draft; edit = full staged rewrite (content); patch = staged old_string→new_string; delete; search = relevance match on published skills."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view/view_ref/edit/patch/delete. For add, choose the exact kebab-case name the user should see and report only the returned name."},
                     "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
                     "description": {"type": "string", "description": "One-line summary surfaced in the skills index (for add)."},
                     "category": {"type": "string", "description": "Organizational grouping like 'dev', 'email', 'system' (for add)."},
@@ -695,9 +798,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "platforms": {"type": "array", "items": {"type": "string"}, "description": "Restrict to OSes (for add)."},
                     "requires_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide unless these toolsets are active (for add)."},
                     "fallback_for_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide when these toolsets are active (for add)."},
-                    "status": {"type": "string", "enum": ["draft", "published"], "description": "Defaults to 'draft' on add."},
                     "version": {"type": "string", "description": "Semver-ish, e.g. '1.0.0' (for add)."},
-                    "confidence": {"type": "number", "description": "0-1 (for add/publish)."},
+                    "confidence": {"type": "number", "description": "0-1 (for add)."},
                     "content": {"type": "string", "description": "Full SKILL.md text (for edit)."},
                     "old_string": {"type": "string", "description": "Exact substring to replace (for patch). Must appear exactly once."},
                     "new_string": {"type": "string", "description": "Replacement text (for patch)."},
@@ -711,15 +813,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_endpoints",
-            "description": "Manage model API endpoints: list configured endpoints, add new ones, delete, enable or disable them.",
+            "description": "List the caller's managed provider connections and stable model routes. Provider mutations require the Providers interface.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "add", "delete", "enable", "disable"]},
-                    "endpoint_id": {"type": "string", "description": "Endpoint ID (for delete/enable/disable)"},
-                    "name": {"type": "string", "description": "Display name (for add)"},
-                    "base_url": {"type": "string", "description": "API base URL e.g. https://api.openai.com/v1 (for add)"},
-                    "api_key": {"type": "string", "description": "API key (for add)"}
+                    "action": {"type": "string", "enum": ["list"]}
                 },
                 "required": ["action"]
             }
@@ -782,11 +880,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_documents",
-            "description": "Manage documents: list all documents (with optional search/language filter), delete documents, or run tidy cleanup.",
+            "description": "Manage documents: list all documents (with optional search/language filter) or delete a selected document.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "delete", "tidy"]},
+                    "action": {"type": "string", "enum": ["list", "delete"]},
                     "document_id": {"type": "string", "description": "Document ID (for delete)"},
                     "search": {"type": "string", "description": "Search query (for list)"},
                     "language": {"type": "string", "description": "Filter by language (for list)"},
@@ -834,12 +932,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "serve_model",
-            "description": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, or Diffusers. If `host` is omitted, defaults to the cookbook's selected server (not localhost). For image/inpainting/diffusion models use the built-in command `python3 scripts/diffusion_server.py --model <repo> --port 8100` rather than inventing a custom diffusers API server. After launching, call list_served_models to check readiness/errors; if it reports a diagnosis with retry suggestions, retry via serve_model using the suggested adjusted cmd.",
+            "description": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, MLX Image, or Diffusers. If `host` is omitted, defaults to the cookbook's selected server (not localhost). For MLX image models on Apple Silicon use `python3 scripts/mlx_image_server.py --model <repo> --port 8100`; for non-MLX image/inpainting/diffusion models use `python3 scripts/diffusion_server.py --model <repo> --port 8100`. Never serve image models with `mlx_lm.server`; that is only for text/chat MLX models. After launching, call list_served_models to check readiness/errors; if it reports a diagnosis with retry suggestions, retry via serve_model using the suggested adjusted cmd.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "repo_id": {"type": "string", "description": "Model repo (e.g. 'Qwen/Qwen3-8B')"},
-                    "cmd": {"type": "string", "description": "Full serve command (e.g. 'vllm serve Qwen/Qwen3-8B --port 8000 --tp 2', 'python3 -m sglang.launch_server --model-path Qwen/Qwen3-8B --port 30000', or for inpainting/image models: 'python3 scripts/diffusion_server.py --model diffusers/stable-diffusion-xl-1.0-inpainting-0.1 --port 8100')"},
+                    "cmd": {"type": "string", "description": "Full serve command (e.g. 'vllm serve <repo> --port 8000 --tp 2', 'python3 -m sglang.launch_server --model-path <repo> --port 30000', for MLX image models: 'python3 scripts/mlx_image_server.py --model <repo> --port 8100', or for non-MLX image models: 'python3 scripts/diffusion_server.py --model <repo> --port 8100')"},
                     "host": {"type": "string", "description": "Target server — friendly NAME from list_cookbook_servers (e.g. 'gpu-box', 'workstation') or raw user@host. Omit to use the cookbook's selected default."},
                     "local": {"type": "boolean", "description": "Force serve on THIS machine instead of the default remote server."},
                 },
@@ -933,7 +1031,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_serve_presets",
-            "description": "List saved Cookbook serve presets. Each preset is a launch template (name, model, host, port, tmux cmd) the user previously saved from the UI. Call this BEFORE serve_model when the user asks to launch a model by name — there's almost always a working preset for it.",
+            "description": "List saved Cookbook serve presets. Each preset is a launch template (name, model, host, port, tmux cmd) the user previously saved from the UI. Call this BEFORE raw serve_model when the user asks to launch a model by name manually.",
             "parameters": {"type": "object", "properties": {}}
         }
     },
@@ -974,11 +1072,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_cached_models",
-            "description": "List models already cached on disk locally or on a remote server. `host` accepts friendly Cookbook server names from list_cookbook_servers (for example ajax) or raw user@host. Also reports completed Cookbook download tasks when the filesystem cache scan cannot locate the HF cache path.",
+            "description": "List models already cached on disk locally or on a remote server. `host` accepts friendly Cookbook server names from list_cookbook_servers (for example workstation) or raw user@host. Also reports completed Cookbook download tasks when the filesystem cache scan cannot locate the HF cache path.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "host": {"type": "string", "description": "Friendly Cookbook server name (e.g. 'ajax', 'gpu-box') or raw remote host (e.g. 'user@gpu-box'). Omit for local."},
+                    "host": {"type": "string", "description": "Friendly Cookbook server name (e.g. 'workstation', 'gpu-box') or raw remote host (e.g. 'user@gpu-box'). Omit for local."},
                     "model_dir": {"type": "string", "description": "Comma-separated additional model directories to scan beyond ~/.cache/huggingface/hub"},
                     "ssh_port": {"type": "string", "description": "SSH port for remote host (default 22)"},
                     "platform": {"type": "string", "enum": ["linux", "windows"], "description": "Remote platform"}
@@ -991,16 +1089,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
+            "description": "Generic loopback to allowed internal Open Clank endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, files, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["call", "endpoints"], "description": "'call' to hit an endpoint, 'endpoints' to list what's available"},
-                    "path": {"type": "string", "description": "Endpoint path starting with /api/ (e.g. '/api/cookbook/gpus', '/api/gallery/list', '/api/calendar/events')"},
+                    "path": {"type": "string", "description": "Endpoint path starting with /api/ (e.g. '/api/cookbook/gpus', '/api/files-v1/roots', '/api/calendar/events')"},
                     "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method (default GET)"},
                     "body": {"type": "object", "description": "JSON request body for POST/PUT/PATCH"},
                     "query": {"type": "object", "description": "Querystring params as a key-value object"},
-                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery')"}
+                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'files')"}
                 },
                 "required": ["action"]
             }
@@ -1010,14 +1108,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_image",
-            "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
+            "description": "Edit a managed image in Imps: upscale, remove background, inpaint, or harmonize.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "image_id": {"type": "string", "description": "Gallery image ID"},
+                    "image_id": {"type": "string", "description": "Managed image resource ID"},
                     "action": {"type": "string", "enum": ["upscale", "rembg", "inpaint", "harmonize"], "description": "Edit action"},
                     "prompt": {"type": "string", "description": "For inpaint: what to fill the masked area with"},
+                    "mask": {"type": "string", "description": "For inpaint: base64 PNG mask (white pixels are edited)"},
                     "scale": {"type": "number", "description": "For upscale: scale factor (default 2)"},
+                    "model_route_id": {"type": "string", "description": "Stable managed image model-route ID (optional)"},
                 },
                 "required": ["image_id", "action"]
             }
@@ -1137,6 +1237,40 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "scan_email_unsubscribes",
+            "description": "Scan recent email headers for likely spam/newsletter unsubscribe candidates. Does not unsubscribe anything. Review candidates with the user before acting; mailto methods can be executed with unsubscribe_email, web URL methods require browser/web tools after approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "IMAP folder to scan (default: INBOX)"},
+                    "limit": {"type": "integer", "description": "Maximum candidates to return (default: 25)"},
+                    "max_scan": {"type": "integer", "description": "How many newest emails to inspect (default: 150)"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unsubscribe_email",
+            "description": "Execute one approved unsubscribe action for an email UID. Safe mailto List-Unsubscribe methods are sent/staged. Web URL methods return a requires-browser instruction and exact URL; use browser/web tools only after user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Email UID from scan_email_unsubscribes/list_emails"},
+                    "folder": {"type": "string", "description": "IMAP folder (default: INBOX)"},
+                    "method_index": {"type": "integer", "description": "Method index from scan_email_unsubscribes (default: 0)"},
+                    "allow_web": {"type": "boolean", "description": "Return browser/web instructions when selected method is URL"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+                "required": ["uid"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "reply_to_email",
             "description": "SEND a reply email immediately by UID. Do not use this when the user asks to write/draft/open/start a reply; use ui_control action=open_email_reply with body instead so the user can review. Only use when the user explicitly says to send now. Use the exact UID from the latest read_email/list_emails result; never invent UID 1. Automatically threads with In-Reply-To/References headers.",
             "parameters": {
@@ -1224,18 +1358,171 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_bg_jobs",
-            "description": "Inspect and control detached background `bash` jobs (started with the `#!bg` marker). action='list' shows this chat's jobs with id/status/age/command; action='output' returns a job's captured output so far (use for a still-running job, or to re-read a finished one); action='kill' terminates a runaway job's process tree instead of waiting out its max-runtime. output and kill need job_id from list.",
+            "description": "Start and control durable, workspace-contained shell sessions scoped to this owner/chat/workspace. Use list, poll, tail, write, wait, or terminate with a session id; tail is cursor-based and bounded.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "output", "kill"], "description": "list | output | kill (default: list)"},
-                    "job_id": {"type": "string", "description": "Background job id (required for output/kill; from action='list')"},
+                    "action": {"type": "string", "enum": ["start", "poll", "write", "wait", "terminate", "list", "tail"]},
+                    "job_id": {"type": "string", "description": "Shell session id from list/start"},
+                    "command": {"type": "string", "description": "Command for start"},
+                    "data": {"type": "string", "description": "Input bytes for write"},
+                    "timeout_s": {"type": "number", "minimum": 0, "maximum": 30, "description": "Bounded wait duration"},
+                    "max_runtime_s": {"type": "integer", "minimum": 1, "maximum": 86400, "description": "Maximum session runtime"},
+                    "cursor": {"type": "integer", "minimum": 0, "description": "Byte cursor for tail/list"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 65536, "description": "Maximum rows or output bytes"}
                 },
                 "required": ["action"]
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_desktop",
+            "description": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task. The result is retained through Files and never exposes a host path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "enum": ["display", "window", "region"]},
+                    "action": {"type": "string", "enum": ["capture", "correct"]},
+                    "original": {"type": "object", "description": "Immutable Files resource returned by an earlier capture"},
+                    "text": {"type": "string", "maxLength": 100000},
+                    "boxes": {"type": "array", "maxItems": 10000},
+                    "display": {"type": "integer", "minimum": 1, "maximum": 32},
+                    "window_id": {"type": "integer", "minimum": 1},
+                    "region": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4, "description": "[x, y, width, height]; x/y may be negative, width/height must be positive"}
+                },
+                "required": ["target"]
+            }
+        }
+    },
 ]
+
+# Copal is intentionally a single native read tool with an action-discriminated
+# request. Runtime validation in ``copal_tools`` rejects fields not valid for
+# the selected action as an additional fail-closed boundary.
+_COPAL_READ_ACTION_FIELDS = {
+    "notes.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "notes.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "notes.history": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "trash.list": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "wiki.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "wiki.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "wiki.history": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "timeline.get": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "timeline.event.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "timeline.track.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "galaxy.get": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "graph.get": {"query": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "mind.get_outline": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "bases.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "bases.get": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}},
+    "bases.query": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}, "section": {"type": "string", "maxLength": 64}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "treehouse.get": {"section": {"type": "string", "enum": ["overview", "courses", "course", "skills", "assignments", "submissions", "evidence", "badges", "quests", "progress", "analytics"]}},
+    "treehouse.integrity": {},
+    "todo.list": {"query": {"type": "string", "maxLength": 512}, "cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+    "maintenance.status": {},
+    "maintenance.operations": {"cursor": {"type": "string", "maxLength": 512}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+}
+_COPAL_BASE_PROPERTIES = {
+    "action": {"type": "string", "enum": sorted(_COPAL_READ_ACTION_FIELDS)},
+    "workspace": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,64}$", "default": "default"},
+}
+FUNCTION_TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "read_copal",
+        "description": "Read Copal resources through a bounded owner-scoped pure-read contract. Use explicit Copal/view intent or a validated active Copal resource. No owner argument is accepted; workspace is logical and defaults to default.",
+        "parameters": {
+            "type": "object",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        **_COPAL_BASE_PROPERTIES,
+                        "action": {"const": action},
+                        **fields,
+                    },
+                    "required": ["action"],
+                }
+                for action, fields in _COPAL_READ_ACTION_FIELDS.items()
+            ]
+        },
+    },
+})
+
+_COPAL_MANAGE_ACTIONS = (
+    "notes.create", "notes.edit", "notes.patch_metadata", "notes.rename", "notes.checkpoint", "notes.restore_version.preview", "notes.restore_version.apply", "notes.trash", "notes.restore_trash",
+    "wiki.create", "wiki.edit", "wiki.patch_metadata", "wiki.rename", "wiki.checkpoint", "wiki.restore_version.preview", "wiki.restore_version.apply", "wiki.trash", "wiki.restore_trash",
+    "timeline.event.create", "timeline.event.update", "timeline.event.trash", "timeline.event.restore_trash",
+    "timeline.track.create", "timeline.track.update", "timeline.track.reparent",
+    "galaxy.link_event_track", "galaxy.unlink_event_track", "graph.link", "graph.unlink",
+    "mind.heading.add", "mind.heading.rename", "mind.heading.move", "mind.heading.reparent", "mind.heading.delete",
+    "todo.create", "todo.update", "todo.complete", "todo.trash",
+    "bases.row.update",
+    "treehouse.command", "treehouse.detail",
+    "maintenance.bulk_trash.preview", "maintenance.bulk_trash.apply",
+    "maintenance.bulk_restore.preview", "maintenance.bulk_restore.apply", "maintenance.calendar_reconcile",
+    "maintenance.import.preview", "maintenance.import.apply", "maintenance.export.preview", "maintenance.export.apply",
+)
+_S = lambda **fields: fields
+_COPAL_MANAGE_FIELDS = {
+    "notes.create": _S(name={"type": "string", "maxLength": 512}, content={"type": "string", "maxLength": 8388608}, properties={"type": "object"}, relations={"type": "array"}),
+    "notes.edit": _S(id={"type": "string"}, content={"type": "string", "maxLength": 8388608}),
+    "notes.patch_metadata": _S(id={"type": "string"}, patch={"type": "object"}),
+    "notes.rename": _S(id={"type": "string"}, name={"type": "string", "maxLength": 512}),
+    "notes.checkpoint": _S(id={"type": "string"}, patch={"type": "object"}),
+    "notes.restore_version.preview": _S(id={"type": "string"}, commitId={"type": "string"}),
+    "notes.restore_version.apply": _S(id={"type": "string"}, commitId={"type": "string"}, previewToken={"type": "string"}),
+    "notes.trash": _S(id={"type": "string"}), "notes.restore_trash": _S(id={"type": "string"}),
+    "wiki.create": _S(name={"type": "string", "maxLength": 512}, content={"type": "string", "maxLength": 8388608}, properties={"type": "object"}, relations={"type": "array"}),
+    "wiki.edit": _S(id={"type": "string"}, content={"type": "string", "maxLength": 8388608}),
+    "wiki.patch_metadata": _S(id={"type": "string"}, patch={"type": "object"}),
+    "wiki.rename": _S(id={"type": "string"}, name={"type": "string"}),
+    "wiki.checkpoint": _S(id={"type": "string"}, patch={"type": "object"}),
+    "wiki.restore_version.preview": _S(id={"type": "string"}, commitId={"type": "string"}),
+    "wiki.restore_version.apply": _S(id={"type": "string"}, commitId={"type": "string"}, previewToken={"type": "string"}),
+    "wiki.trash": _S(id={"type": "string"}), "wiki.restore_trash": _S(id={"type": "string"}),
+    "timeline.event.create": _S(event={"type": "object"}), "timeline.event.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "timeline.event.trash": _S(id={"type": "string"}), "timeline.event.restore_trash": _S(id={"type": "string"}),
+    "timeline.track.create": _S(track={"type": "object"}), "timeline.track.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "timeline.track.reparent": _S(id={"type": "string"}, parentTrackId={"type": ["string", "null"]}),
+    "galaxy.link_event_track": _S(id={"type": "string"}, trackId={"type": "string"}), "galaxy.unlink_event_track": _S(id={"type": "string"}, trackId={"type": "string"}),
+    "mind.heading.add": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.rename": _S(id={"type": "string"}, patch={"type": "object"}),
+    "mind.heading.move": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.reparent": _S(id={"type": "string"}, patch={"type": "object"}), "mind.heading.delete": _S(id={"type": "string"}, patch={"type": "object"}),
+    "graph.link": _S(id={"type": "string"}, patch={"type": "object"}), "graph.unlink": _S(id={"type": "string"}, patch={"type": "object"}),
+    "todo.create": _S(event={"type": "object"}), "todo.update": _S(id={"type": "string"}, patch={"type": "object"}), "todo.complete": _S(id={"type": "string"}), "todo.trash": _S(id={"type": "string"}),
+    "bases.row.update": _S(id={"type": "string"}, patch={"type": "object"}),
+    "treehouse.detail": _S(courseId={"type":"string"}, activityId={"type":"string"}, assignmentId={"type":"string"}),
+    "treehouse.command": _S(command={"type": "object", "properties": {"type": {"type": "string", "enum": [
+        "profile.create", "profile.update", "course.create", "course.update", "course.publish", "course.archive", "course.author.add", "course.reorder_modules", "course.delete",
+        "module.create", "module.update", "module.reorder_items", "module.delete", "activity.create", "activity.update", "activity.complete", "activity.delete",
+        "enrollment.enroll", "enrollment.unenroll", "assignment.create", "assignment.update", "assignment.publish", "assignment.delete", "submission.submit", "submission.grade",
+        "skill.create", "skill.update", "skill.delete", "evidence.submit", "evidence.review", "badge.create", "badge.update", "badge.delete", "quest.create", "quest.update", "quest.delete",
+    ]}}, "required": ["type"]}, commandId={"type": "string"}, expectedRevision={"type": "integer", "minimum": 0}),
+    "maintenance.bulk_trash.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_trash.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
+    "maintenance.bulk_restore.preview": _S(ids={"type": "array", "items": {"type": "string"}}), "maintenance.bulk_restore.apply": _S(ids={"type": "array", "items": {"type": "string"}}, previewToken={"type": "string"}),
+    "maintenance.import.preview": _S(attachmentId={"type": "string", "maxLength": 256}, corpus={"type": "string", "enum": ["notes", "wiki"]}),
+    "maintenance.import.apply": _S(attachmentId={"type": "string", "maxLength": 256}, corpus={"type": "string", "enum": ["notes", "wiki"]}, previewToken={"type": "string"}),
+    "maintenance.export.preview": _S(options={"type": "object", "properties": {"includeWiki": {"type": "boolean"}, "includeAssets": {"type": "boolean"}}, "additionalProperties": False}),
+    "maintenance.export.apply": _S(options={"type": "object", "properties": {"includeWiki": {"type": "boolean"}, "includeAssets": {"type": "boolean"}}, "additionalProperties": False}, previewToken={"type": "string"}),
+    "maintenance.calendar_reconcile": _S(),
+}
+FUNCTION_TOOL_SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "manage_copal",
+        "description": "Create, edit, organize, and maintain owner-scoped Copal resources. Use exact IDs and semantic actions; conflicts are terminal and high-impact actions require a server preview token. No owner, route, path, or auth token is accepted.",
+        "parameters": {
+            "type": "object",
+            "oneOf": [
+                {"type": "object", "additionalProperties": False, "properties": {"action": {"const": action}, "workspace": {"type": "string", "default": "default"}, **_COPAL_MANAGE_FIELDS.get(action, {})}, "required": ["action"]}
+                for action in _COPAL_MANAGE_ACTIONS
+            ],
+        },
+    },
+})
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1619,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     # Uses the shared BUILTIN_EMAIL_TOOLS (single source of truth) so the
     # fail-closed set can't drift from the dispatch/blocklist sets.
     if not isinstance(args, dict):
-        if tool_type.startswith("mcp__email__") or name in BUILTIN_EMAIL_TOOLS:
+        if tool_type == "search_code" or tool_type.startswith("mcp__email__") or name in BUILTIN_EMAIL_TOOLS:
             logger.warning(f"Non-object email function call arguments for {name}: {args!r}; rejecting")
             return None
         logger.warning(f"Non-object function call arguments for {name}: {args!r}; treating as empty")
@@ -1371,21 +1658,35 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         # advertises time_filter and the executor parses {"query","time_filter"},
         # but a bare query string dropped it. Mirrors the read_file JSON idiom.
         tf = args.get("time_filter")
-        if content and isinstance(tf, str) and tf in ("day", "week", "month", "year"):
-            content = json.dumps({"query": content, "time_filter": tf})
+        valid_time_filter = isinstance(tf, str) and tf in ("day", "week", "month", "year")
+        if content and (valid_time_filter or args.get("provider") or args.get("mode") or args.get("intent")):
+            payload = {"query": content}
+            if isinstance(tf, str) and tf in ("day", "week", "month", "year"):
+                payload["time_filter"] = tf
+            if args.get("provider"):
+                payload["provider"] = args["provider"]
+            if args.get("mode"):
+                payload["mode"] = args["mode"]
+            if args.get("intent") in ("web", "image"):
+                payload["intent"] = args["intent"]
+            content = json.dumps(payload)
     elif tool_type == "read_file":
         # Plain path (back-compat) unless a line range is requested → JSON.
         if args.get("offset") or args.get("limit"):
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "publish_file"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""
     elif tool_type == "write_file":
         content = args.get("path", "") + "\n" + args.get("content", "")
     elif tool_type == "edit_file":
+        content = json.dumps(args)
+    elif tool_type == "apply_patch":
+        content = args.get("patch_text") or args.get("patchText") or args.get("patch") or ""
+    elif tool_type == "todowrite":
         content = json.dumps(args)
     elif tool_type == "create_document":
         parts = [args.get("title", "Untitled")]
@@ -1468,6 +1769,15 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = "list"
             if args.get("category"):
                 content += "\n" + args["category"]
+        elif action == "resolve":
+            memory_id = args.get("memory_id") or args.get("question_memory_id") or ""
+            content = "resolve\n" + str(memory_id)
+            answer = args.get("answer") or ""
+            answer_memory_id = args.get("answer_memory_id") or args.get("resolved_by") or ""
+            if answer:
+                content += "\n" + str(answer)
+            elif answer_memory_id:
+                content += "\nmemory_id:" + str(answer_memory_id)
         else:
             content = action
     elif tool_type == "list_models":

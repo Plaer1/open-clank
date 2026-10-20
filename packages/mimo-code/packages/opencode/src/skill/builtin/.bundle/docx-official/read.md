@@ -13,9 +13,9 @@ Always start with the cheapest option that answers the question. If a user asks 
 ## Level 1 — plain text
 
 ```bash
-python scripts/extract_text.py input.docx                # body text to stdout
-python scripts/extract_text.py input.docx --out file.txt # write to a file
-python scripts/extract_text.py input.docx --all          # include headers, footers, footnotes, endnotes, comments
+uv run scripts/extract_text.py input.docx                # body text to stdout
+uv run scripts/extract_text.py input.docx --out file.txt # write to a file
+uv run scripts/extract_text.py input.docx --all          # include headers, footers, footnotes, endnotes, comments
 ```
 
 Output goes to stdout by default. Redirect where you need it.
@@ -106,7 +106,7 @@ If either is non-zero, tell the user the document has unaccepted changes before 
 When the structure walk misses something (custom XML parts, SDT / structured document tags, complex field switches):
 
 ```bash
-python scripts/explode.py input.docx exploded/
+uv run scripts/explode.py input.docx exploded/
 xmllint --format exploded/word/document.xml | less
 ```
 
@@ -155,7 +155,7 @@ To reproduce numbering exactly when regenerating, keep the original `numbering.x
 ### "Summarize this file"
 
 ```bash
-python scripts/extract_text.py --all report.docx > report.txt
+uv run scripts/extract_text.py --all report.docx > report.txt
 ```
 
 Then feed `report.txt` to your LLM. If you need heading structure preserved for the summary, iterate `python-docx` and emit your own Markdown — see the outlining snippet above.

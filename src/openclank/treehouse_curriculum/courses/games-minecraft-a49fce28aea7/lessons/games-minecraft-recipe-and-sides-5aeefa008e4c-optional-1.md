@@ -1,0 +1,1 @@
+Check datagen entrypoint→provider registration→generated path→JAR inclusion.

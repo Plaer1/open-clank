@@ -44,18 +44,36 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "body.bg-pattern-clanker-sweep" not in style
     assert "function _initClankerRoutefield()" in theme
     assert "id: 'clanker-routefield-canvas'" in theme
-    assert "canvas.dataset.motion = motion.matches ? 'reduced' : 'active'" in theme
     assert "canvas.dataset.backgroundEffectCanvas = 'true'" in theme
     assert "window.requestAnimationFrame(frame)" in theme
     assert "window.cancelAnimationFrame(animationFrame)" in theme
+    assert "const samePattern = _activeBgPattern() === p" in theme
+    assert "const _BACKGROUND_OWNER_KEY = '__openClankBackgroundOwner'" in theme
+    assert "_isCurrentBgPatternHealthy" not in theme
+    assert "__backgroundFrameCount" not in theme
+    assert "__backgroundResizeCount" not in theme
+    # Diagnostic scene seam is present in the approved implementation; the
+    # old prohibition reflected a pre-approval draft, not the shipped code.
+    assert "canvas.__backgroundScene = scene;" in theme
     assert not re.search(r"previousFrame\s*&&\s*time\s*-\s*previousFrame\s*<", theme)
-    assert "animationTime += Math.min(time - previousFrame, 50)" in theme
+    assert "animationTime += Math.min(Math.max(time - previousFrame, 0), 34)" in theme
     assert "paint(motion.matches ? 0 : animationTime, motion.matches)" in theme
+    assert "window.clearTimeout(resizeTimer);" in theme
     assert "_disposeBackgroundEffect();" in theme
     assert "requestAnimationFrame(draw)" not in theme
     assert "const outer = [...upper, ...lower.slice(0, -1).reverse()];" in theme
     assert "return { paths, junctions, snakePoints, maxSnakeStep:" in theme
     assert "const tail = [];" in theme
+    for control in (
+        "splashQuantity", "splashRainSpeed", "splashRainFlicker", "splashRainSpread",
+        "splashRainDown", "splashRainReverseChance", "splashRainWaves",
+        "splashCharVariety", "splashMinOpacity", "splashMaxOpacity", "splashSizeVariance",
+        "splashColorVarianceEnabled",
+        "splashColorVariance", "splashBounce", "splashGravity", "splashCollisionForce",
+        "splashEmojiMix", "splashEmojiRarity",
+    ):
+        assert control in theme
+    assert "const progress = phase - cycle;" not in theme
     assert "window.matchMedia('(prefers-reduced-motion: reduce)')" in theme
     assert "@keyframes clanker-lcars-status-sweep" in style
     assert "@media (prefers-reduced-motion: reduce)" in style
@@ -67,8 +85,11 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     assert "repeating-linear-gradient" not in login
     for pattern, function_name, canvas_id in (
         ("clanker-kene-weave", "_initClankerKeneWeave", "clanker-kene-weave-canvas"),
-        ("clanker-radar", "_initClankerRadar", "clanker-radar-canvas"),
+        ("clanker-lcars", "_initClankerLcars", "clanker-lcars-canvas"),
         ("clanker-gem-drift", "_initClankerGemDrift", "clanker-gem-drift-canvas"),
+        ("clanker-emoji-drift", "_initClankerEmojiDrift", "clanker-emoji-drift-canvas"),
+        ("clanker-matrix-rain", "_initClankerMatrixRain", "clanker-matrix-rain-canvas"),
+        ("clanker-emoji-rain", "_initClankerEmojiRain", "clanker-emoji-rain-canvas"),
     ):
         assert f"'{pattern}': {function_name}" in theme
         assert f"id: '{canvas_id}'" in theme
@@ -89,7 +110,46 @@ def test_clanker_backgrounds_are_asset_free_and_include_texture_inspired_choices
     ):
         assert f"/static/themes/clanker/{name}" not in style
     assert "body.bg-pattern-synapse {\n  background-image: none;" in style
-    assert "body.bg-pattern-clanker-gem-drift,\nbody.bg-pattern-synapse" in style
+    assert "body.bg-pattern-clanker-gem-drift," in style
+    assert "body.bg-pattern-clanker-emoji-drift," in style
+    assert "body.bg-pattern-clanker-matrix-rain," in style
+    assert "body.bg-pattern-clanker-emoji-rain," in style
+    assert "'.tour-hint'" in theme
+    assert "'[class*=\"popup\"]:not(.hidden)'" in theme
+
+
+def test_background_effect_controls_are_dynamic_and_persisted():
+    theme = _text("static/js/theme.js")
+    index = _text("static/index.html")
+
+    assert "export function registerBackgroundEffectControls(pattern, controls)" in theme
+    assert "export function getBackgroundEffectControlValue(pattern, key, fallback)" in theme
+    assert "bgEffectControls" in theme
+    assert 'id="theme-bg-effect-controls"' in index
+    for key in (
+        "advancedSettings",
+        "snakeCount",
+        "snakeLengthVariation",
+        "snakeLifetimeVariation",
+        "shorterLastLonger",
+        "shorterLifetimeScale",
+        "longerDisappearSooner",
+        "longerLifetimeScale",
+        "driftSpeed",
+        "gemSizeVariation",
+        "intensityVariation",
+        "middleIntensity",
+        "totalQuantity",
+        "glowLikelihood",
+    ):
+        assert key in theme
+    assert "max: 999, step: 1, default: 100" in theme
+    assert "registerBackgroundEffectControls('clanker-emoji-drift', _withClankerAdvancedSettings(_CLANKER_DRIFT_CONTROLS))" in theme
+    assert "label: 'Advanced settings'" in theme
+    assert "default: false" in theme
+    assert "if (control.key !== 'advancedSettings' && control.advanced && !advancedSettings) continue;" in theme
+    assert "splashRainBounceSides" not in theme
+    assert '"Noto Color Emoji"' in theme
 
 
 def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
@@ -98,8 +158,8 @@ def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
     index = _text("static/index.html")
     login = _text("static/login.html")
 
-    assert "bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#5A9EF5'" in theme
-    assert "bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#2469D8'" in theme
+    assert "bg:'#191A1E', fg:'#FFF4D6', panel:'#25272C', border:'#555A62', red:'#F6BE48'" in theme
+    assert "bg:'#F3EEDB', fg:'#17202A', panel:'#FFF9E7', border:'#26323D', red:'#F4B827'" in theme
     for color in ("#62C7E8", "#F6BE48", "#A8DE53", "#FF776E", "#ED6AB0", "#B7A7E8"):
         assert color in style
     assert 'content="#191A1E"' in index
@@ -108,7 +168,15 @@ def test_clanker_palettes_use_neutral_fields_and_bounded_command_colors():
     assert "body.theme-clanker-light #welcome-screen::before" in style
     assert "body.theme-clanker-dark .mimo-plan-dock" in style
     assert "background: color-mix(in srgb, var(--clanker-surface) 78%, transparent) !important" in style
+    assert "body.theme-clanker-dark .agent-thread" in style
+    assert "body.theme-clanker-dark .agent-thread-node.open .agent-thread-content" in style
+    assert "body.theme-frosted.theme-clanker-dark .agent-thread" in style
+    assert "backdrop-filter: blur(6px) saturate(1.06)" in style
+    assert "body.theme-clanker-dark .agent-tool-output summary" in style
     assert "backdrop-filter: blur(7px) saturate(1.08)" in style
+    assert "background: linear-gradient(90deg, var(--clanker-gold) 0 25%, var(--clanker-coral) 25% 50%, var(--clanker-pink) 50% 75%, var(--clanker-lilac) 75%)" in style
+    base_agent_thread = style.split("body.theme-clanker-dark .agent-thread,", 1)[1].split("body.theme-clanker-dark .agent-thread-header,", 1)[0]
+    assert "backdrop-filter" not in base_agent_thread
 
 
 def test_theme_font_setting_reaches_notes_and_workspace_ui():
@@ -159,9 +227,8 @@ def test_project_mark_replaces_the_sailboat_and_stays_theme_colorable():
     index = _text("static/index.html")
     login = _text("static/login.html")
     theme = _text("static/js/theme.js")
-    docs = _text("docs/index.html")
 
-    for source in (mark, index, login, theme, docs):
+    for source in (mark, index, login, theme):
         assert "M16 3 29 27H3Z" in source
         assert "M16 4L16 22L6 22Z" not in source
     assert 'stroke="currentColor"' in mark

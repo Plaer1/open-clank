@@ -1,0 +1,1 @@
+Use FIFO enqueue/dequeue for the line and membership/add for names; distinguish order and uniqueness.

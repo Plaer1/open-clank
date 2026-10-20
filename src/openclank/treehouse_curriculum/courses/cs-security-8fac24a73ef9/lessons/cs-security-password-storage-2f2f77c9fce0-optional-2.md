@@ -1,0 +1,1 @@
+Dictionary, patterned, and exhaustive guessing are different search strategies over candidate passwords. This unit uses no real credential data or cracking lab. Choose current deployment parameters from the maintained guidance after measuring the target service; no toy cost parameter is a production recommendation.

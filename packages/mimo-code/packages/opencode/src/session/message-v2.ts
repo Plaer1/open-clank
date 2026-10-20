@@ -9,7 +9,6 @@ import { SyncEvent } from "../sync"
 import { Database, NotFoundError, and, desc, eq, inArray, lt, or } from "@/storage"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { ProviderError } from "@/provider"
-import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
@@ -17,6 +16,13 @@ import type { Provider } from "@/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
 import { EffectLogger } from "@/effect"
+import {
+  inlineToolAttachment,
+  routeToolAttachment,
+  toolAttachmentFilename,
+  toolAttachmentPlaceholder,
+} from "./tool-attachment"
+import { collapseCheckpointTail } from "./tail-digest"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -25,7 +31,7 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
-export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:"
+export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached file(s) from tool result:"
 export { isMedia }
 
 export const OutputLengthError = NamedError.create("MessageOutputLengthError", z.object({}))
@@ -213,6 +219,9 @@ export const CheckpointPart = PartBase.extend({
   checkpointDir: z.string(),
   checkpointNumber: z.number(),
   coveredUpTo: MessageID.zod,
+  // The end of the assistant tail rendered into this boundary's Recent
+  // activity section. Older boundaries omit it and remain fully verbatim.
+  digestUpTo: MessageID.zod.optional(),
 }).meta({
   ref: "CheckpointPart",
 })
@@ -320,6 +329,8 @@ export const ToolStateCompleted = z
     status: z.literal("completed"),
     input: z.record(z.string(), z.any()),
     output: z.string(),
+    providerOutput: z.json().optional(),
+    providerMetadata: z.record(z.string(), z.any()).optional(),
     title: z.string(),
     metadata: z.record(z.string(), z.any()),
     time: z.object({
@@ -344,6 +355,7 @@ export const ToolStateError = z
       start: z.number(),
       end: z.number(),
     }),
+    attachments: FilePart.array().optional(),
   })
   .meta({
     ref: "ToolStateError",
@@ -615,27 +627,13 @@ function providerMeta(metadata: Record<string, any> | undefined) {
 export const toModelMessagesEffect = Effect.fnUntraced(function* (
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
-  // Track media from tool results that need to be injected as user messages
-  // for providers that don't support media in tool results.
-  //
-  // OpenAI-compatible APIs only support string content in tool results, so media
-  // must be extracted and injected as a user message. Anthropic/Bedrock can keep
-  // media nested in tool results; Gemini 3 supports it, but earlier Gemini models
-  // need the extracted-user-message path.
-  const supportsMediaInToolResults = (() => {
-    if (model.api.npm === "@ai-sdk/anthropic") return true
-    if (model.api.npm === "@ai-sdk/amazon-bedrock") return true
-    if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
-    if (model.api.npm === "@ai-sdk/google") {
-      const id = model.api.id.toLowerCase()
-      return id.includes("gemini-3") && !id.includes("gemini-2")
-    }
-    return false
-  })()
+  // Only the main rebuild request opts in. Writers and compaction require the
+  // persisted transcript verbatim.
+  const source = options?.collapseCheckpointTail ? collapseCheckpointTail(input) : input
 
   const toModelOutput = (options: { toolCallId: string; input: unknown; output: unknown }) => {
     const output = options.output
@@ -643,27 +641,41 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       return { type: "text", value: output }
     }
 
-    if (typeof output === "object") {
+    if (
+      output &&
+      typeof output === "object" &&
+      "text" in output &&
+      typeof output.text === "string" &&
+      "attachments" in output &&
+      Array.isArray(output.attachments)
+    ) {
       const outputObject = output as {
         text: string
         attachments?: Array<{ mime: string; url: string; filename?: string }>
       }
-      const attachments = (outputObject.attachments ?? []).filter((attachment) => {
-        return attachment.url.startsWith("data:") && attachment.url.includes(",")
+      const attachments = (outputObject.attachments ?? []).flatMap((attachment) => {
+        const inline = inlineToolAttachment(attachment)
+        return inline ? [{ ...attachment, ...inline }] : []
       })
 
       return {
         type: "content",
         value: [
           { type: "text", text: outputObject.text },
-          ...attachments.map((attachment) => ({
-            type: "media",
-            mediaType: attachment.mime,
-            data: iife(() => {
-              const commaIndex = attachment.url.indexOf(",")
-              return commaIndex === -1 ? attachment.url : attachment.url.slice(commaIndex + 1)
-            }),
-          })),
+          ...attachments.map((attachment) =>
+            attachment.mime.startsWith("image/")
+              ? {
+                  type: "image-data" as const,
+                  mediaType: attachment.mediaType,
+                  data: attachment.data,
+                }
+              : {
+                  type: "file-data" as const,
+                  mediaType: attachment.mediaType,
+                  data: attachment.data,
+                  filename: toolAttachmentFilename(attachment),
+                },
+          ),
         ],
       }
     }
@@ -671,7 +683,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     return { type: "json", value: output as never }
   }
 
-  for (const msg of input) {
+  for (const msg of source) {
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -727,7 +739,51 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
     if (msg.info.role === "assistant") {
       const differentModel = `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`
-      const media: Array<{ mime: string; url: string; filename?: string }> = []
+      const syntheticGroups: Array<{
+        tool: string
+        callID: string
+        status: "completed" | "error"
+        parts: Array<
+          { type: "file"; url: string; mediaType: string; filename?: string } | { type: "text"; text: string }
+        >
+      }> = []
+      const routeAttachments = (input: {
+        tool: string
+        callID: string
+        status: "completed" | "error"
+        attachments: FilePart[]
+        allowNative: boolean
+      }) => {
+        const native: FilePart[] = []
+        const parts: (typeof syntheticGroups)[number]["parts"] = []
+        for (const attachment of input.attachments) {
+          const route = routeToolAttachment({ model, attachment, allowNative: input.allowNative })
+          if (route === "native") native.push(attachment)
+          if (route === "synthetic") {
+            parts.push({
+              type: "file",
+              url: attachment.url,
+              mediaType: attachment.mime,
+              filename: toolAttachmentFilename(attachment),
+            })
+          }
+          if (route === "placeholder") {
+            parts.push({
+              type: "text",
+              text: toolAttachmentPlaceholder(attachment),
+            })
+          }
+        }
+        if (parts.length > 0) {
+          syntheticGroups.push({
+            tool: input.tool,
+            callID: input.callID,
+            status: input.status,
+            parts,
+          })
+        }
+        return native
+      }
 
       if (
         msg.info.error &&
@@ -759,23 +815,23 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
-
-            // For providers that don't support media in tool results, extract media files
-            // (images, PDFs) to be sent as a separate user message
-            const mediaAttachments = attachments.filter((a) => isMedia(a.mime))
-            const nonMediaAttachments = attachments.filter((a) => !isMedia(a.mime))
-            if (!supportsMediaInToolResults && mediaAttachments.length > 0) {
-              media.push(...mediaAttachments)
-            }
-            const finalAttachments = supportsMediaInToolResults ? attachments : nonMediaAttachments
+            const finalAttachments = routeAttachments({
+              tool: part.tool,
+              callID: part.callID,
+              status: "completed",
+              attachments,
+              allowNative: true,
+            })
 
             const output =
-              finalAttachments.length > 0
-                ? {
-                    text: outputText,
-                    attachments: finalAttachments,
-                  }
-                : outputText
+              part.state.providerOutput !== undefined
+                ? part.state.providerOutput
+                : finalAttachments.length > 0
+                  ? {
+                      text: outputText,
+                      attachments: finalAttachments,
+                    }
+                  : outputText
 
             assistantMessage.parts.push({
               type: ("tool-" + part.tool) as `tool-${string}`,
@@ -785,9 +841,18 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               output,
               ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
               ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+              ...(differentModel ? {} : { resultProviderMetadata: providerMeta(part.state.providerMetadata) }),
             })
           }
           if (part.state.status === "error") {
+            const attachments = options?.stripMedia ? [] : (part.state.attachments ?? [])
+            routeAttachments({
+              tool: part.tool,
+              callID: part.callID,
+              status: "error",
+              attachments,
+              allowNative: false,
+            })
             const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
             if (typeof output === "string") {
               assistantMessage.parts.push({
@@ -834,9 +899,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       }
       if (assistantMessage.parts.length > 0) {
         result.push(assistantMessage)
-        // Inject pending media as a user message for providers that don't support
-        // media (images, PDFs) in tool results
-        if (media.length > 0) {
+        if (syntheticGroups.length > 0) {
           result.push({
             id: MessageID.ascending(),
             role: "user",
@@ -845,12 +908,13 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
                 type: "text" as const,
                 text: SYNTHETIC_ATTACHMENT_PROMPT,
               },
-              ...media.map((attachment) => ({
-                type: "file" as const,
-                url: attachment.url,
-                mediaType: attachment.mime,
-                filename: attachment.filename,
-              })),
+              ...syntheticGroups.flatMap((group) => [
+                {
+                  type: "text" as const,
+                  text: `Tool "${group.tool}" call ${group.callID} ${group.status === "error" ? "failed" : "completed"}:`,
+                },
+                ...group.parts,
+              ]),
             ],
           })
         }
@@ -874,7 +938,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 export function toModelMessages(
   input: WithParts[],
   model: Provider.Model,
-  options?: { stripMedia?: boolean },
+  options?: { stripMedia?: boolean; collapseCheckpointTail?: boolean },
 ): Promise<ModelMessage[]> {
   return Effect.runPromise(toModelMessagesEffect(input, model, options).pipe(Effect.provide(EffectLogger.layer)))
 }
@@ -1102,6 +1166,14 @@ export function fromError(
           responseBody: parsed.responseBody,
           metadata: parsed.metadata,
         },
+        { cause: e },
+      ).toObject()
+    // A TypeError (e.g. "j.map is not a function" from non-array content)
+    // is a programming defect, not a transient API failure. Surface it as a
+    // named error so it is diagnosable instead of collapsing to UnknownError.
+    case e instanceof TypeError:
+      return new NamedError.Unknown(
+        { message: `TypeError: ${errorMessage(e)}` },
         { cause: e },
       ).toObject()
     case e instanceof Error:

@@ -1,4 +1,35 @@
 import { Config } from "effect"
+import { closeSync, readFileSync } from "node:fs"
+import { consumeWindowsServerPassword } from "./worker-auth-windows"
+
+export function consumeInheritedServerPassword(fdValue?: string): string | undefined {
+  const envName = "OPEN_CLANK_WORKER_AUTH_FD"
+  const configured = fdValue !== undefined || Object.prototype.hasOwnProperty.call(process.env, envName)
+  const rawFD = fdValue ?? process.env[envName]
+  delete process.env["OPEN_CLANK_WORKER_AUTH_FD"]
+  if (!configured) return undefined
+  if (!rawFD || !/^\d+$/.test(rawFD)) {
+    throw new Error("Invalid Open Clank worker-auth descriptor")
+  }
+  const fd = Number(rawFD)
+  if (!Number.isSafeInteger(fd) || fd < 3) {
+    throw new Error("Invalid Open Clank worker-auth descriptor")
+  }
+  let password: string
+  try {
+    password = readFileSync(fd, "utf8")
+  } catch {
+    throw new Error("Unable to read Open Clank worker-auth descriptor")
+  } finally {
+    try {
+      closeSync(fd)
+    } catch {}
+  }
+  if (password.length === 0 || password.length > 1024) {
+    throw new Error("Invalid Open Clank worker-auth secret")
+  }
+  return password
+}
 
 function truthy(key: string) {
   const value = process.env[key]?.toLowerCase()
@@ -40,6 +71,26 @@ const MIMOCODE_DISABLE_EXTERNAL_SKILLS = truthy("MIMOCODE_DISABLE_EXTERNAL_SKILL
 const MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS =
   MIMOCODE_DISABLE_EXTERNAL_SKILLS || MIMOCODE_DISABLE_CLAUDE_CODE || truthy("MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS")
 const copy = process.env["MIMOCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT"]
+// Operator-supplied password (env or inherited worker-auth fd). Captured once:
+// consumeInheritedServerPassword() closes the descriptor.
+const suppliedServerPassword =
+  consumeWindowsServerPassword() ?? consumeInheritedServerPassword() ?? process.env["MIMOCODE_SERVER_PASSWORD"]
+
+let generatedServerPassword: string | undefined
+
+/**
+ * Generate the password for an implicit listener, once. Idempotent; a
+ * user-supplied password always wins and nothing is generated in that case.
+ */
+export function generateServerPassword() {
+  if (suppliedServerPassword) return
+  generatedServerPassword ??= Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
+}
+
+/** Disarm the generated password once its listener is gone. */
+export function clearGeneratedServerPassword() {
+  generatedServerPassword = undefined
+}
 
 export const Flag = {
   OTEL_EXPORTER_OTLP_ENDPOINT: process.env["OTEL_EXPORTER_OTLP_ENDPOINT"],
@@ -67,14 +118,10 @@ export const Flag = {
   MIMOCODE_SHOW_TTFD: truthy("MIMOCODE_SHOW_TTFD"),
   MIMOCODE_PERMISSION: process.env["MIMOCODE_PERMISSION"],
 
-  // Defaults to false. When false, the bash tool intercepts irreversible
-  // deletion commands (rm, rmdir, unlink, shred, del, erase, rd, remove-item,
-  // and git destructive subcommands like reset --hard / clean -f / branch -D /
-  // worktree remove / push --force / stash drop|clear / tag -d) and forces an
-  // extra permission prompt with permission="bash_delete" — separate from the
-  // normal bash-permission ask so it can't be silently pre-approved by a broad
-  // `bash: allow` rule. Set MIMOCODE_AUTO_APPROVE_DELETE=true to trust the
-  // model with deletes and skip the second confirmation.
+  // Skip the forced confirmation for approval-worthy shell side effects.
+  // Keep the old delete-only name as an environment compatibility alias.
+  MIMOCODE_AUTO_APPROVE_DESTRUCTIVE:
+    truthy("MIMOCODE_AUTO_APPROVE_DESTRUCTIVE") || truthy("MIMOCODE_AUTO_APPROVE_DELETE"),
   MIMOCODE_AUTO_APPROVE_DELETE: truthy("MIMOCODE_AUTO_APPROVE_DELETE"),
   // Set by the TUI's --dangerously-skip-permissions flag. When truthy, an
   // allow-all base ruleset is injected UNDER the user's config permission so
@@ -89,6 +136,16 @@ export const Flag = {
   MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT: number("MIMOCODE_OUTPUT_LENGTH_CONTINUATION_LIMIT") ?? 3,
   MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT: number("MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT") ?? 2,
   MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT: number("MIMOCODE_TEXT_TOOL_CALL_RETRY_LIMIT") ?? 2,
+  // Defaults to false. When enabled, unsigned historical reasoning sent through
+  // the Anthropic Messages format receives an empty placeholder signature so it
+  // follows the same native thinking-block serialization path as signed content.
+  get MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT() {
+    return truthy("MIMOCODE_FORCE_ANTHROPIC_REASONING_CONTENT")
+  },
+  // Empty/no-op tool-call loop guard: number of soft nudges (remind → replan)
+  // before the harness hard-halts the turn. N consecutive empty steps beyond
+  // this many recovery attempts terminates the turn. Mirrors TEXT_NGRAM_MAX_RECOVERY.
+  MIMOCODE_EMPTY_STEP_MAX_RECOVERY: number("MIMOCODE_EMPTY_STEP_MAX_RECOVERY") ?? 2,
 
   // Consecutive-block repetition detection for streamed reasoning + text.
   // A block of at least N tokens repeating REPEAT_THRESHOLD times consecutively
@@ -97,12 +154,25 @@ export const Flag = {
   MIMOCODE_TEXT_REPEAT_THRESHOLD: number("MIMOCODE_TEXT_REPEAT_THRESHOLD") ?? 20,
   MIMOCODE_TEXT_WINDOW_TOKENS: number("MIMOCODE_TEXT_WINDOW_TOKENS") ?? 500,
 
-  // Caps applied to image attachments before a prompt is sent. Both default to
-  // undefined (no limit). MIMOCODE_MAX_PROMPT_IMAGES bounds how many images may
-  // be sent per request (oldest excess images are dropped); MIMOCODE_MAX_PROMPT_IMAGE_SIZE
-  // bounds the decoded byte size of a single image. Values must be positive integers.
+  // Caps applied to image attachments before a prompt is sent.
+  // MIMOCODE_MAX_PROMPT_IMAGES (default undefined = no count limit) bounds how
+  // many images may be sent per request (oldest excess images are dropped).
+  // MIMOCODE_MAX_PROMPT_IMAGE_SIZE overrides the default per-image byte cap
+  // (DEFAULT_MAX_IMAGE_BYTES ~4.5 MB, kept under the provider 5 MB hard limit);
+  // oversized images are recompressed under the cap, or stripped to a text
+  // placeholder when they can't be compressed. Values must be positive integers.
   MIMOCODE_MAX_PROMPT_IMAGES: number("MIMOCODE_MAX_PROMPT_IMAGES"),
   MIMOCODE_MAX_PROMPT_IMAGE_SIZE: number("MIMOCODE_MAX_PROMPT_IMAGE_SIZE"),
+  // Native attachment payload cap. Read lazily so tests and embedders can
+  // change the environment before preparing a request. Defaults to 50 MiB.
+  get MIMOCODE_MAX_ATTACHMENT_SIZE() {
+    return number("MIMOCODE_MAX_ATTACHMENT_SIZE") ?? 50 * 1024 * 1024
+  },
+  // Source read ceiling. Files above this limit are rejected before decode or
+  // compression. Defaults to 150 MiB.
+  get MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE() {
+    return number("MIMOCODE_MAX_ATTACHMENT_SOURCE_SIZE") ?? 150 * 1024 * 1024
+  },
   MIMOCODE_MIMO_ONLY,
   MIMOCODE_DISABLE_PROVIDER_ENV: MIMOCODE_MIMO_ONLY || truthy("MIMOCODE_DISABLE_PROVIDER_ENV"),
   MIMOCODE_DISABLE_CLAUDE_CODE,
@@ -118,15 +188,36 @@ export const Flag = {
   MIMOCODE_DISABLE_CLAUDE_CODE_COMMANDS: truthy("MIMOCODE_DISABLE_CLAUDE_CODE_COMMANDS"),
   MIMOCODE_DISABLE_CLAUDE_CODE_SKILLS,
   MIMOCODE_DISABLE_EXTERNAL_SKILLS,
+  get MIMOCODE_DISABLE_REMOTE_SKILLS() {
+    return truthy("MIMOCODE_DISABLE_REMOTE_SKILLS")
+  },
   MIMOCODE_DISABLE_CODEX_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_CODEX_SKILLS"),
   MIMOCODE_DISABLE_OPENCODE_SKILLS: MIMOCODE_DISABLE_EXTERNAL_SKILLS || truthy("MIMOCODE_DISABLE_OPENCODE_SKILLS"),
 
+  // Skill-search ranking and loading policy. Exact mentions stay above BM25;
+  // the BM25/coverage blend has a 0.90 ceiling, and near-max results auto-load.
+  MIMOCODE_SKILL_SEARCH_EXACT_SCORE: 1,
+  MIMOCODE_SKILL_SEARCH_BM25_K1: 1.5,
+  MIMOCODE_SKILL_SEARCH_BM25_LENGTH_NORMALIZATION: 0.75,
+  MIMOCODE_SKILL_SEARCH_BM25_IDF_SMOOTHING: 0.5,
+  MIMOCODE_SKILL_SEARCH_BM25_SCORE_WEIGHT: 0.55,
+  MIMOCODE_SKILL_SEARCH_QUERY_COVERAGE_WEIGHT: 0.35,
+  MIMOCODE_SKILL_SEARCH_AUTO_LOAD_THRESHOLD: 0.85,
+  MIMOCODE_SKILL_SEARCH_SCORE_PRECISION: 4,
+  MIMOCODE_SKILL_SEARCH_MAX_RESULTS: 3,
+  MIMOCODE_SKILL_SEARCH_STEM_MIN_LENGTH: 3,
+  MIMOCODE_SKILL_SEARCH_FILE_SAMPLE_LIMIT: 10,
+  MIMOCODE_SKILL_SEARCH_REFRESH_INTERVAL_MS: 12 * 60 * 60 * 1000,
+  // Defaults to true. Set MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER=false (or 0)
+  // to stop injecting skill-search reminders into user queries.
+  MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER: !falsy("MIMOCODE_ENABLE_SKILL_SEARCH_REMINDER"),
+
   // Defaults to false. When enabled, skill-source commands appear in the `/`
-  // autocomplete dropdown alongside user commands and MCP prompts (Claude
-  // Code-style). By default skills are only surfaced via the `/skills` picker
-  // and model-driven invocation, keeping the `/` list focused on user-authored
-  // commands.
-  MIMOCODE_ENABLE_SLASH_SKILLS: truthy("MIMOCODE_ENABLE_SLASH_SKILLS"),
+  // autocomplete dropdown alongside user commands and MCP prompts. Skills are
+  // surfaced in `/` completion by default; set MIMOCODE_DISABLE_SLASH_SKILLS=1
+  // to hide them and fall back to the `/skills` picker + model-driven
+  // invocation only.
+  MIMOCODE_DISABLE_SLASH_SKILLS: truthy("MIMOCODE_DISABLE_SLASH_SKILLS"),
   MIMOCODE_FAKE_VCS: process.env["MIMOCODE_FAKE_VCS"],
 
   // When enabled, skips all git subprocess calls during project discovery
@@ -135,9 +226,25 @@ export const Flag = {
   // the working directory. Use to avoid touching git in restricted/sandboxed
   // environments or where git startup probing is undesirable.
   MIMOCODE_DISABLE_GIT: truthy("MIMOCODE_DISABLE_GIT"),
-  MIMOCODE_SERVER_PASSWORD: process.env["MIMOCODE_SERVER_PASSWORD"],
+  /** Live: falls back to the throwaway generated for an implicit listener. */
+  get MIMOCODE_SERVER_PASSWORD() {
+    return suppliedServerPassword ?? generatedServerPassword
+  },
+  /**
+   * True only when the operator supplied a password. Containment rule keys on
+   * this: a generated password must not look like a user-asked-for listener.
+   */
+  get MIMOCODE_SERVER_PASSWORD_SUPPLIED() {
+    return Boolean(suppliedServerPassword)
+  },
   MIMOCODE_SERVER_USERNAME: process.env["MIMOCODE_SERVER_USERNAME"],
   MIMOCODE_ENABLE_QUESTION_TOOL: truthy("MIMOCODE_ENABLE_QUESTION_TOOL"),
+  // Owner worker-generation default; independent of tool approval permission.
+  MIMOCODE_NEVER_ASK: truthy("MIMOCODE_NEVER_ASK"),
+
+  // Defaults to false. Set MIMOCODE_ENABLE_TRY_BEST_HANDOFF=true (or 1) to
+  // enable try-best loop detection, automatic turn pausing, and handoff UI.
+  MIMOCODE_ENABLE_TRY_BEST_HANDOFF: truthy("MIMOCODE_ENABLE_TRY_BEST_HANDOFF"),
 
   // Defaults to false. The edit tool does pure exact-string matching with
   // explicit error signals. Set MIMOCODE_ENABLE_FUZZY_EDIT=true to opt into the
@@ -185,15 +292,24 @@ export const Flag = {
   MIMOCODE_EXPERIMENTAL_OXFMT: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_OXFMT"),
   MIMOCODE_EXPERIMENTAL_LSP_TY: truthy("MIMOCODE_EXPERIMENTAL_LSP_TY"),
   MIMOCODE_EXPERIMENTAL_LSP_TOOL: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_LSP_TOOL"),
+  // Defaults to OFF: exec (tool_script orchestration) is registered only for
+  // GPT-toolset models. Opt in here to expose it to every model.
+  MIMOCODE_ENABLE_EXEC_TOOL: truthy("MIMOCODE_ENABLE_EXEC_TOOL"),
+  // Defaults to OFF for non-GPT models. GPT models enable MCP Tool Search in
+  // SessionPrompt regardless of this flag. Opt in here to enable it for every
+  // function-calling model.
+  MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH:
+    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_MCP_TOOL_SEARCH"),
   // Defaults to OFF (opt-in): the Orchestrator primary mode — a general
   // coordinator that delegates to child sessions via the `session` tool, with a
   // global singleton workspace and child permission-approval routing. Enable with
   // MIMOCODE_EXPERIMENTAL_ORCHESTRATOR=true (or the umbrella MIMOCODE_EXPERIMENTAL).
   MIMOCODE_EXPERIMENTAL_ORCHESTRATOR: MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_ORCHESTRATOR"),
-  // Defaults to true: dynamic workflow + built-in deep-research are on by default.
-  // Set MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL=false to opt out. The env-var name is
-  // kept for backwards compat (long-running experiments still pass it as `1`).
-  MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL: !falsy("MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL"),
+  // Defaults to OFF (opt-in): dynamic workflows and built-in workflows.
+  // Enable with MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL=true (or the umbrella
+  // MIMOCODE_EXPERIMENTAL flag).
+  MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL:
+    MIMOCODE_EXPERIMENTAL || truthy("MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL"),
   // Defaults to true: cron + self-paced loop scheduling are on by default.
   // Set MIMOCODE_EXPERIMENTAL_CRON=false to opt out. Runtime kill switch is
   // MIMOCODE_DISABLE_CRON (checked live every tick).

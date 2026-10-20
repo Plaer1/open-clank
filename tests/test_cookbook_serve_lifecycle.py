@@ -31,12 +31,16 @@ async def test_tick_persists_only_successfully_stopped_serves(tmp_path, monkeypa
     async def fake_stop_serve(session_id, remote_host="", ssh_port=""):
         return session_id == "stop-succeeds"
 
-    async def fake_delete_endpoint(task):
+    async def fake_delete_connection(task):
         return None
 
     monkeypatch.setattr(lifecycle, "COOKBOOK_STATE_FILE", str(state_path))
     monkeypatch.setattr(lifecycle, "_stop_serve", fake_stop_serve)
-    monkeypatch.setattr(lifecycle, "_delete_endpoint_for_task", fake_delete_endpoint)
+    monkeypatch.setattr(
+        lifecycle,
+        "_delete_provider_connection_for_task",
+        fake_delete_connection,
+    )
 
     await lifecycle._tick()
 

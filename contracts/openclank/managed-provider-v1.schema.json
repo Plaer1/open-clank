@@ -1,0 +1,990 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.dev/contracts/managed-provider/v1",
+  "title": "Open Clank Managed Provider Protocol v1",
+  "description": "Capability negotiation and secret-bearing callback envelopes exchanged between the Open Clank host and its managed model engine.",
+  "oneOf": [
+    { "$ref": "#/$defs/capabilityDeclaration" },
+    { "$ref": "#/$defs/accountSelectionRequest" },
+    { "$ref": "#/$defs/accountBinding" },
+    { "$ref": "#/$defs/accountCommitRequest" },
+    { "$ref": "#/$defs/accountAttemptRequest" },
+    { "$ref": "#/$defs/credentialLeaseRequest" },
+    { "$ref": "#/$defs/credentialLeaseResult" },
+    { "$ref": "#/$defs/credentialReplaceRequest" },
+    { "$ref": "#/$defs/refreshAcquireRequest" },
+    { "$ref": "#/$defs/refreshRenewRequest" },
+    { "$ref": "#/$defs/refreshCommitRequest" },
+    { "$ref": "#/$defs/refreshAbortRequest" },
+    { "$ref": "#/$defs/refreshLease" },
+    { "$ref": "#/$defs/familyCatalogResult" },
+    { "$ref": "#/$defs/connectionValidationRequest" },
+    { "$ref": "#/$defs/connectionValidationResult" },
+    { "$ref": "#/$defs/accountValidationRequest" },
+    { "$ref": "#/$defs/accountValidationResult" },
+    { "$ref": "#/$defs/oauthStartRequest" },
+    { "$ref": "#/$defs/oauthStartResult" },
+    { "$ref": "#/$defs/oauthCompletionRequest" },
+    { "$ref": "#/$defs/oauthCompletionResult" },
+    { "$ref": "#/$defs/oauthCancelResult" },
+    { "$ref": "#/$defs/operationJournalRequest" },
+    { "$ref": "#/$defs/operationJournalResult" },
+    { "$ref": "#/$defs/artifactReadRequest" },
+    { "$ref": "#/$defs/artifactReadResult" },
+    { "$ref": "#/$defs/artifactWriteRequest" },
+    { "$ref": "#/$defs/artifactDescriptor" },
+    { "$ref": "#/$defs/executorInvokeRequest" },
+    { "$ref": "#/$defs/operationExecuteRequest" },
+    { "$ref": "#/$defs/operationExecuteResult" }
+  ],
+  "$defs": {
+    "billingLane": {
+      "type": "string",
+      "enum": ["subscription", "metered_api", "local", "custom", "legacy"]
+    },
+    "authInfo": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "refresh", "access", "expires"],
+          "properties": {
+            "type": { "const": "oauth" },
+            "refresh": { "type": "string" },
+            "access": { "type": "string" },
+            "expires": { "type": "number" },
+            "accountId": { "type": "string" },
+            "enterpriseUrl": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "key"],
+          "properties": {
+            "type": { "const": "api" },
+            "key": { "type": "string" },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "key", "token"],
+          "properties": {
+            "type": { "const": "wellknown" },
+            "key": { "type": "string" },
+            "token": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "account": {
+      "type": "object",
+      "required": ["id", "label", "enabled", "order", "revision", "credentialRevision", "credential"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "order": { "type": "number" },
+        "revision": { "type": "number", "minimum": 1 },
+        "credentialRevision": { "type": "number", "minimum": 1 },
+        "credential": { "$ref": "#/$defs/authInfo" },
+        "identity": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "chat.stream",
+        "chat.complete",
+        "vision.describe",
+        "image.generate",
+        "image.edit",
+        "image.inpaint",
+        "image.img2img",
+        "image.upscale",
+        "image.denoise",
+        "image.segment",
+        "image.remove_background",
+        "image.restore_face",
+        "audio.synthesize",
+        "audio.transcribe",
+        "embeddings.create"
+      ]
+    },
+    "managedMethod": {
+      "type": "string",
+      "enum": [
+        "_openclank/provider-store/v1/account/bind",
+        "_openclank/provider-store/v1/account/commit",
+        "_openclank/provider-store/v1/account/attempt",
+        "_openclank/provider-store/v1/credential/lease",
+        "_openclank/provider-store/v1/credential/replace",
+        "_openclank/provider-store/v1/refresh/acquire",
+        "_openclank/provider-store/v1/refresh/renew",
+        "_openclank/provider-store/v1/refresh/commit",
+        "_openclank/provider-store/v1/refresh/abort",
+        "_openclank/provider-control/v1/catalog",
+        "_openclank/provider-control/v1/connection/validate",
+        "_openclank/provider-control/v1/account/validate",
+        "_openclank/provider-control/v1/oauth/start",
+        "_openclank/provider-control/v1/oauth/poll",
+        "_openclank/provider-control/v1/oauth/callback",
+        "_openclank/provider-control/v1/oauth/cancel",
+        "_openclank/operations/v1/journal/cas",
+        "_openclank/operations/v1/artifact/read",
+        "_openclank/operations/v1/artifact/write",
+        "_openclank/operations/v1/executor/invoke",
+        "_openclank/operations/v1/execute"
+      ]
+    },
+    "capabilityDeclaration": {
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "providerStoreVersion",
+        "operationRouterVersion",
+        "schemaID",
+        "schemaVersion",
+        "schemaHash",
+        "methods",
+        "operations",
+        "artifactTransfer",
+        "localExecutor"
+      ],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "providerStoreVersion": { "const": 1 },
+        "operationRouterVersion": { "const": 1 },
+        "schemaID": { "const": "https://openclank.dev/contracts/managed-provider/v1" },
+        "schemaVersion": { "const": 1 },
+        "schemaHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "methods": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/managedMethod" },
+          "uniqueItems": true
+        },
+        "operations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/operation" },
+          "uniqueItems": true
+        },
+        "artifactTransfer": { "const": true },
+        "localExecutor": { "const": true }
+      },
+      "additionalProperties": false
+    },
+    "providerPrompt": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "key", "message"],
+          "properties": {
+            "type": { "const": "text" },
+            "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "placeholder": { "type": "string", "maxLength": 256 },
+            "when": {
+              "type": "object",
+              "required": ["key", "op", "value"],
+              "properties": {
+                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "op": { "enum": ["eq", "neq"] },
+                "value": { "type": "string", "maxLength": 256 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "key", "message", "options"],
+          "properties": {
+            "type": { "const": "select" },
+            "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 128,
+              "items": {
+                "type": "object",
+                "required": ["label", "value"],
+                "properties": {
+                  "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+                  "value": { "type": "string", "maxLength": 256 },
+                  "hint": { "type": "string", "maxLength": 512 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "when": {
+              "type": "object",
+              "required": ["key", "op", "value"],
+              "properties": {
+                "key": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "op": { "enum": ["eq", "neq"] },
+                "value": { "type": "string", "maxLength": 256 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "providerAuthMethod": {
+      "type": "object",
+      "required": ["id", "type", "label"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "type": { "enum": ["api", "oauth", "none"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "prompts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/providerPrompt" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "providerFamily": {
+      "type": "object",
+      "required": ["id", "displayName", "adapters", "kinds", "billingLanes", "authMethods", "modelCount"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "adapters": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "kinds": { "type": "array", "minItems": 1, "items": { "enum": ["official", "subscription", "custom_gateway", "local"] }, "uniqueItems": true },
+        "billingLanes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/billingLane" }, "uniqueItems": true },
+        "authMethods": { "type": "array", "items": { "$ref": "#/$defs/providerAuthMethod" } },
+        "modelCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "familyCatalogResult": {
+      "type": "object",
+      "required": ["schemaVersion", "families"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "families": { "type": "array", "items": { "$ref": "#/$defs/providerFamily" } }
+      },
+      "additionalProperties": false
+    },
+    "connectionValidationRequest": {
+      "type": "object",
+      "required": ["familyID", "adapterID", "kind", "billingLane", "settings"],
+      "properties": {
+        "familyID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "adapterID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "enum": ["official", "subscription", "custom_gateway", "local"] },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "url": { "type": ["string", "null"], "maxLength": 2048 },
+        "settings": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "providerModelRoute": {
+      "type": "object",
+      "required": ["modelID", "displayName", "operations", "capabilities", "provenance"],
+      "properties": {
+        "modelID": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s\\u0000]+$" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/operation" }
+        },
+        "capabilities": { "type": "object" },
+        "provenance": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "connectionValidationResult": {
+      "type": "object",
+      "required": ["familyID", "adapterID", "kind", "billingLane", "settings", "credentialRequired", "modelRoutes"],
+      "properties": {
+        "familyID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "adapterID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "kind": { "enum": ["official", "subscription", "custom_gateway", "local"] },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "normalizedURL": { "type": "string", "maxLength": 2048 },
+        "settings": { "type": "object" },
+        "credentialRequired": { "type": "boolean" },
+        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } }
+      },
+      "additionalProperties": false
+    },
+    "accountValidationRequest": {
+      "type": "object",
+      "required": ["connection", "authMethod", "credential"],
+      "properties": {
+        "connection": { "$ref": "#/$defs/connectionValidationRequest" },
+        "authMethod": { "const": "api_key" },
+        "credential": { "$ref": "#/$defs/authInfo" }
+      },
+      "additionalProperties": false
+    },
+    "accountValidationResult": {
+      "type": "object",
+      "required": ["authMethod", "authClass", "credential", "safeIdentity", "modelRoutes"],
+      "properties": {
+        "authMethod": { "enum": ["api_key", "oauth"] },
+        "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "credential": { "$ref": "#/$defs/authInfo" },
+        "safeIdentity": { "type": "object", "additionalProperties": { "type": "string" } },
+        "modelRoutes": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/providerModelRoute" } }
+      },
+      "additionalProperties": false
+    },
+    "oauthStartRequest": {
+      "type": "object",
+      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "method", "redirectURI", "state", "nonce", "codeVerifierChallenge", "expiresAt", "inputs"],
+      "properties": {
+        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "mode": { "enum": ["add", "reauth"] },
+        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "method": { "type": "integer", "minimum": 0 },
+        "redirectURI": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "state": { "type": "string", "minLength": 16, "maxLength": 256 },
+        "nonce": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "codeVerifierChallenge": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "expiresAt": { "type": "integer", "minimum": 1 },
+        "inputs": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 4096 } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
+          "then": { "required": ["targetAccountID", "expectedRevision"] },
+          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "oauthStartResult": {
+      "type": "object",
+      "required": ["flowID", "url", "method", "instructions", "expiresAt"],
+      "properties": {
+        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "url": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "method": { "enum": ["auto", "code"] },
+        "instructions": { "type": "string", "maxLength": 4096 },
+        "expiresAt": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "oauthCompletionRequest": {
+      "type": "object",
+      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "nonce", "codeVerifier"],
+      "properties": {
+        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "mode": { "enum": ["add", "reauth"] },
+        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "nonce": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "codeVerifier": { "type": "string", "minLength": 43, "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 131072 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
+          "then": { "required": ["targetAccountID", "expectedRevision"] },
+          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "oauthCompletionResult": {
+      "type": "object",
+      "required": ["flowID", "connectionID", "providerID", "billingLane", "mode", "status"],
+      "properties": {
+        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "connectionID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "providerID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "mode": { "enum": ["add", "reauth"] },
+        "targetAccountID": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["pending", "running", "complete", "failed", "cancelled", "expired"] },
+        "credential": { "$ref": "#/$defs/authInfo" },
+        "authMethod": { "const": "oauth" },
+        "authClass": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "safeIdentity": { "type": "object", "additionalProperties": { "type": "string" } },
+        "errorCode": { "enum": ["oauth_exchange_failed", "oauth_expired", "oauth_cancelled"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "reauth" } }, "required": ["mode"] },
+          "then": { "required": ["targetAccountID", "expectedRevision"] },
+          "else": { "not": { "anyOf": [{ "required": ["targetAccountID"] }, { "required": ["expectedRevision"] }] } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": { "required": ["credential", "authMethod", "authClass", "safeIdentity"] },
+          "else": { "not": { "anyOf": [{ "required": ["credential"] }, { "required": ["authMethod"] }, { "required": ["authClass"] }, { "required": ["safeIdentity"] }] } }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "oauthCancelResult": {
+      "type": "object",
+      "required": ["flowID", "status"],
+      "properties": {
+        "flowID": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "status": { "const": "cancelled" }
+      },
+      "additionalProperties": false
+    },
+    "accountSelectionRequest": {
+      "type": "object",
+      "required": ["rootOperationID", "connectionID", "providerID", "billingLane", "modelID"],
+      "properties": {
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "providerID": { "type": "string", "minLength": 1 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "modelID": { "type": "string", "minLength": 1 },
+        "preferredAccountID": { "type": "string", "minLength": 1 },
+        "inheritedAccountID": { "type": "string", "minLength": 1 },
+        "grantID": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "accountCommitRequest": {
+      "type": "object",
+      "required": ["bindingID", "expectedRevision"],
+      "properties": {
+        "bindingID": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "accountAttemptRequest": {
+      "type": "object",
+      "required": ["bindingID", "expectedRevision", "outcome"],
+      "properties": {
+        "bindingID": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "integer", "minimum": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["success", "auth", "quota", "entitlement", "transient", "unknown"] },
+        "retryAfterMs": { "type": "integer", "minimum": 0 },
+        "modelEligible": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "accountBinding": {
+      "type": "object",
+      "required": [
+        "bindingID",
+        "bindingRevision",
+        "rootOperationID",
+        "connectionID",
+        "providerID",
+        "billingLane",
+        "modelID",
+        "credentialRequired",
+        "source",
+        "attempt",
+        "committed"
+      ],
+      "properties": {
+        "bindingID": { "type": "string", "minLength": 1 },
+        "bindingRevision": { "type": "number", "minimum": 1 },
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "providerID": { "type": "string", "minLength": 1 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "modelID": { "type": "string", "minLength": 1 },
+        "credentialRequired": { "type": "boolean" },
+        "accountID": { "type": "string", "minLength": 1 },
+        "credentialRevision": { "type": "number", "minimum": 1 },
+        "source": { "enum": ["round_robin", "preferred", "inherited", "failover", "keyless"] },
+        "attempt": { "type": "number", "minimum": 1 },
+        "committed": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "credentialRequired": { "const": true } },
+            "required": ["credentialRequired"]
+          },
+          "then": {
+            "required": ["accountID", "credentialRevision"],
+            "properties": {
+              "source": {
+                "enum": ["round_robin", "preferred", "inherited", "failover"]
+              }
+            }
+          },
+          "else": {
+            "properties": { "source": { "const": "keyless" } },
+            "not": {
+              "anyOf": [
+                { "required": ["accountID"] },
+                { "required": ["credentialRevision"] }
+              ]
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "credentialLeaseRequest": {
+      "type": "object",
+      "required": [
+        "rootOperationID",
+        "connectionID",
+        "accountID",
+        "modelID",
+        "expectedCredentialRevision"
+      ],
+      "properties": {
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "modelID": { "type": "string", "minLength": 1 },
+        "grantID": { "type": "string", "minLength": 1 },
+        "expectedCredentialRevision": { "type": "number", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "credentialLeaseResult": {
+      "type": "object",
+      "required": [
+        "leaseID",
+        "connectionID",
+        "accountID",
+        "credentialRevision",
+        "expiresAt",
+        "credential"
+      ],
+      "properties": {
+        "leaseID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "credentialRevision": { "type": "number", "minimum": 1 },
+        "expiresAt": { "type": "number" },
+        "credential": { "$ref": "#/$defs/authInfo" }
+      },
+      "additionalProperties": false
+    },
+    "credentialReplaceRequest": {
+      "type": "object",
+      "required": ["connectionID", "accountID", "expectedRevision", "credential"],
+      "properties": {
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "number", "minimum": 1 },
+        "credential": { "$ref": "#/$defs/authInfo" }
+      },
+      "additionalProperties": false
+    },
+    "refreshAcquireRequest": {
+      "type": "object",
+      "required": ["connectionID", "accountID", "expectedRevision"],
+      "properties": {
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "number", "minimum": 1 },
+        "ttlMs": { "type": "number", "minimum": 1, "maximum": 60000 }
+      },
+      "additionalProperties": false
+    },
+    "refreshRenewRequest": {
+      "type": "object",
+      "required": ["leaseID"],
+      "properties": {
+        "leaseID": { "type": "string", "minLength": 1 },
+        "ttlMs": { "type": "number", "minimum": 1, "maximum": 60000 }
+      },
+      "additionalProperties": false
+    },
+    "refreshCommitRequest": {
+      "type": "object",
+      "required": ["leaseID", "connectionID", "accountID", "expectedRevision", "credential"],
+      "properties": {
+        "leaseID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "expectedRevision": { "type": "number", "minimum": 1 },
+        "credential": { "$ref": "#/$defs/authInfo" }
+      },
+      "additionalProperties": false
+    },
+    "refreshAbortRequest": {
+      "type": "object",
+      "required": ["leaseID"],
+      "properties": {
+        "leaseID": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "refreshLease": {
+      "type": "object",
+      "required": [
+        "leaseID",
+        "connectionID",
+        "accountID",
+        "credentialRevision",
+        "expiresAt",
+        "renewable"
+      ],
+      "properties": {
+        "leaseID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "accountID": { "type": "string", "minLength": 1 },
+        "credentialRevision": { "type": "number", "minimum": 1 },
+        "expiresAt": { "type": "number" },
+        "renewable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "artifactDescriptor": {
+      "type": "object",
+      "required": ["artifactID", "contentSHA256", "sizeBytes", "mediaType", "state"],
+      "properties": {
+        "artifactID": { "type": "string", "minLength": 1 },
+        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "state": { "enum": ["staged", "acknowledged"] },
+        "expiresAt": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "operationJournalRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "action", "rootOperationID", "operation", "idempotencyKey", "request",
+            "connectionID", "billingLane", "modelRouteID"
+          ],
+          "properties": {
+            "action": { "const": "begin" },
+            "rootOperationID": { "type": "string", "minLength": 1 },
+            "operation": { "$ref": "#/$defs/operation" },
+            "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 },
+            "request": { "type": "object" },
+            "connectionID": { "type": "string", "minLength": 1 },
+            "billingLane": { "$ref": "#/$defs/billingLane" },
+            "modelRouteID": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "operationID", "expectedRevision"],
+          "properties": {
+            "action": { "const": "cas" },
+            "operationID": { "type": "string", "minLength": 1 },
+            "expectedRevision": { "type": "integer", "minimum": 1 },
+            "state": { "enum": ["pending", "running", "complete", "failed", "cancelled"] },
+            "bindingID": { "type": "string", "minLength": 1 },
+            "selectedAccountID": { "type": "string", "minLength": 1 },
+            "attempt": { "type": "object" },
+            "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "artifactID": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operationJournalResult": {
+      "type": "object",
+      "required": [
+        "operationID", "rootOperationID", "operation", "requestHash", "connectionID",
+        "billingLane", "modelRouteID", "state", "committed", "attempts", "artifactIDs",
+        "revision", "replayed"
+      ],
+      "properties": {
+        "operationID": { "type": "string", "minLength": 1 },
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "operation": { "$ref": "#/$defs/operation" },
+        "requestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "modelRouteID": { "type": "string", "minLength": 1 },
+        "bindingID": { "type": "string", "minLength": 1 },
+        "selectedAccountID": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["pending", "running", "complete", "failed", "cancelled"] },
+        "committed": { "type": "boolean" },
+        "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "attempts": { "type": "array", "items": { "type": "object" } },
+        "artifactIDs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "revision": { "type": "integer", "minimum": 1 },
+        "replayed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "artifactReadRequest": {
+      "type": "object",
+      "required": ["artifactID", "offset", "limit"],
+      "properties": {
+        "artifactID": { "type": "string", "minLength": 1 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 8388608 }
+      },
+      "additionalProperties": false
+    },
+    "artifactReadResult": {
+      "type": "object",
+      "required": [
+        "artifactID", "contentSHA256", "sizeBytes", "mediaType", "offset",
+        "dataBase64", "chunkSHA256", "eof"
+      ],
+      "properties": {
+        "artifactID": { "type": "string", "minLength": 1 },
+        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "dataBase64": { "type": "string" },
+        "chunkSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "eof": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "artifactWriteRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["action", "mediaType", "contentSHA256", "sizeBytes", "chunks"],
+          "properties": {
+            "action": { "const": "put" },
+            "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+            "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
+            "chunks": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["index", "dataBase64", "sha256"],
+                "properties": {
+                  "index": { "type": "integer", "minimum": 0 },
+                  "dataBase64": { "type": "string" },
+                  "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["action", "artifactID"],
+          "properties": {
+            "action": { "const": "acknowledge" },
+            "artifactID": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "executorInvokeRequest": {
+      "type": "object",
+      "required": ["executorID", "operation", "artifactIDs", "options"],
+      "properties": {
+        "executorID": { "type": "string", "minLength": 1 },
+        "operation": { "$ref": "#/$defs/operation" },
+        "artifactIDs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "options": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "operationRouteContext": {
+      "type": "object",
+      "required": ["connectionID", "providerID", "billingLane", "modelRouteID", "modelID"],
+      "properties": {
+        "connectionID": { "type": "string", "minLength": 1 },
+        "providerID": { "type": "string", "minLength": 1 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "modelRouteID": { "type": "string", "minLength": 1 },
+        "modelID": { "type": "string", "minLength": 1 },
+        "grantID": { "type": "string", "minLength": 1 },
+        "preferredAccountID": { "type": "string", "minLength": 1 },
+        "inheritedAccountID": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "operationArtifactInput": {
+      "type": "object",
+      "required": ["name", "artifactID", "contentSHA256", "sizeBytes", "mediaType"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "artifactID": { "type": "string", "minLength": 1 },
+        "contentSHA256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "additionalProperties": false
+    },
+    "operationExecuteRequest": {
+      "type": "object",
+      "required": ["rootOperationID", "idempotencyKey", "operation", "routes", "input", "artifactInputs", "options"],
+      "properties": {
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "idempotencyKey": { "type": "string", "minLength": 16, "maxLength": 128 },
+        "operation": { "$ref": "#/$defs/operation" },
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/operationRouteContext" }
+        },
+        "input": { "type": "object" },
+        "artifactInputs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/operationArtifactInput" }
+        },
+        "options": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "operationExecuteResult": {
+      "type": "object",
+      "required": [
+        "operationID", "rootOperationID", "operation", "modelRouteID", "connectionID",
+        "billingLane", "state", "committed", "output", "artifacts", "replayed"
+      ],
+      "properties": {
+        "operationID": { "type": "string", "minLength": 1 },
+        "rootOperationID": { "type": "string", "minLength": 1 },
+        "operation": { "$ref": "#/$defs/operation" },
+        "modelRouteID": { "type": "string", "minLength": 1 },
+        "connectionID": { "type": "string", "minLength": 1 },
+        "billingLane": { "$ref": "#/$defs/billingLane" },
+        "state": { "enum": ["complete", "failed", "cancelled"] },
+        "committed": { "type": "boolean" },
+        "commitReason": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "bindingID": { "type": "string", "minLength": 1 },
+        "selectedAccountID": { "type": "string", "minLength": 1 },
+        "output": { "type": "object" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifactDescriptor" } },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "inputTokens": { "type": "integer", "minimum": 0 },
+            "outputTokens": { "type": "integer", "minimum": 0 },
+            "totalTokens": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "modelFingerprint": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "dimension": { "type": "integer", "minimum": 1 },
+        "replayed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "x-openclank-methods": {
+    "_openclank/provider-control/v1/catalog": {
+      "request": "empty object",
+      "result": "#/$defs/familyCatalogResult"
+    },
+    "_openclank/provider-control/v1/connection/validate": {
+      "request": "#/$defs/connectionValidationRequest",
+      "result": "#/$defs/connectionValidationResult"
+    },
+    "_openclank/provider-control/v1/account/validate": {
+      "request": "#/$defs/accountValidationRequest",
+      "result": "#/$defs/accountValidationResult"
+    },
+    "_openclank/provider-control/v1/oauth/start": {
+      "request": "#/$defs/oauthStartRequest",
+      "result": "#/$defs/oauthStartResult"
+    },
+    "_openclank/provider-control/v1/oauth/poll": {
+      "request": "#/$defs/oauthCompletionRequest",
+      "result": "#/$defs/oauthCompletionResult"
+    },
+    "_openclank/provider-control/v1/oauth/callback": {
+      "request": "#/$defs/oauthCompletionRequest",
+      "result": "#/$defs/oauthCompletionResult"
+    },
+    "_openclank/provider-control/v1/oauth/cancel": {
+      "request": "#/$defs/oauthCompletionRequest",
+      "result": "#/$defs/oauthCancelResult"
+    },
+    "_openclank/provider-store/v1/account/bind": {
+      "request": "#/$defs/accountSelectionRequest",
+      "result": "#/$defs/accountBinding"
+    },
+    "_openclank/provider-store/v1/account/commit": {
+      "request": "#/$defs/accountCommitRequest",
+      "result": "#/$defs/accountBinding"
+    },
+    "_openclank/provider-store/v1/account/attempt": {
+      "request": "#/$defs/accountAttemptRequest",
+      "result": "#/$defs/accountBinding"
+    },
+    "_openclank/provider-store/v1/credential/lease": {
+      "request": "#/$defs/credentialLeaseRequest",
+      "result": "#/$defs/credentialLeaseResult"
+    },
+    "_openclank/provider-store/v1/credential/replace": {
+      "request": "#/$defs/credentialReplaceRequest",
+      "result": "#/$defs/account"
+    },
+    "_openclank/provider-store/v1/refresh/acquire": {
+      "request": "#/$defs/refreshAcquireRequest",
+      "result": "#/$defs/refreshLease"
+    },
+    "_openclank/provider-store/v1/refresh/renew": {
+      "request": "#/$defs/refreshRenewRequest",
+      "result": "#/$defs/refreshLease"
+    },
+    "_openclank/provider-store/v1/refresh/commit": {
+      "request": "#/$defs/refreshCommitRequest",
+      "result": "#/$defs/account"
+    },
+    "_openclank/provider-store/v1/refresh/abort": {
+      "request": "#/$defs/refreshAbortRequest",
+      "result": "empty object"
+    },
+    "_openclank/operations/v1/journal/cas": {
+      "request": "#/$defs/operationJournalRequest",
+      "result": "#/$defs/operationJournalResult"
+    },
+    "_openclank/operations/v1/artifact/read": {
+      "request": "#/$defs/artifactReadRequest",
+      "result": "#/$defs/artifactReadResult"
+    },
+    "_openclank/operations/v1/artifact/write": {
+      "request": "#/$defs/artifactWriteRequest",
+      "result": "#/$defs/artifactDescriptor"
+    },
+    "_openclank/operations/v1/executor/invoke": {
+      "request": "#/$defs/executorInvokeRequest",
+      "result": "#/$defs/artifactDescriptor"
+    },
+    "_openclank/operations/v1/execute": {
+      "request": "#/$defs/operationExecuteRequest",
+      "result": "#/$defs/operationExecuteResult"
+    }
+  }
+}

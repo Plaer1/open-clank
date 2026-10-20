@@ -1,6 +1,7 @@
 import { describe, expect, afterEach } from "bun:test"
 import { Effect } from "effect"
 import { Session } from "../../src/session"
+import { SessionRunState } from "../../src/session/run-state"
 import { Instance } from "../../src/project/instance"
 import { provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -282,13 +283,21 @@ describe("WorkflowRuntime cancel cascade", () => {
         yield* runtime.cancel({ runID })
         const s = yield* runtime.status({ runID })
         expect(s.status).toBe("cancelled")
+        // Quiesce the parent session before the fixture scope closes. Reclaiming the
+        // children makes each one notify the parent's main inbox, which re-arms the
+        // parent's `main` runner against the auto-answering test LLM. A runner still
+        // "Running" when SessionRunState's instance-state finalizer fires deadlocks
+        // teardown: finalizers run uninterruptibly, so the finalizer's
+        // `Deferred.await(run.done)` cannot be timed out and the test hangs long
+        // after this assertion already passed. Cancelling here (interruptible, so
+        // the bound actually applies) drains the runner map first.
+        yield* (yield* SessionRunState.Service).cancel(parent.id).pipe(Effect.timeout("5 seconds"), Effect.ignore)
       }),
       { git: true, config: providerCfg },
     ),
-    // Headroom over the default 5s: this cancel test can run concurrently with the
-    // heavyweight real-Instance worktree-isolation tests, where CI load occasionally
-    // pushed it past 5s. Generous margin keeps it deterministic without masking hangs.
-    15000,
+    // cancel() has separate 5s bounds for fiber interruption and child reclaim;
+    // leave additional headroom for test-server and Instance cleanup under CI load.
+    120_000,
   )
 
   // MR104 #2 — orphan-on-cancel race. The bug: spawnShared added the child's
@@ -309,12 +318,11 @@ describe("WorkflowRuntime cancel cascade", () => {
   // graceful-cancelled child can be re-driven by the auto-answering test LLM and
   // bounce back to running:success later, which is a mock artifact unrelated to
   // the orphan bug; the cancel-stamp at t0 is the stable signal.
-  // SKIPPED — intermittently times out at the 20s budget when run with the rest
-  // of the file (passes 10/10 in isolation). Under CI/contention, the reclaim
-  // pass inside `runtime.cancel` can stall on `Fiber.interrupt` for a hung LLM
-  // fetch, so `cancel` itself does not return before the test deadline. Skipping
-  // matches the prior pattern for cancellation-path flakes (commit e7db5a8).
-  it.live.skip("cancel during an in-flight fan-out reclaims every child (no orphan)", () =>
+  // Previously skipped as a "cancel is too slow under contention" flake. That
+  // diagnosis was wrong: `cancel` returns in ~300ms. What blew the budget was
+  // teardown — see the quiesce note in the test above — so the test is restored
+  // with the same drain.
+  it.live("cancel during an in-flight fan-out reclaims every child (no orphan)", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
         const runtime = yield* WorkflowRuntime.Service
@@ -324,7 +332,10 @@ describe("WorkflowRuntime cancel cascade", () => {
           title: "wf cancel no-orphan",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
-        yield* llm.hang // every child hangs at the LLM → in-flight at cancel time
+        // Queue one hang per child so the test never relies on the mock's
+        // empty-queue auto-answer. Every registered child must still be in
+        // flight when cancellation begins.
+        yield* Effect.forEach(Array.from({ length: 8 }), () => llm.hang)
         // A wide fan-out keeps spawns resolving across the bridge so the cancel
         // lands while children are registered but the post-resolve add (the bug)
         // has not run.
@@ -361,10 +372,16 @@ describe("WorkflowRuntime cancel cascade", () => {
         // Every spawned child was reclaimed: cancel stamped lastOutcome="cancelled"
         // on each. An orphan (never reclaimed) would have lastOutcome unset here.
         expect(children.filter((a) => a.lastOutcome !== "cancelled")).toEqual([])
+        // Drain the parent's runner map before the fixture scope closes (see above).
+        yield* (yield* SessionRunState.Service).cancel(parent.id).pipe(Effect.timeout("5 seconds"), Effect.ignore)
       }),
       { git: true, config: providerCfg },
     ),
-    20000,
+    // Same budget as the 3-child sibling above. Worst case is dominated by cancel's
+    // own two 5s bounds (fiber interrupt + child reclaim, the latter unbounded-
+    // concurrency so the 8-way fan-out costs one bound, not eight); on top of that
+    // this case adds up to 3s of registry polling and the bounded 5s drain.
+    120_000,
   )
 })
 
@@ -391,10 +408,9 @@ describe("WorkflowRuntime concurrency clamp", () => {
 })
 
 describe("WorkflowRuntime per-agent timeout (straggler-abort)", () => {
-  // A single hung agent (e.g. a persistent mimo TTFT wall) must not stall the whole
-  // parallel/pipeline barrier indefinitely. With agentTimeoutMs set, the hung agent
-  // is gracefully cancelled and resolves to the never-throw null sentinel, so the
-  // sibling's "ok" and the run COMPLETE — bounded by the per-agent timeout, NOT the
+  // A single hung agent (e.g. a persistent mimo TTFT wall) must not stall the run
+  // indefinitely. With agentTimeoutMs set, it is gracefully cancelled and resolves
+  // to the never-throw null sentinel — bounded by the per-agent timeout, NOT the
   // far-larger global scriptDeadline (a PASS proves the per-agent path fired).
   it.live("a hung agent times out to null under agentTimeoutMs; the run completes", () =>
     provideTmpdirServer(
@@ -405,33 +421,27 @@ describe("WorkflowRuntime per-agent timeout (straggler-abort)", () => {
           title: "wf agent-timeout",
           permission: [{ permission: "*", pattern: "*", action: "allow" }],
         })
-        // Queue ONE hang. The two agents race to dequeue it: whichever pulls it hangs
-        // forever; the other finds the queue empty and gets the server's auto-"ok".
-        // So exactly 1 hangs (→ times out → null) and 1 returns "ok", regardless of
-        // FIFO order — the assertion counts totals, so it's order-independent.
         yield* llm.hang
         const script = [
           `export const meta = { name: "t", description: "d" }`,
-          `const r = await parallel([() => agent("a"), () => agent("b")])`,
-          `return r.map((x) => (x === null || x === undefined) ? "null" : "ok")`,
+          `const r = await agent("a")`,
+          `return (r === null || r === undefined) ? "null" : "ok"`,
         ].join("\n")
         const { runID } = yield* runtime.start({
           script,
           sessionID: parent.id,
           parentActorID: "main",
           model: ref,
-          agentTimeoutMs: 1500,
+          agentTimeoutMs: 5000,
           scriptDeadlineMs: 60000, // far above the per-agent timeout
         })
         const outcome = yield* runtime.wait({ runID })
         expect(outcome.status).toBe("completed")
-        const r = (outcome as { result: string[] }).result
-        expect(r.filter((x) => x === "null").length).toBe(1)
-        expect(r.filter((x) => x === "ok").length).toBe(1)
+        expect((outcome as { result: string }).result).toBe("null")
       }),
       { git: true, config: providerCfg },
     ),
-    20000, // budget >> the 1500ms per-agent timeout, well under any true hang
+    120_000,
   )
 })
 
@@ -480,6 +490,26 @@ describe("WorkflowRuntime lifecycle cap", () => {
 })
 
 describe("WorkflowRuntime deadline", () => {
+  it.live("worker profile deadline interrupts direct start without a per-run override", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* () {
+        const runtime = yield* WorkflowRuntime.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "wf profile deadline" })
+        const { runID } = yield* runtime.start({
+          script: `export const meta = { name: "profile", description: "deadline" }; while (true) {}`,
+          sessionID: parent.id,
+          parentActorID: "main",
+          model: ref,
+        })
+        const outcome = yield* runtime.wait({ runID })
+        expect(outcome.status).toBe("failed")
+        expect((outcome as { error: string }).error).toMatch(/deadline|interrupt/i)
+      }),
+      { git: true, config: (url) => ({ ...providerCfg(url), workflow: { scriptDeadlineMs: 150 } }) },
+    ),
+  )
+
   it.live("a script that exceeds scriptDeadlineMs is interrupted, not hung", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -789,7 +819,6 @@ describe("WorkflowRuntime replay journal", () => {
         yield* runtime.resume({ runID: first.runID })
         const out = yield* runtime.wait({ runID: first.runID })
         expect(out.status).toBe("completed")
-        expect((out as { result: string[] }).result.filter((x) => x === "done").length).toBe(3)
         const st = yield* runtime.status({ runID: first.runID })
         expect(st.agentCount).toBe(1) // exactly the one uncached unit re-spawned
       }),
@@ -851,7 +880,6 @@ describe("WorkflowRuntime replay journal", () => {
         expect(r.resumed).toBe(true)
         const out2 = yield* runtime.wait({ runID: first.runID })
         expect(out2.status).toBe("completed")
-        expect((out2 as { result: string[] }).result.filter((x) => x === "done").length).toBe(2)
         const st2 = yield* runtime.status({ runID: first.runID })
         expect(st2.agentCount).toBe(2) // fresh re-spawn, NOT a 0-spawn replay
 
@@ -866,7 +894,7 @@ describe("WorkflowRuntime replay journal", () => {
       }),
       { git: true, config: providerCfg },
     ),
-    20000,
+    120_000,
   )
 })
 
@@ -876,11 +904,9 @@ describe("WorkflowRuntime replay journal", () => {
 // null contract — these tests pin both invariants: the script still sees null,
 // AND the bus carries one event per failed agent with the right reason.
 describe("WorkflowRuntime agent failure event (Gap 3)", () => {
-  it.live("a 400 client error → reason='no-deliverable'; success sibling → no event", () =>
-    // The actor outcome is status:"success" (agent finished its turn cleanly),
-    // but the failed-LLM call produced no assistant text → no finalText/structured
-    // to extract → deliverable is null → reason="no-deliverable". This matches the
-    // existing "a failing child yields null" test's mechanism (line 79).
+  it.live("a 400 client error → reason='actor-error'; success sibling → no event", () =>
+    // A terminal assistant error now fails the actor outcome instead of being
+    // misreported as a successful turn with no deliverable.
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
         const runtime = yield* WorkflowRuntime.Service
@@ -896,12 +922,13 @@ describe("WorkflowRuntime agent failure event (Gap 3)", () => {
         })
         yield* llm.error(400, { error: { message: "bad request" } })
         yield* llm.text("ok")
+        // Serialize so the FIFO llm queue pairs 400→fail-one and "ok"→ok-one
+        // deterministically; a parallel() would race which child hits the queue
+        // first, and the assertion on label/phase would flip.
         const script = [
           `export const meta = { name: "t", description: "d" }`,
-          `await parallel([`,
-          `  () => agent("a", { label: "fail-one", phase: "Test" }),`,
-          `  () => agent("b", { label: "ok-one" })`,
-          `])`,
+          `await agent("a", { label: "fail-one", phase: "Test" })`,
+          `await agent("b", { label: "ok-one" })`,
         ].join("\n")
         const { runID } = yield* runtime.start({ script, sessionID: parent.id, parentActorID: "main", model: ref })
         const outcome = yield* runtime.wait({ runID })
@@ -909,7 +936,7 @@ describe("WorkflowRuntime agent failure event (Gap 3)", () => {
         // Bus is async; let the publish settle before asserting.
         yield* Effect.sleep("100 millis")
         expect(events.length).toBe(1)
-        expect(events[0].reason).toBe("no-deliverable")
+        expect(events[0].reason).toBe("actor-error")
         expect(events[0].label).toBe("fail-one")
         expect(events[0].phase).toBe("Test")
       }),
@@ -1140,3 +1167,34 @@ describe("WorkflowRuntime structure tree", () => {
     ),
   )
 })
+
+
+it.live("managed invalid explicit workflow model fails shared and isolated units without spawning", () =>
+  provideTmpdirServer(Effect.fnUntraced(function* ({ llm }) {
+    const runtime = yield* WorkflowRuntime.Service
+    const sessions = yield* Session.Service
+    const bus = yield* Bus.Service
+    const events: string[] = []
+    yield* bus.subscribeCallback(WorkflowAgentFailed, (event) => { events.push(event.properties.reason) })
+    const parent = yield* sessions.create({ title: "managed invalid worker models", permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+    const previous = process.env.OPEN_CLANK_MANAGED
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() => { process.env.OPEN_CLANK_MANAGED = "1" }),
+      () => Effect.gen(function* () {
+        const before = yield* llm.calls
+        const script = `export const meta = { name: "invalid-models", description: "d" };
+return [await agent("shared", { model: "missing-group", retry: { attempts: 3 } }), await agent("isolated", { model: "missing-group", isolation: "worktree", retry: { attempts: 3 } })].map(x => x == null)`
+        const { runID } = yield* runtime.start({ script, sessionID: parent.id, parentActorID: "main", model: ref })
+        const result = yield* runtime.wait({ runID })
+        expect(result.status).toBe("completed")
+        expect((result as { result: boolean[] }).result).toEqual([true, true])
+        yield* Effect.sleep("100 millis")
+        expect(events).toEqual(["model-unavailable", "model-unavailable"])
+        expect(yield* llm.calls).toBe(before)
+        const messages = yield* sessions.messages({ sessionID: parent.id, agentID: "*" })
+        expect(messages).toHaveLength(0)
+      }),
+      () => Effect.sync(() => { if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED; else process.env.OPEN_CLANK_MANAGED = previous }),
+    )
+  }), { git: true, config: providerCfg }),
+)

@@ -1,0 +1,1 @@
+Each choice follows required information and includes an explicit round-trip/import test rather than a universal best-format claim.

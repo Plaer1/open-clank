@@ -1,0 +1,1 @@
+Actual build and runs show effective2/8 with exit0;11 exits2 without output. Distinguish the embedded label from the selected runtime value, and identify unchecked parsing's limitation.

@@ -1,0 +1,1 @@
+Give 0 and 6; values above half the maximum exceed the result range.

@@ -1,0 +1,418 @@
+{
+  "id": "batch-004",
+  "group": "chat",
+  "surface": "chat",
+  "entry_count": 29,
+  "character_count": 1900,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.use.the.button.in.the.model.picker.to.add.a",
+      "source": "- Use the `+` button in the model picker to add a model endpoint",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1342",
+        "static/js/chat.js:1353"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.used",
+      "source": "used",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1954"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.context.used.click.for.details",
+      "source": "{0}% context used — click for details",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1994"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.lines.721c004f",
+      "source": "({0} lines)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2225"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m",
+      "source": "{0}m",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4262"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.value.s",
+      "source": "{0}m {1}s",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3169",
+        "static/js/chat.js:542"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.requests.queued",
+      "source": "{0} requests queued",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:997"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.s",
+      "source": "{0}s",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3169",
+        "static/js/chat.js:4262",
+        "static/js/chat.js:542",
+        "static/js/chatRenderer.js:1901",
+        "static/js/chatRenderer.js:1945",
+        "static/js/chatRenderer.js:1946",
+        "static/js/markdown.js:345"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.s.b5c7a5e2",
+      "source": "{7}s",
+      "placeholders": [
+        "7"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1944"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.tok.s",
+      "source": "{0} tok/s",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1897"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.tokens",
+      "source": "{5} tokens",
+      "placeholders": [
+        "5"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1942"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.tokens.edfea080",
+      "source": "{7} tokens",
+      "placeholders": [
+        "7"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.tokens.value",
+      "source": "{1} tokens{2}",
+      "placeholders": [
+        "1",
+        "2"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1940"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.tokens.value.46cd4e3c",
+      "source": "{3} tokens{4}",
+      "placeholders": [
+        "3",
+        "4"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1941"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.total",
+      "source": "{3} total",
+      "placeholders": [
+        "3"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2022"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.used",
+      "source": "{2} used",
+      "placeholders": [
+        "2"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2021"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verifying.model.value",
+      "source": "Verifying model: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2738",
+        "static/js/chat.js:5520"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.view.edit.ocr.text",
+      "source": "View / edit OCR text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.view.thinking.process",
+      "source": "View thinking process",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2342",
+        "static/js/chat.js:2639",
+        "static/js/chat.js:3066",
+        "static/js/markdown.js:350"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vision.381188ee",
+      "source": "Vision:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2966",
+        "static/js/chat.js:2987",
+        "static/js/chatRenderer.js:180"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vision.text",
+      "source": "Vision text",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:307"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.web",
+      "source": "web",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.web.sources",
+      "source": "Web sources",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:953"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.window",
+      "source": "Window",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.writing.2dabb833",
+      "source": "Writing",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2056",
+        "static/js/chat.js:2057",
+        "static/js/chat.js:515"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.writing.c5a97c73",
+      "source": "Writing...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:501"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.writing.report.value.sources",
+      "source": "Writing report · {0} sources",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2750",
+        "static/js/chat.js:5532",
+        "static/js/compare/stream.js:279"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.wrote.reply.into.the.open.email",
+      "source": "Wrote reply into the open email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatStream.js:180"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.you",
+      "source": "You",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:926",
+        "static/js/chatRenderer.js:2811",
+        "static/js/compare/index.js:633",
+        "static/js/compare/index.js:853",
+        "static/js/compare/panes.js:93",
+        "static/js/search-chat.js:113",
+        "static/js/sessions.js:744"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

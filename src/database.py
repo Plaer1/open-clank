@@ -11,7 +11,6 @@ from core.database import (  # explicit re-exports for IDE/type-checker visibili
     ChatMessage,
     Document,
     DocumentVersion,
-    GalleryImage,
     ModelEndpoint,
     McpServer,
     Comparison,

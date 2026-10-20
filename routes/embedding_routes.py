@@ -1,19 +1,21 @@
 # routes/embedding_routes.py
-"""Routes for managing local fastembed embedding models and custom endpoints."""
+"""Cache management for registered local FastEmbed executor assets.
+
+Provider endpoints and credentials are managed exclusively through
+``/api/v1/providers/**``.  The retired ``/api/embeddings/endpoint`` route is
+intentionally absent.
+"""
 import os
-import json
 import shutil
 import logging
 import asyncio
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Form, Depends
-from core.constants import EMBEDDING_ENDPOINT_FILE, FASTEMBED_CACHE_DIR
+from fastapi import APIRouter, HTTPException, Depends
+from core.constants import FASTEMBED_CACHE_DIR
 from core.middleware import require_admin
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
-
-_ENDPOINT_FILE = EMBEDDING_ENDPOINT_FILE
 
 # Track in-progress downloads
 _downloading: dict = {}
@@ -76,8 +78,8 @@ def _is_downloaded(hf_source: str) -> bool:
 
 
 def _active_model() -> str:
-    """Get the currently configured fastembed model name."""
-    return os.environ.get("FASTEMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    """Return the fixed model behind the ``fastembed/default`` route."""
+    return "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def _dir_size_mb(path: str) -> float:
@@ -91,22 +93,6 @@ def _dir_size_mb(path: str) -> float:
             except OSError:
                 pass
     return round(total / (1024 * 1024), 1)
-
-
-def _load_custom_endpoint() -> dict:
-    """Load the saved custom embedding endpoint, if any."""
-    try:
-        if os.path.exists(_ENDPOINT_FILE):
-            data = json.loads(Path(_ENDPOINT_FILE).read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        pass
-    return {}
-
-
-def _save_custom_endpoint(data: dict):
-    Path(_ENDPOINT_FILE).parent.mkdir(parents=True, exist_ok=True)
-    Path(_ENDPOINT_FILE).write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def setup_embedding_routes():
@@ -240,137 +226,5 @@ def setup_embedding_routes():
         shutil.rmtree(model_path)
         logger.info(f"Deleted cached model: {model_name} ({model_path})")
         return {"deleted": True, "model": model_name}
-
-    @router.get("/endpoint")
-    def get_endpoint():
-        """Get the current custom embedding endpoint config."""
-        saved = _load_custom_endpoint()
-        current_url = os.environ.get("EMBEDDING_URL", "")
-        return {
-            "url": saved.get("url", current_url),
-            "model": saved.get("model", os.environ.get("EMBEDDING_MODEL", "")),
-            "active": bool(saved.get("url") or current_url),
-        }
-
-    @router.post("/endpoint")
-    def set_endpoint(url: str = Form(...), model: str = Form(""), api_key: str = Form("")):
-        """Save a custom embedding endpoint URL."""
-        url = url.strip()
-        if not url:
-            raise HTTPException(400, "URL is required")
-
-        # SSRF hardening: validate the user-supplied URL before any outbound
-        # request. Local-first means loopback/LAN endpoints are allowed by
-        # default; non-HTTP(S) schemes and the cloud metadata range are always
-        # rejected. Set EMBEDDING_BLOCK_PRIVATE_IPS=true for full lockdown.
-        from src.url_safety import check_outbound_url
-        ok, reason = check_outbound_url(
-            url,
-            block_private=os.getenv("EMBEDDING_BLOCK_PRIVATE_IPS", "false").lower() == "true",
-        )
-        if not ok:
-            raise HTTPException(400, f"Rejected endpoint URL: {reason}")
-
-        # Quick health check
-        try:
-            import httpx
-            resp = httpx.post(
-                url,
-                json={"input": ["test"], "model": model or "test"},
-                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-                timeout=10,
-            )
-            resp.raise_for_status()
-        except Exception as e:
-            raise HTTPException(400, f"Endpoint unreachable: {e}")
-
-        # Persist and set in environment for immediate use
-        data = {"url": url}
-        if model:
-            data["model"] = model
-        if api_key:
-            from src.secret_storage import encrypt
-            data["api_key"] = encrypt(api_key)
-
-        _save_custom_endpoint(data)
-        os.environ["EMBEDDING_URL"] = url
-        if model:
-            os.environ["EMBEDDING_MODEL"] = model
-        if api_key:
-            os.environ["EMBEDDING_API_KEY"] = api_key
-
-        # Reset the RAG singleton so it picks up the new endpoint
-        import src.rag_singleton as _rs
-        _rs.rag_instance = None
-        _rs._last_attempt = 0
-
-        # Clear the HTTP-embedding "down" latch so the new endpoint is re-probed
-        # instead of staying on the FastEmbed fallback for the process lifetime.
-        try:
-            from src.embeddings import reset_http_embed_state
-            reset_http_embed_state()
-        except Exception:
-            pass
-        try:
-            from src.embedding_lanes import reset_embedding_lane_state
-            reset_embedding_lane_state()
-        except Exception:
-            pass
-        try:
-            from src.tool_index import reset_tool_index
-            reset_tool_index()
-        except Exception:
-            pass
-
-        # Reset ChromaDB client (collections will be recreated with new embeddings)
-        try:
-            from src.chroma_client import reset_client
-            reset_client()
-        except Exception:
-            pass
-
-        logger.info(f"Custom embedding endpoint set: {url}")
-        return {"success": True, "url": url, "model": model}
-
-    @router.delete("/endpoint")
-    def clear_endpoint():
-        """Clear the custom endpoint and revert to local fastembed."""
-        if os.path.exists(_ENDPOINT_FILE):
-            os.remove(_ENDPOINT_FILE)
-
-        # Remove from environment
-        os.environ.pop("EMBEDDING_URL", None)
-        os.environ.pop("EMBEDDING_MODEL", None)
-        os.environ.pop("EMBEDDING_API_KEY", None)
-
-        # Reset the RAG singleton so it falls back to fastembed
-        import src.rag_singleton as _rs
-        _rs.rag_instance = None
-        _rs._last_attempt = 0
-        try:
-            from src.embeddings import reset_http_embed_state
-            reset_http_embed_state()
-        except Exception:
-            pass
-        try:
-            from src.embedding_lanes import reset_embedding_lane_state
-            reset_embedding_lane_state()
-        except Exception:
-            pass
-        try:
-            from src.tool_index import reset_tool_index
-            reset_tool_index()
-        except Exception:
-            pass
-
-        # Reset ChromaDB client
-        try:
-            from src.chroma_client import reset_client
-            reset_client()
-        except Exception:
-            pass
-
-        logger.info("Custom embedding endpoint cleared, reverting to local fastembed")
-        return {"success": True}
 
     return router

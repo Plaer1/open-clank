@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK DIAGNOSIS SUB-MODULE
 // Error pattern matching and diagnosis UI
@@ -34,32 +35,14 @@ function _diagEsc(s) {
 // renders on the LEFT of the button text. Keeps the strokes consistent
 // across the set so they read as one family.
 function _diagFixIcon(label) {
-  const l = String(label || '').toLowerCase();
-  const _svg = (path) => `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="cookbook-diag-btn-ico" aria-hidden="true">${path}</svg>`;
-  if (l.startsWith('retry') || l.includes('relaunch') || l.includes('restart')) {
-    // Circular-arrow refresh
-    return _svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>');
-  }
-  if (l.startsWith('copy')) {
-    return _svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>');
-  }
-  if (l.startsWith('edit')) {
-    return _svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>');
-  }
-  if (l.startsWith('open') || l.includes('dependencies')) {
-    return _svg('<path d="M14 3h7v7"/><path d="M21 3l-9 9"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>');
-  }
-  if (l.startsWith('install') || l.includes('upgrade')) {
-    return _svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>');
-  }
-  if (l.startsWith('kill') || l.startsWith('stop')) {
-    return _svg('<rect x="6" y="6" width="12" height="12" rx="1"/>');
-  }
-  if (l.startsWith('switch') || l.includes('use ')) {
-    return _svg('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>');
-  }
-  // Default: lightbulb (generic "suggestion")
-  return _svg('<path d="M9 21h6"/><path d="M12 17v4"/><path d="M12 3a6 6 0 0 0-4 10.5c1 1 1.5 2 1.5 3.5h5c0-1.5.5-2.5 1.5-3.5A6 6 0 0 0 12 3Z"/>');
+  const value = String(label || '').toLowerCase();
+  const id = value.startsWith('retry') || value.includes('relaunch') || value.includes('restart') ? 'refresh'
+    : value.startsWith('copy') ? 'copy' : value.startsWith('edit') ? 'edit'
+    : value.startsWith('open') || value.includes('dependencies') ? 'external'
+    : value.startsWith('install') || value.includes('upgrade') ? 'download'
+    : value.startsWith('kill') || value.startsWith('stop') ? 'stop'
+    : value.startsWith('switch') || value.includes('use ') ? 'swap' : 'lightbulb';
+  return uiIcon(id, 11, { className: 'cookbook-diag-btn-ico' });
 }
 import spinnerModule from './spinner.js';
 
@@ -261,17 +244,6 @@ async function _clearGpuProcesses(panel) {
   await _runQuickCmd(panel, _gpuCleanupCommand());
 }
 
-// Infer the gated base repo that single-file checkpoints need configs from
-function _inferBaseRepo(text) {
-  if (!text) return null;
-  const t = text.toLowerCase();
-  if (t.includes('sd3.5') || t.includes('stable-diffusion-3.5')) return 'stabilityai/stable-diffusion-3.5-large';
-  if (t.includes('sd3') || t.includes('stable-diffusion-3')) return 'stabilityai/stable-diffusion-3-medium-diffusers';
-  if (t.includes('flux')) return 'black-forest-labs/FLUX.1-schnell';
-  if (t.includes('sdxl') || t.includes('stable-diffusion-xl')) return 'stabilityai/stable-diffusion-xl-base-1.0';
-  return null;
-}
-
 export const ERROR_PATTERNS = [
   {
     pattern: /tmux is required|tmux.*not found|tmux:\s*command not found|command not found:\s*tmux|No such file or directory:\s*['"]?tmux/i,
@@ -372,7 +344,7 @@ export const ERROR_PATTERNS = [
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('vllm') },
       {
         label: 'Copy upgrade hint',
-        action: () => _copyText('Upgrade the vLLM environment that provides the selected vllm CLI, or use a compatible checkpoint. Do not assume Odysseus owns PATH/system/source/Docker installs.'),
+        action: () => _copyText('Upgrade the vLLM environment that provides the selected vllm CLI, or use a compatible checkpoint. Do not assume Open Clank owns PATH/system/source/Docker installs.'),
       },
     ],
   },
@@ -450,11 +422,10 @@ export const ERROR_PATTERNS = [
     message: 'Single-file checkpoint needs a base model for missing components (text encoder, VAE). The base model may be gated — accept the license and set your HF token.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
-        // Extract gated repo from error, or infer from model name
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
         const base = _text && _text.match(/config=([^\s,)]+)/i);
         const model = _text && _text.match(/load model from\s+(\S+)/i);
-        const repo = (gated && gated[1]) || (base && base[1]) || _inferBaseRepo(_text);
+        const repo = (gated && gated[1]) || (base && base[1]);
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else if (model && model[1]) window.open('https://huggingface.co/' + model[1].replace(/[.]$/, ''), '_blank');
       }},
@@ -465,12 +436,20 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed/i,
+    message: 'This image model uses a custom Diffusers pipeline that your launch environment does not know yet.',
+    fixes: [
+      { label: 'Update image dependencies', action: () => _openCookbookDependencies('diffusers') },
+      { label: 'Copy diagnosis', action: (_panel, _text) => navigator.clipboard?.writeText(_text || '') },
+    ],
+  },
+  {
     pattern: /Entry Not Found.*model_index\.json|Could not load model.*Check diffusers/i,
-    message: 'Single-file model — needs base config from a gated repo. Accept the license and set your HF token.',
+    message: 'Single-file model may need an explicit base config. Add --single-file-config <repo_or_path> if the checkpoint is missing components.',
     fixes: [
       { label: 'Request access to base model', action: (panel, _text) => {
         const gated = _text && _text.match(/Access to model\s+(\S+)\s+is restricted/i);
-        const repo = (gated && gated[1]) || _inferBaseRepo(_text);
+        const repo = gated && gated[1];
         if (repo) window.open('https://huggingface.co/' + repo, '_blank');
         else window.open('https://huggingface.co/settings/gated-repos', '_blank');
       }},
@@ -533,7 +512,7 @@ export const ERROR_PATTERNS = [
   {
     pattern: /sgl_kernel[\s\S]*(Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)|(?:Python\.h|libnuma\.so\.1|common_ops|libnvrtc\.so)[\s\S]*sgl_kernel|Could not load any common_ops library|Please ensure sgl_kernel is properly installed/i,
     message: 'SGLang native kernel/runtime is missing or mismatched on this server.',
-    suggestion: 'Suggested action: relaunch with Odysseus’ venv CUDA library path fix. If the venv does not contain the matching NVIDIA runtime libs, run Repair sglang-kernel.',
+    suggestion: 'Suggested action: relaunch with Open Clank’s venv CUDA library path fix. If the venv does not contain the matching NVIDIA runtime libs, run Repair sglang-kernel.',
     fixes: [
       { label: 'Edit / relaunch serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
       { label: 'Repair sglang-kernel', action: (panel) => _repairSglangKernel(panel) },
@@ -561,9 +540,18 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
+    pattern: /mflux-generate-qwen.*not found|mflux-generate.*not found|MLX image serving requires mflux|No module named ['"]?mflux/i,
+    message: 'MLX image serving requires mflux on this Apple Silicon server.',
+    suggestion: 'Suggested action: install mflux in the selected Python environment. This is for MLX image generation, not text MLX-LM.',
+    fixes: [
+      { label: 'Open Dependencies', action: () => _openCookbookDependencies('mflux') },
+      { label: 'Copy install command', action: () => _copyText('python3 -m pip install -U mflux fastapi uvicorn') },
+    ],
+  },
+  {
     pattern: /Unable to quantize model of type <class ['"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['"]>|QuantizedSwitchLinear/i,
     message: 'MLX-LM tried to quantize an already-quantized DeepSeek switch layer.',
-    suggestion: 'Suggested action: relaunch from the cached local snapshot path. Odysseus now rewrites MLX repo-id launches to the newest local Hugging Face snapshot when it exists on the selected Mac.',
+    suggestion: 'Suggested action: relaunch from the cached local snapshot path. Open Clank now rewrites MLX repo-id launches to the newest local Hugging Face snapshot when it exists on the selected Mac.',
     fixes: [
       { label: 'Edit / relaunch serve', action: (panel) => _openServeEditFromDiagnosis(panel) },
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('mlx_lm') },
@@ -725,11 +713,11 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /No module named ['"]?torch|No module named ['"]?diffusers|diffusers.*command not found/i,
-    message: 'Diffusion serving needs PyTorch and diffusers. Install diffusers from Cookbook → Dependencies.',
+    pattern: /No module named ['"]?torch|No module named ['"]?torchvision|No module named ['"]?diffusers|No module named ['"]?scipy|install scipy if you want to use beta sigmas|requires the Torchvision library|diffusers.*command not found/i,
+    message: 'Diffusion serving needs PyTorch, Torchvision, Diffusers, Accelerate, and SciPy. Install Diffusers image deps from Cookbook → Dependencies.',
     fixes: [
       { label: 'Open Dependencies', action: () => _openCookbookDependencies('diffusers') },
-      { label: 'Copy install command', action: () => _copyText('python3 -m pip install "diffusers[torch]"') },
+      { label: 'Copy install command', action: () => _copyText('python3 -m pip install "diffusers[torch]" torchvision accelerate scipy python-multipart') },
     ],
   },
   {
@@ -870,7 +858,7 @@ export function _diagnose(text) {
 }
 
 function _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText) {
-  const lines = ['## Odysseus Cookbook troubleshooting'];
+  const lines = ['## Open Clank Cookbook troubleshooting'];
   if (task) {
     lines.push(
       '',
@@ -947,7 +935,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   copyBtn.className = 'cookbook-diag-copy';
   copyBtn.title = 'Copy diagnosis details';
   copyBtn.setAttribute('aria-label', 'Copy diagnosis');
-  copyBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  copyBtn.innerHTML = uiIcon("copy", 14);
   copyBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const bundle = _diagnosisCopyBundle(task, diagnosis, sourceText, suggestionText);
@@ -967,7 +955,7 @@ export function _showDiagnosis(panel, diagnosis, sourceText) {
   dismissBtn.className = 'cookbook-diag-dismiss';
   dismissBtn.title = 'Dismiss diagnosis';
   dismissBtn.setAttribute('aria-label', 'Dismiss');
-  dismissBtn.textContent = '×';
+  dismissBtn.innerHTML = uiIcon('close', 14); dismissBtn.setAttribute('aria-label', dismissBtn.title || 'Dismiss diagnosis');
   dismissBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     panel._diagDismissed = diagnosis.message;

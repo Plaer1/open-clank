@@ -1,7 +1,7 @@
-# Copy to /etc/systemd/system/odysseus-ui.service
+# Legacy filename kept for upgrades; new installs use open-clank.service.
 # Edit User, WorkingDirectory, and ExecStart paths to match your setup
 [Unit]
-Description=Odysseus UI
+Description=Open Clank local AI workspace (legacy unit name)
 After=network.target
 
 [Service]
@@ -9,7 +9,7 @@ Type=simple
 # CHANGE THESE to match your user and install path:
 User=YOURUSER
 WorkingDirectory=/home/YOURUSER/odysseus-ui
-ExecStart=/home/YOURUSER/odysseus-ui/venv/bin/uvicorn app:app --port 7000 --host 0.0.0.0
+ExecStart=/home/YOURUSER/odysseus-ui/venv/bin/python scripts/openclank_bootstrap.py serve --port 7777 --host 0.0.0.0
 Restart=always
 RestartSec=3
 EnvironmentFile=-/home/YOURUSER/odysseus-ui/.env

@@ -1,10 +1,11 @@
+# Source template: install under a dedicated OS account; adjust paths before use.
 [Unit]
 Description=openthesius mimo ACP server
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/e/sauce/ai/openclanker/bin/mimo acp --hostname 127.0.0.1
+ExecStart=%h/open-clank/bin/mimo acp --hostname 127.0.0.1
 Restart=always
 RestartSec=3
 StandardOutput=journal

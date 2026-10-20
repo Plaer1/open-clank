@@ -1,0 +1,1 @@
+Certificates bind names/keys through a trust model; revocation/expiry and peer-name checks matter. Manage generation, storage, access, rotation, and retirement of keys. Side channels and implementation/configuration failures can undermine sound primitives. This unit gives concepts, not a deployment configuration.

@@ -1,0 +1,1 @@
+For A=[1,3], x=2, the defective lo=m update reaches lo=0,hi=1,m=0 repeatedly. Correct lo=m+1 excludes the known-below-target midpoint. The invariant separates indices before lo from those at or beyond hi.

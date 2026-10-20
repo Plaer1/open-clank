@@ -5,9 +5,12 @@ import os
 import uuid
 import logging
 import re
+import asyncio
+import base64
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Query
 
 from core.models import ChatMessage
 from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
@@ -25,8 +28,60 @@ from routes.session_routes import (
 
 logger = logging.getLogger(__name__)
 
+_HISTORY_IO_WORKERS = 4
+_HISTORY_RESOURCE_MATCH_LIMIT = 16
+_HISTORY_IO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_HISTORY_IO_WORKERS,
+    thread_name_prefix="openclank-history-http",
+)
+_HISTORY_IO_SLOTS = asyncio.Semaphore(_HISTORY_IO_WORKERS)
+
+
+async def _bounded_history_io(call, *, timeout: float = 13.0):
+    """Run blocking History IPC away from the event loop with a hard bound.
+
+    A timed-out request keeps its slot until the socket worker really exits,
+    so repeated client deadlines cannot build an unbounded queue of orphaned
+    blocking calls.
+    """
+    try:
+        await asyncio.wait_for(_HISTORY_IO_SLOTS.acquire(), timeout=0.25)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(503, "History is busy; retry shortly") from exc
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_HISTORY_IO_EXECUTOR, call)
+
+    def release_when_done(done):
+        try:
+            done.exception()
+        except BaseException:
+            pass
+        _HISTORY_IO_SLOTS.release()
+
+    future.add_done_callback(release_when_done)
+    try:
+        return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(504, "History service request exceeded its deadline") from exc
+
 _HISTORY_INLINE_MEDIA_THRESHOLD = 200_000
 _DATA_IMAGE_RE = re.compile(r"data:image/[^;,\"]+;base64,[A-Za-z0-9+/=\s]+")
+
+
+def _leading_system_prefix(messages):
+    """Return genuine authority before any prior compaction projection."""
+    prefix = []
+    for message in messages:
+        if _message_role(message) != "system":
+            break
+        metadata = getattr(message, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = message.get("metadata", {}) if isinstance(message, dict) else {}
+        content = _message_text(message)
+        if metadata.get("compacted") or content.startswith("[Conversation summary"):
+            break
+        prefix.append(message)
+    return prefix
 
 
 def _history_display_content(content: Any) -> Any:
@@ -106,6 +161,12 @@ def _merge_continue_rows_to_delete(db_messages, db1, db2):
 def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
     router = APIRouter(tags=["history"])
 
+    def _settled_visibility(state):
+        from src.openclank.session_operations import visibility, HistoryOperationError
+        try: return visibility(state, require_settled=True)
+        except HistoryOperationError as exc:
+            raise HTTPException(409, {"code": exc.code, "message": "Resolve pending native history before reading transcript"}) from exc
+
     def _reserve_message_uploads(
         request: Request,
         content: Any,
@@ -146,6 +207,44 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             entry["metadata"] = meta
         return entry
 
+    def _db_message_metadata(m: DbChatMessage) -> Dict[str, Any]:
+        meta = {}
+        if m.meta_data:
+            try:
+                meta = json.loads(m.meta_data) or {}
+            except (json.JSONDecodeError, ValueError):
+                meta = {}
+        if m.timestamp and "timestamp" not in meta:
+            meta["timestamp"] = m.timestamp.isoformat() + "Z"
+        return meta
+
+    def _hydrate_session_history_from_db(session_id: str, rows: list[DbChatMessage]) -> None:
+        """Rebuild in-memory context from raw DB rows after a history load.
+
+        The browser history endpoint can return paged/display-trimmed messages,
+        but the next model call reads ``session.history``. After a restart or a
+        stale in-memory session, selecting an old chat through the paged endpoint
+        used to show the transcript while the model only saw fresh context.
+        """
+        if not rows:
+            return
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError:
+            return
+        session.history = [
+            ChatMessage(role=m.role, content=m.content, metadata=_db_message_metadata(m) or None)
+            for m in rows
+        ]
+        session.message_count = len(session.history)
+
+    def _session_needs_db_history_hydration(session_id: str, total: int) -> bool:
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError:
+            return False
+        return len(session.history or []) < int(total or 0)
+
     @router.get("/api/history/{session_id}")
     async def get_session_history(
         request: Request,
@@ -153,7 +252,18 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> Dict[str, Any]:
-        _verify_session_owner(request, session_id)
+        owner = _verify_session_owner(request, session_id)
+        with SessionLocal() as boundary_db:
+            boundary = boundary_db.query(DbSession).filter(DbSession.id == session_id).first()
+            if boundary is not None: _settled_visibility(boundary.mimo_state)
+        cached = session_manager.sessions.get(session_id)
+        if not getattr(cached, "incognito", False):
+            from src.openclank.conversation_archive import get_conversation_archive, ArchiveUnavailableError
+            try:
+                if get_conversation_archive().chat_erasure_started(owner=owner, chat_id=session_id):
+                    raise HTTPException(409, "Conversation deletion is pending; retry erasure to finish")
+            except ArchiveUnavailableError as exc:
+                raise HTTPException(503, str(exc)) from exc
         if limit is not None:
             page_limit = max(1, min(int(limit), 100))
             db = SessionLocal()
@@ -162,21 +272,31 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_session is None:
                     raise HTTPException(404, f"Session '{session_id}' not found")
 
+                from src.openclank.session_operations import visibility
+                excluded = _settled_visibility(db_session.mimo_state)
                 total = (
                     db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
+                    .filter(DbChatMessage.session_id == session_id, ~DbChatMessage.id.in_(excluded))
                     .count()
                 )
                 page_offset = int(offset) if offset is not None else max(total - page_limit, 0)
                 page_offset = max(0, min(page_offset, total))
                 rows = (
                     db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
+                    .filter(DbChatMessage.session_id == session_id, ~DbChatMessage.id.in_(excluded))
                     .order_by(DbChatMessage.timestamp)
                     .offset(page_offset)
                     .limit(page_limit)
                     .all()
                 )
+                if _session_needs_db_history_hydration(session_id, total):
+                    full_rows = (
+                        db.query(DbChatMessage)
+                        .filter(DbChatMessage.session_id == session_id, ~DbChatMessage.id.in_(excluded))
+                        .order_by(DbChatMessage.timestamp)
+                        .all()
+                    )
+                    _hydrate_session_history_from_db(session_id, full_rows)
                 history_dict = [
                     entry for entry in (_db_history_entry(m) for m in rows)
                     if not (entry.get("metadata") or {}).get("hidden")
@@ -239,9 +359,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         if not history_dict:
             db = SessionLocal()
             try:
+                from src.openclank.session_operations import visibility
+                view_row = db.query(DbSession).filter(DbSession.id == session_id).first()
+                excluded = _settled_visibility(view_row.mimo_state if view_row else {})
                 db_messages = (
                     db.query(DbChatMessage)
-                    .filter(DbChatMessage.session_id == session_id)
+                    .filter(DbChatMessage.session_id == session_id, ~DbChatMessage.id.in_(excluded))
                     .order_by(DbChatMessage.timestamp)
                     .all()
                 )
@@ -251,15 +374,14 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 if db_history:
                     # Rebuild in-memory history from the full set so hidden
                     # messages (e.g. compaction summaries) are kept for AI context.
-                    session.history = [
-                        ChatMessage(role=m["role"], content=m["content"], metadata=m.get("metadata"))
-                        for m in db_history
-                    ]
+                    _hydrate_session_history_from_db(session_id, db_messages)
                 # Response excludes hidden messages, matching the in-memory path.
                 history_dict = [
                     m for m in db_history
                     if not (m.get("metadata") or {}).get("hidden")
                 ]
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"DB fallback failed for {session_id}: {e}")
             finally:
@@ -274,8 +396,15 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
     @router.post("/api/session/{session_id}/truncate")
     async def truncate_session(request: Request, session_id: str):
-        _verify_session_owner(request, session_id)
-        await _prepare_context_mutation(request, session_id)
+        verified_owner = _verify_session_owner(request, session_id)
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+        mutation_owner = await _prepare_context_mutation(
+            request, session_id, session_owner=getattr(session, "owner", None),
+            verified_owner=verified_owner,
+        )
         try:
             body = await request.json()
             keep_count = body.get("keep_count", 0)
@@ -685,23 +814,95 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         except Exception as e:
             raise HTTPException(500, f"Topic analysis failed: {e}")
 
+    @router.get("/api/session/{session_id}/context")
+    async def get_session_context_usage(request: Request, session_id: str) -> Dict[str, Any]:
+        """Return an estimated whole-chat context usage for the session's model.
+
+        Streaming footers report the prompt size for the last request. This
+        endpoint estimates the persisted session context so the header can show
+        when the whole chat is approaching compaction.
+        """
+        _verify_session_owner(request, session_id)
+        try:
+            session = session_manager.get_session(session_id)
+        except KeyError:
+            raise HTTPException(404, "Session not found")
+
+        try:
+            from src.model_context import estimate_tokens, get_context_length
+
+            messages = session.get_context_messages()
+            used = int(estimate_tokens(messages))
+            ctx_len = int(get_context_length(session.endpoint_url, session.model) or 0)
+            pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
+            pct = max(0.0, min(100.0, pct))
+            visible_messages = sum(
+                1 for m in session.history
+                if not (getattr(m, "metadata", None) or {}).get("hidden")
+            )
+            compacted_messages = sum(
+                1 for m in session.history
+                if (getattr(m, "metadata", None) or {}).get("compacted")
+            )
+            can_compact = used > 0
+            return {
+                "session_id": session_id,
+                "model": session.model,
+                "endpoint_url": session.endpoint_url,
+                "used_tokens": used,
+                "context_length": ctx_len,
+                "context_percent": pct,
+                "messages": visible_messages,
+                "context_messages": len(messages),
+                "compacted_messages": compacted_messages,
+                "can_compact": can_compact,
+                "should_compact": pct >= 70,
+                "auto_compact_threshold": 85,
+            }
+        except Exception as e:
+            logger.error(f"Context usage error {session_id}: {e}")
+            raise HTTPException(500, str(e))
+
     @router.post("/api/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):
         """Manually trigger context compaction for a session."""
-        _verify_session_owner(request, session_id)
-        await _prepare_context_mutation(request, session_id)
+        verified_owner = _verify_session_owner(request, session_id)
         from src.auth_helpers import effective_user
         owner = effective_user(request)
         try:
             session = session_manager.get_session(session_id)
         except KeyError:
             raise HTTPException(404, "Session not found")
+        # Persisted owner remains authoritative after authenticated scope check.
+        owner = getattr(session, "owner", None) or owner
+
+        # One active compactor per execution context: refuse host compaction
+        # when a persistent ACP engine compactor owns the session. Bind on the
+        # real protocol (model_target.transport), not missing Session attrs.
+        # Checked before any context-mutation side effects.
+        from src.context_compactor import session_has_persistent_engine
+
+        if session_has_persistent_engine(session):
+            raise HTTPException(
+                409,
+                "Persistent ACP sessions compact through the engine "
+                "(session.summarize); host compaction is reserved for "
+                "finite contexts.",
+            )
+        mutation_owner = await _prepare_context_mutation(
+            request, session_id, session_owner=getattr(session, "owner", None),
+            verified_owner=verified_owner,
+        )
+        owner = mutation_owner or getattr(session, "owner", None) or owner
         try:
             from src.model_context import estimate_tokens, get_context_length
-            from src.llm_core import llm_call_async
-            from src.endpoint_resolver import resolve_endpoint
+            from src.openclank.modality_facade import complete_text
 
-            if len(session.history) < 6:
+            system_prefix = _leading_system_prefix(session.history)
+            conversation = session.history[len(system_prefix):]
+            keep_count = min(8, max(4, len(conversation) // 4))
+            older = conversation[:-keep_count]
+            if not older:
                 return {"status": "ok", "message": "Not enough messages to compact"}
 
             ctx_len = get_context_length(session.endpoint_url, session.model)
@@ -710,10 +911,9 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             pct_before = round((used_before / ctx_len) * 100, 1) if ctx_len else 0
             msg_count_before = len(session.history)
 
-            # Keep only last 4 messages, summarize the rest
-            keep_count = 4
-            older = session.history[:-keep_count]
-            recent = session.history[-keep_count:]
+            # Keep only last 4 conversation messages, summarize the rest.
+            # System/persona authority is split out before this boundary.
+            recent = conversation[-keep_count:]
 
             # Build text to summarize
             convo_text = "\n".join(
@@ -722,33 +922,44 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 for m in older
             )
 
-            # Use utility model if available
-            util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner or None)
-            compact_url = util_url or session.endpoint_url
-            compact_model = util_model or session.model
-            compact_headers = util_headers if util_url else session.headers
-
-            from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
+            from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
             compaction_count = sum(1 for m in session.history if isinstance(m, ChatMessage) and "[Conversation summary" in (m.content or ""))
             sys_prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(older))).replace("{n}", str(compaction_count + 1))
-            summary = await llm_call_async(
-                compact_url, compact_model,
-                [
+            import hashlib
+
+            summary = await complete_text(
+                owner=owner,
+                purpose="utility",
+                messages=[
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": convo_text},
                 ],
-                temperature=0.2, max_tokens=1024,
-                headers=compact_headers, timeout=30,
-                owner=owner or None,
-                session_id=session_id,
+                temperature=0.2,
+                max_output_tokens=1024,
+                idempotency_key=(
+                    "history-compact-"
+                    + hashlib.sha256(
+                        f"{session_id}\0{convo_text}".encode("utf-8")
+                    ).hexdigest()[:32]
+                ),
             )
+            summary = normalize_compaction_summary(summary)
+            if not (summary or "").strip():
+                raise HTTPException(502, "Compaction summary was empty; history unchanged")
 
-            # Replace session history: summary as system message + recent messages
-            # System message holds the full summary for AI context
+            # Replace session history: preserve the leading system/persona
+            # prefix, then add the summary and recent conversation.  The
+            # prefix is active authority, not source text to summarize away.
             system_summary = ChatMessage(
                 role="system",
                 content=f"[Conversation summary — {len(older)} earlier messages were compacted]\n\n{summary}",
-                metadata={"compacted": True, "hidden": True},
+                metadata={
+                    "compacted": True,
+                    "hidden": True,
+                    "compaction_trigger": "manual",
+                    "compaction_actor": "host_finite",
+                    "source_boundary_split": len(older),
+                },
             )
             # Visible assistant message just shows stats
             summary_msg = ChatMessage(
@@ -756,54 +967,27 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 content=f"**Conversation compacted** — {len(older)} messages summarized, {len(recent)} kept.",
                 metadata={"compacted": True, "messages_removed": len(older)},
             )
-            new_history = [system_summary, summary_msg] + list(recent)
+            new_history = system_prefix + [system_summary, summary_msg] + list(recent)
+            # Projection writer: archives source parts first, preserves
+            # retained message IDs, never rekeys original history identity.
+            # Archive failure raises recoverable-unavailable and leaves source
+            # intact — the broad except below must not swallow that as 500.
+            try:
+                replaced = session_manager.replace_messages(session_id, new_history)
+            except Exception as exc:
+                from src.openclank.conversation_archive import ArchiveUnavailableError
+
+                if isinstance(exc, ArchiveUnavailableError):
+                    raise HTTPException(
+                        503,
+                        "conversation archive unavailable; history unchanged",
+                    ) from exc
+                raise
+            if not replaced:
+                raise HTTPException(500, "Failed to save compacted history")
             session.history = new_history
             session.message_count = len(session.history)
             logger.info(f"Compact: session {session_id} history now has {len(session.history)} messages (was {msg_count_before})")
-
-            # Update DB: delete old messages, insert summary
-            db = SessionLocal()
-            try:
-                db_msgs = db.query(DbChatMessage).filter(
-                    DbChatMessage.session_id == session_id
-                ).order_by(DbChatMessage.timestamp).all()
-
-                # Delete all but the last keep_count
-                for m in db_msgs[:-keep_count]:
-                    db.delete(m)
-
-                # Insert system summary (hidden, for AI context) and visible summary
-                import json as _json
-                import uuid
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                db_sys_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="system",
-                    content=system_summary.content,
-                    meta_data=_json.dumps(system_summary.metadata),
-                    timestamp=now,
-                )
-                db.add(db_sys_summary)
-                db_summary = DbChatMessage(
-                    id=str(uuid.uuid4()),
-                    session_id=session_id,
-                    role="assistant",
-                    content=summary_msg.content,
-                    meta_data=_json.dumps(summary_msg.metadata),
-                    timestamp=now,
-                )
-                db.add(db_summary)
-
-                # Update session record
-                db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if db_session:
-                    db_session.message_count = len(session.history)
-                    db_session.updated_at = datetime.now(timezone.utc)
-                db.commit()
-            finally:
-                db.close()
 
             session_manager.save_sessions()
 
@@ -815,10 +999,946 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "message": f"Compacted: {msg_count_before} msgs → {len(session.history)} msgs ({pct_before}% → {pct_after}%)",
                 "before": pct_before,
                 "after": pct_after,
+                "ok": True,
+                "summarized": len(older),
+                "kept": len(recent),
+                "message_count": len(session.history),
+                "projection": "host_finite",
+                "source_parts_retained": True,
             }
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Manual compact error {session_id}: {e}")
             raise HTTPException(500, str(e))
+
+    return router
+
+
+def setup_history_settings_routes() -> APIRouter:
+    """Authenticated policy/usage API for the Lore history foundation."""
+    import os
+    from src.auth_helpers import effective_user, get_current_user, require_user
+    from src.openclank import file_policy as file_policy_module
+    from src.openclank.filesystem_registry import FilesystemRootRegistry
+    from src.openclank.history_client import (
+        HistoryAvailabilityError,
+        HistoryClient,
+        HistoryClientError,
+    )
+    from src.openclank.history_paths import scope_id
+
+    router = APIRouter(prefix="/api/history", tags=["history-settings"])
+
+    def is_admin(request: Request, user: str) -> bool:
+        manager = getattr(request.app.state, "auth_manager", None)
+        return bool(manager and user and manager.is_admin(user))
+
+    def account_id_for(request: Request, user: str) -> str:
+        manager = getattr(request.app.state, "auth_manager", None)
+        resolver = getattr(manager, "account_id", None)
+        if callable(resolver) and user:
+            try:
+                resolved = resolver(user)
+                if resolved:
+                    return str(resolved)
+            except Exception:
+                pass
+        return str(user or "local-installation")
+
+    def authorized_roots(owner: str, admin: bool) -> list[dict[str, Any]]:
+        registry = FilesystemRootRegistry()
+        roots: list[dict[str, Any]] = []
+        if admin:
+            roots.extend(registry.list(owner))
+        roots.extend(
+            item.get("root") or {}
+            for item in registry.visibility_for_subject(owner)
+        )
+        return [
+            root for root in roots
+            if root.get("kind") == "recursive_directory"
+            and root.get("enabled")
+            and root.get("availability") == "available"
+            and "read" in set(root.get("capabilities") or [])
+        ]
+
+    def is_authorized_directory(value: str, roots: list[dict[str, Any]]) -> bool:
+        import os
+        candidate = os.path.realpath(os.path.expanduser(value))
+        for root in roots:
+            base = os.path.realpath(str(root.get("canonical_path") or ""))
+            try:
+                if base and os.path.commonpath((base, candidate)) == base:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    def service_client(account_id: str, request: Request) -> HistoryClient:
+        socket_path = os.environ.get("OPENCLANK_HISTORY_SOCKET")
+        if not socket_path:
+            raise HTTPException(503, "history service is unavailable")
+        supervisor = getattr(request.app.state, "history_supervisor", ...)
+        if supervisor is None:
+            raise HTTPException(503, "history service is unavailable")
+        if supervisor is not ...:
+            process = getattr(supervisor, "process", None)
+            poll = getattr(process, "poll", None)
+            if process is None or (callable(poll) and poll() is not None):
+                raise HTTPException(503, "history service is unavailable")
+        actor_id = str(get_current_user(request) or account_id)
+        return HistoryClient(socket_path, actor_id=actor_id, account_id=account_id, timeout=4.0)
+
+    def availability_http_error(exc: HistoryAvailabilityError) -> HTTPException:
+        status_code = {
+            "resource_not_found": 404,
+            "version_not_found": 404,
+            "version_expired": 410,
+            "version_expiring": 409,
+            "version_not_restorable": 409,
+            "resource_unavailable": 409,
+            "invalid_cursor": 422,
+            "invalid_limit": 422,
+            "invalid_offset": 416,
+            "invalid_version_ref": 422,
+            "ambiguous_version_ref": 409,
+        }.get(exc.code, 503)
+        return HTTPException(
+            status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        )
+
+    async def resolve_history_resource_ids(
+        client: HistoryClient,
+        resource_id: str,
+        request: Request,
+        owner: str,
+        account_id: str,
+        *,
+        resolved_paths: dict[str, str] | None = None,
+    ) -> list[str]:
+        """Resolve Files identity through current authorized paths and History registrations.
+
+        Registry paths and private IDs stay inside this server process. Inactive
+        registrations qualify only while the exact path remains the current,
+        permitted Host resource for this authenticated account.
+        """
+        requested = str(resource_id or "").strip()
+        if requested.startswith("file:"):
+            response = await _bounded_history_io(lambda: client.resolve_resource(requested))
+            handle = (response.get("Resource") or {}).get("handle") if isinstance(response, dict) else None
+            if not isinstance(handle, dict) or str(handle.get("account_id") or "") != account_id:
+                raise HistoryAvailabilityError("resource_not_found", "registered Files resource is unavailable")
+            return [requested]
+        if not re.fullmatch(r"resource-[0-9a-f]{64}", requested):
+            raise HistoryAvailabilityError("resource_not_found", "registered Files resource is unavailable")
+
+        from pathlib import Path
+
+        from src.openclank.files_facade import FilesFacadeError, ProviderContext
+        from src.openclank.files_host_provider import HostFilesProvider, host_origin_for_path
+        from src.openclank.resource_refs import stable_resource_id
+
+        files_user = str(get_current_user(request) or owner or "").strip().lower()
+        if not files_user or account_id_for(request, files_user) != account_id:
+            raise HistoryAvailabilityError("resource_not_found", "registered Files resource is unavailable")
+        policy_repository = file_policy_module.FilePolicyRepository()
+        host_provider = HostFilesProvider(registry=FilesystemRootRegistry())
+        files_context = ProviderContext(
+            owner_subject_id=account_id,
+            owner_username=files_user,
+            policy_generation=policy_repository.generation(),
+            is_admin=is_admin(request, files_user),
+            workspace_id="default",
+        )
+
+        matches: list[str] = []
+        seen_private_ids: set[str] = set()
+        cursor = None
+        for _page_number in range(16):
+            page = await _bounded_history_io(
+                lambda cursor=cursor: client.list_registered_resources(cursor=cursor, limit=100),
+                timeout=1.5,
+            )
+            for registration in page["items"]:
+                if (
+                    registration.get("account_id") != account_id
+                    or not registration.get("workspace_id")
+                ):
+                    continue
+                root_path = str(registration.get("root_path") or "")
+                relative_path = str(registration.get("relative_path") or "")
+                relative = Path(relative_path)
+                if (
+                    not root_path
+                    or not Path(root_path).is_absolute()
+                    or not relative_path
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                ):
+                    continue
+                candidate_path = str(Path(root_path) if relative_path == "." else Path(root_path) / relative)
+                try:
+                    candidate_origin = host_origin_for_path(candidate_path)
+                    candidate_public_id = stable_resource_id(
+                        owner_subject_id=account_id,
+                        provider="host",
+                        origin_id=candidate_origin,
+                    )
+                except (OSError, TypeError, ValueError):
+                    continue
+                if candidate_public_id != requested:
+                    continue
+                try:
+                    current = await host_provider.resource_for_path(files_context, path=candidate_path)
+                except FilesFacadeError as exc:
+                    if exc.code in {"resource_unavailable", "invalid_resource_ref"}:
+                        continue
+                    raise HTTPException(503, "Files authorization could not be checked") from exc
+                current_public_id = stable_resource_id(
+                    owner_subject_id=account_id,
+                    provider="host",
+                    origin_id=current.origin_id,
+                )
+                if current_public_id == requested:
+                    private_id = str(registration.get("resource_id") or "").strip()
+                    if not private_id.startswith("file:") or private_id in seen_private_ids:
+                        continue
+                    seen_private_ids.add(private_id)
+                    matches.append(private_id)
+                    if resolved_paths is not None:
+                        resolved_paths[private_id] = candidate_path
+                    if len(matches) > _HISTORY_RESOURCE_MATCH_LIMIT:
+                        raise HistoryAvailabilityError(
+                            "resource_unavailable",
+                            "Files identity has too many matching History registrations",
+                        )
+            cursor = page.get("next_cursor")
+            if cursor is None:
+                break
+        else:
+            raise HistoryAvailabilityError(
+                "resource_unavailable",
+                "Files identity could not be resolved within the bounded History registry scan",
+            )
+        if not matches:
+            raise HistoryAvailabilityError("resource_not_found", "registered Files resource is unavailable")
+        return sorted(matches)
+
+    async def run_history_candidate_calls(candidate_ids: list[str], call_factory, *, timeout: float = 1.5):
+        """Run at most one worker-sized batch of trusted IPC calls at a time."""
+        results = []
+        for start in range(0, len(candidate_ids), _HISTORY_IO_WORKERS):
+            batch = candidate_ids[start : start + _HISTORY_IO_WORKERS]
+            results.extend(
+                await asyncio.gather(
+                    *(
+                        _bounded_history_io(call_factory(private_id), timeout=timeout)
+                        for private_id in batch
+                    )
+                )
+            )
+        return results
+
+    def history_page_cursor(version: Dict[str, Any]) -> str:
+        timestamp = version.get("timestamp_millis")
+        action_id = version.get("action_id")
+        version_id = version.get("version_id")
+        source_provider = version.get("source_provider", "filesystem")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or timestamp < 0
+            or not isinstance(action_id, str)
+            or not action_id
+            or not isinstance(version_id, str)
+            or not version_id
+            or not isinstance(source_provider, str)
+            or not source_provider
+            or len(source_provider) > 128
+        ):
+            raise HistoryAvailabilityError("resource_unavailable", "History returned an invalid version descriptor")
+        payload = json.dumps(
+            {
+                "timestamp_millis": timestamp,
+                "action_id": action_id,
+                "version_id": version_id,
+                "source_provider": source_provider,
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    async def list_history_versions_for_candidates(
+        client: HistoryClient,
+        candidate_ids: list[str],
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> Dict[str, Any]:
+        pages = await run_history_candidate_calls(
+            candidate_ids,
+            lambda private_id: lambda: client.list_resource_versions(
+                private_id,
+                cursor=cursor,
+                limit=limit,
+            ),
+        )
+        combined = []
+        seen_version_refs: dict[str, str] = {}
+        has_more = False
+        for private_id, page in zip(candidate_ids, pages):
+            has_more = has_more or page.get("next_cursor") is not None
+            for item in page["items"]:
+                version_ref = str(item.get("id") or "")
+                if not version_ref:
+                    raise HistoryAvailabilityError("resource_unavailable", "History returned a version without an identity")
+                previous_owner = seen_version_refs.get(version_ref)
+                if previous_owner is not None and previous_owner != private_id:
+                    raise HistoryAvailabilityError(
+                        "resource_unavailable",
+                        "a History version matches multiple private registrations",
+                    )
+                seen_version_refs[version_ref] = private_id
+                combined.append(item)
+        combined.sort(
+            key=lambda item: (
+                int(item.get("timestamp_millis", -1)),
+                str(item.get("action_id") or ""),
+                str(item.get("version_id") or ""),
+                str(item.get("source_provider") or "filesystem"),
+            ),
+            reverse=True,
+        )
+        has_more = has_more or len(combined) > limit
+        selected = combined[:limit]
+        next_cursor = history_page_cursor(selected[-1]) if has_more and selected else None
+        return {"items": selected, "next_cursor": next_cursor}
+
+    async def run_version_lookup(candidate_ids: list[str], call_factory):
+        outcomes = []
+        for start in range(0, len(candidate_ids), _HISTORY_IO_WORKERS):
+            batch = candidate_ids[start : start + _HISTORY_IO_WORKERS]
+            outcomes.extend(
+                await asyncio.gather(
+                    *(
+                        _bounded_history_io(call_factory(private_id), timeout=1.5)
+                        for private_id in batch
+                    ),
+                    return_exceptions=True,
+                )
+            )
+        matches = []
+        failures = []
+        for private_id, outcome in zip(candidate_ids, outcomes):
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, HistoryAvailabilityError) or outcome.code != "version_not_found":
+                    failures.append(outcome)
+            else:
+                matches.append((private_id, outcome))
+        if failures:
+            failure = failures[0]
+            if isinstance(failure, BaseException):
+                raise failure
+        if len(matches) > 1:
+            raise HistoryAvailabilityError(
+                "resource_unavailable",
+                "selected History version matches multiple private registrations",
+            )
+        if not matches:
+            raise HistoryAvailabilityError("version_not_found", "selected History version is unavailable")
+        return matches[0]
+
+    async def find_history_version_resource_id(
+        client: HistoryClient,
+        candidate_ids: list[str],
+        version_ref: str,
+    ) -> str:
+        private_id, _selection = await run_version_lookup(
+            candidate_ids,
+            lambda private_id: lambda: client.resolve_resource_version(private_id, version_ref),
+        )
+        return private_id
+
+    async def read_history_version_chunk_for_candidates(
+        client: HistoryClient,
+        candidate_ids: list[str],
+        version_ref: str,
+        *,
+        offset: int,
+        length: int,
+    ) -> Dict[str, Any]:
+        _private_id, chunk = await run_version_lookup(
+            candidate_ids,
+            lambda private_id: lambda: client.read_resource_version_chunk(
+                private_id,
+                version_ref,
+                offset=offset,
+                length=length,
+            ),
+        )
+        return chunk
+
+    def public_history_preview(preview: Dict[str, Any], resource_id: str) -> Dict[str, Any]:
+        result = dict(preview)
+        resource = result.get("resource")
+        if isinstance(resource, dict):
+            safe_resource = {"resource_id": resource_id}
+            if isinstance(resource.get("generation"), int):
+                safe_resource["generation"] = resource["generation"]
+            result["resource"] = safe_resource
+        return result
+
+    def public_history_restore_result(response: Dict[str, Any], resource_id: str, request: Request) -> Dict[str, Any]:
+        result = dict(response)
+        receipt = result.get("Restore")
+        if isinstance(receipt, dict):
+            safe_receipt = dict(receipt)
+            resources = receipt.get("resources")
+            if isinstance(resources, list):
+                safe_receipt["resources"] = [
+                    {**dict(item), "resource_id": resource_id}
+                    for item in resources
+                    if isinstance(item, dict)
+                ]
+            result["Restore"] = safe_receipt
+            proof = receipt.get("verification") or {}
+            if receipt.get("outcome") == "Complete" and proof.get("status") == "Verified" and proof.get("content_hash") and proof.get("content_hash") == proof.get("restored_content_hash"):
+                from src.openclank.achievement_producers import record_activity
+                record_activity(request, "lore.restore.committed", str(proof.get("restore_id") or ""), {
+                    "resourceId": resource_id, "versionId": proof.get("version_id"),
+                    "contentHash": proof.get("content_hash"), "restoredContentHash": proof.get("restored_content_hash"),
+                    "receiptKind": "VerifiedRestore", "digestOnly": False,
+                })
+            if isinstance(safe_receipt.get("verification"), dict):
+                safe_receipt["verification"] = {**safe_receipt["verification"], "resource_id": resource_id}
+        return result
+
+    def visible_snapshot(owner: str, admin: bool, request: Request) -> dict[str, Any]:
+        account_id = account_id_for(request, owner)
+        client = service_client(account_id, request)
+        try:
+            policy_response = client.get_policy()
+            usage_response = client.get_usage()
+            status_response = client.get_status()
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        policy = dict(policy_response.get("Policy") or {})
+        status = dict(status_response.get("Status") or {})
+        status["available"] = True
+        if not admin:
+            inherited_global = dict(policy.get("global") or {})
+            inherited_global["inherited"] = True
+            policy["global"] = inherited_global
+        roots = authorized_roots(owner, admin)
+        visible_scopes = []
+        for scope in policy.get("scopes") or []:
+            if not isinstance(scope, dict):
+                continue
+            if not admin and scope.get("owner_account_id") != account_id:
+                continue
+            if scope.get("kind") in {"Global", "Workspace", "Directory"}:
+                scope["kind"] = str(scope["kind"]).lower()
+            if scope.get("kind") == "directory" and not is_authorized_directory(str(scope.get("root") or scope.get("value") or ""), roots):
+                continue
+            if scope.get("kind") == "directory":
+                canonical = os.path.realpath(str(scope.get("root") or ""))
+                match = next((root for root in roots if os.path.realpath(str(root.get("canonical_path"))) == canonical), None)
+                if not match:
+                    continue
+                scope["root_id"] = match.get("id")
+                scope["display_path"] = match.get("display_path")
+            visible_scopes.append(scope)
+        policy["scopes"] = visible_scopes
+        result = {
+            "policy": policy,
+            "usage": usage_response.get("Usage") or {},
+            "status": status,
+            "directory_options": [
+                {"id": root.get("id"), "label": root.get("display_path") or root.get("canonical_path")}
+                for root in roots
+            ],
+        }
+        return result
+
+    def workspace_options(owner: str, request: Request, policy: Dict[str, Any], *, admin: bool = False) -> list[str]:
+        account_id = account_id_for(request, owner)
+        # Workspace choices come from the canonical Files policy repository,
+        # so a newly-created workspace is available to History before a
+        # history scope has been configured for it. Existing scope IDs remain
+        # visible as edit targets during migration or after a workspace was
+        # archived, but they never broaden account visibility.
+        options = {
+            str(scope.get("workspace_id"))
+            for scope in (policy.get("scopes") or [])
+            if isinstance(scope, dict)
+            and (admin or scope.get("owner_account_id") == account_id)
+            and str(scope.get("kind") or "").lower() == "workspace"
+            and scope.get("workspace_id")
+        }
+        try:
+            repository = file_policy_module.FilePolicyRepository()
+            workspaces = repository.list_workspaces(
+                owner_subject_id=None if admin else account_id,
+                include_archived=False,
+            )
+            options.update(str(workspace.id) for workspace in workspaces if workspace.id)
+        except (file_policy_module.FilePolicyError, OSError, ValueError) as exc:
+            # History settings remain readable when the canonical policy store
+            # is temporarily unavailable; configured scope IDs still support
+            # safe editing and the next request can retry discovery.
+            logger.warning("canonical workspace discovery unavailable: %s", exc)
+        options.add("default")
+        return sorted(item for item in options if item)
+
+    @router.post("/restore")
+    async def restore_history_resource(request: Request) -> Dict[str, Any]:
+        """Forward an authenticated restore through the Rust provider boundary.
+
+        ``destination_path`` is only an untrusted routing hint. The service
+        resolves it against its private ResourceKey registry and rejects it
+        unless it names the registered resource in the typed request.
+        """
+        user = require_user(request)
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "history restore must be a JSON object") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(422, "history restore must be a JSON object")
+        restore_request = body.get("request")
+        source = body.get("source")
+        resource_id = body.get("resource_id")
+        version_ref = body.get("version_ref")
+        destination_path = body.get("destination_path")
+        has_selection = isinstance(resource_id, str) and bool(resource_id.strip()) and isinstance(version_ref, str) and bool(version_ref.strip())
+        selection_was_requested = resource_id is not None or version_ref is not None
+        if selection_was_requested and not has_selection:
+            raise HTTPException(422, "resource_id and version_ref must be provided together")
+        if source is not None and has_selection:
+            raise HTTPException(422, "provide either a version selection or a source receipt")
+        has_destination_hint = isinstance(destination_path, str) and bool(destination_path.strip())
+        pathless_selection = has_selection and source is None and not has_destination_hint
+        if not pathless_selection and (
+            not isinstance(restore_request, dict)
+            or (not isinstance(source, dict) and not has_selection)
+            or not has_destination_hint
+        ):
+            raise HTTPException(422, "restore requires a selected version or source receipt and a registered destination")
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        if pathless_selection:
+            nested_request = restore_request if isinstance(restore_request, dict) else {}
+            restore_id = str(body.get("restore_id") or nested_request.get("restore_id") or "").strip()
+            expected_fingerprint = body.get("expected_destination_fingerprint")
+            if expected_fingerprint is None:
+                expected_fingerprint = nested_request.get("expected_destination_fingerprint")
+            if not restore_id or len(restore_id) > 256:
+                raise HTTPException(422, "restore_id is required")
+            if not isinstance(expected_fingerprint, str) or not expected_fingerprint or len(expected_fingerprint) > 256:
+                raise HTTPException(422, "the reviewed destination fingerprint from restore preview is required")
+        try:
+            client = service_client(account_id, request)
+            if pathless_selection:
+                public_resource_id = resource_id
+                resolved_paths: dict[str, str] = {}
+                private_resource_ids = await resolve_history_resource_ids(
+                    client, public_resource_id, request, owner, account_id,
+                    resolved_paths=resolved_paths,
+                )
+                private_resource_id = await find_history_version_resource_id(
+                    client, private_resource_ids, version_ref
+                )
+                response = await _bounded_history_io(
+                    lambda: client.restore_resource_version(
+                        restore_id,
+                        private_resource_id,
+                        version_ref,
+                        expected_destination_fingerprint=expected_fingerprint,
+                    )
+                )
+                result = public_history_restore_result(response, public_resource_id, request)
+                receipt = result.get("Restore")
+                if isinstance(receipt, dict) and receipt.get("outcome") == "Complete":
+                    # The mutation has committed. Refresh failure must never turn
+                    # it into a failed restore or encourage a mutation retry.
+                    try:
+                        from src.openclank.files_facade import FilesFacade, ProviderContext
+                        from src.openclank.files_host_provider import HostFilesProvider
+                        files_user = str(get_current_user(request) or owner or "").strip().lower()
+                        if not files_user or account_id_for(request, files_user) != account_id:
+                            raise ValueError("restore account changed")
+                        path = resolved_paths.get(private_resource_id)
+                        if not path:
+                            raise ValueError("registered refresh locator unavailable")
+                        context = ProviderContext(
+                            owner_subject_id=account_id, owner_username=files_user,
+                            policy_generation=file_policy_module.FilePolicyRepository().generation(),
+                            is_admin=is_admin(request, files_user), workspace_id="default",
+                        )
+                        facade = FilesFacade([HostFilesProvider(registry=FilesystemRootRegistry())])
+                        refreshed = await facade.host_resource_for_path(context, path=path)
+                        if refreshed.get("id") != public_resource_id or refreshed.get("provider") != "host":
+                            raise ValueError("restored resource identity changed")
+                        receipt["refreshed_resource"] = refreshed
+                    except Exception:
+                        receipt["refresh_error"] = "The restored file could not be reauthorized for its open view."
+                return result
+
+            if str(restore_request.get("account_id") or "") != account_id:
+                raise HTTPException(403, "restore request belongs to another account")
+            destination = restore_request.get("destination")
+            if not isinstance(destination, dict) or str(destination.get("account_id") or "") != account_id:
+                raise HTTPException(403, "restore destination belongs to another account")
+            if not str(restore_request.get("restore_id") or "").strip():
+                raise HTTPException(422, "restore_id is required")
+            if not has_selection and not all(str(restore_request.get(field) or "").strip() for field in ("source_action_id", "source_version_id")):
+                raise HTTPException(422, "restore source identifiers are required")
+            selected_resource_id = None
+            if has_selection:
+                selected_resource_ids = await resolve_history_resource_ids(
+                    client, resource_id, request, owner, account_id
+                )
+                selected_resource_id = await find_history_version_resource_id(
+                    client, selected_resource_ids, version_ref
+                )
+
+            def apply_selected_restore():
+                effective_request = dict(restore_request)
+                selected_source = source
+                if has_selection:
+                    selection = client.resolve_resource_version(selected_resource_id, version_ref)
+                    resource = selection["resource"]
+                    version = selection["version"]
+                    if (
+                        str(destination.get("resource_id") or "") not in {
+                            str(resource.get("resource_id") or ""),
+                            str(resource_id),
+                        }
+                        or str(destination.get("workspace_id") or "") != str(resource.get("workspace_id") or "")
+                        or str(destination.get("provider") or "") != "filesystem"
+                        or str(destination.get("account_id") or "") != str(resource.get("account_id") or "")
+                    ):
+                        raise HTTPException(403, "restore destination must be the selected Files resource")
+                    selected_action = str(version.get("action_id") or "")
+                    selected_version = str(version.get("version_id") or "")
+                    if (
+                        restore_request.get("source_action_id") not in (None, selected_action)
+                        or restore_request.get("source_version_id") not in (None, selected_version)
+                    ):
+                        raise HTTPException(409, "restore source changed from the selected History version")
+                    effective_request["destination"] = {
+                        **dict(destination),
+                        "resource_id": str(resource.get("resource_id") or ""),
+                    }
+                    effective_request["source_action_id"] = selected_action
+                    effective_request["source_version_id"] = selected_version
+                    selected_source = selection["receipt"]
+                response = client.restore_host(
+                    effective_request,
+                    selected_source,
+                    destination_path=destination_path,
+                    source_host_metadata=body.get("source_host_metadata") if isinstance(body.get("source_host_metadata"), dict) else None,
+                )
+                return public_history_restore_result(response, str(resource_id or ""), request)
+
+            return await _bounded_history_io(apply_selected_restore)
+        except HTTPException:
+            raise
+        except HistoryAvailabilityError as exc:
+            raise availability_http_error(exc) from exc
+        except HistoryClientError as exc:
+            message = str(exc)
+            status = 409 if "conflict" in message.lower() else 422
+            raise HTTPException(status, message) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+
+    @router.post("/capture-repair/{action_id}")
+    async def repair_history_capture(action_id: str, request: Request) -> Dict[str, Any]:
+        """Repair a selected committed recovery gap under the original actor."""
+        from src.auth_helpers import copal_owner_for_user
+        from src.openclank.copal_errors import CopalBridgeError
+        from src.openclank.history_repair import CaptureRepairUnavailable, repair_capture, snapshot_native_resource
+        from src.openclank.files_facade import FilesFacadeError, ProviderContext
+        from src.openclank.files_host_provider import HostFilesProvider, host_origin_for_path
+        user = require_user(request)
+        account_id = account_id_for(request, user)
+        if not action_id.strip() or len(action_id) > 256:
+            raise HTTPException(422, "Recovery action identity is invalid")
+        client = service_client(account_id, request)
+
+        async def copal_snapshot(key):
+            bridge = getattr(request.app.state, "copal_bridge", None)
+            if bridge is None:
+                raise CaptureRepairUnavailable("Copal storage is unavailable; recovery gap remains.")
+            return await bridge.call("get", {"owner": copal_owner_for_user(user), "workspace_id": key["workspace_id"], "id": key["resource_id"]}, timeout=4)
+
+        async def file_snapshot(path):
+            if not os.path.isabs(path):
+                raise CaptureRepairUnavailable("The recovery locator is invalid.")
+            context = ProviderContext(owner_subject_id=account_id, owner_username=user,
+                policy_generation=file_policy_module.FilePolicyRepository().generation(), is_admin=is_admin(request, user), workspace_id="default")
+            provider = HostFilesProvider(registry=FilesystemRootRegistry())
+            content = await provider.content(context, origin_id=host_origin_for_path(path))
+            if content.size is None or content.size > 10 * 1024 * 1024 or content.stream is None:
+                raise CaptureRepairUnavailable("This recovery copy requires a bounded provider reconciliation.")
+            captured = bytearray()
+            async for chunk in content.stream(0, content.size):
+                captured.extend(chunk)
+                if len(captured) > 10 * 1024 * 1024:
+                    raise CaptureRepairUnavailable("Recovery copy exceeds the repair bound.")
+            if len(captured) != content.size:
+                raise CaptureRepairUnavailable("The original file snapshot is unavailable.")
+            return bytes(captured)
+
+        async def resource_snapshot(proof):
+            context = ProviderContext(owner_subject_id=account_id, owner_username=user,
+                policy_generation=file_policy_module.FilePolicyRepository().generation(), is_admin=is_admin(request, user), workspace_id=proof['resource_key']['workspace_id'])
+            provider = HostFilesProvider(registry=FilesystemRootRegistry())
+            async def authorize(path):
+                await provider._authorized_path(context, host_origin_for_path(path))
+            return await snapshot_native_resource(proof, authorize=authorize, read_file=file_snapshot)
+
+        try:
+            return await repair_capture(client, action_id, account_id=account_id, copal_snapshot=copal_snapshot, file_snapshot=file_snapshot, resource_snapshot=resource_snapshot)
+        except CaptureRepairUnavailable as exc:
+            raise HTTPException(409, {"code": "capture_repair_unavailable", "message": str(exc), "action_id": action_id}) from exc
+        except HistoryClientError as exc:
+            # Exact actor/account failures remain unavailable; a human cannot
+            # choose an agent actor identity to acquire its completion rights.
+            raise HTTPException(409, {"code": "capture_repair_unavailable", "message": "Recovery action is unavailable or requires its original actor.", "action_id": action_id}) from exc
+        except (FilesFacadeError, CopalBridgeError, OSError, asyncio.TimeoutError) as exc:
+            raise HTTPException(503, {"code": "capture_repair_unavailable", "message": "Recovery snapshot is unavailable; the gap remains.", "action_id": action_id}) from exc
+
+    @router.get("/resources/{resource_id}/versions")
+    async def list_history_resource_versions(
+        resource_id: str,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None, max_length=2048),
+    ) -> Dict[str, Any]:
+        """List bounded Lore version metadata for an authenticated Files resource."""
+        user = require_user(request)
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        try:
+            client = service_client(account_id, request)
+            private_resource_ids = await resolve_history_resource_ids(
+                client, resource_id, request, owner, account_id
+            )
+            page = await list_history_versions_for_candidates(
+                client,
+                private_resource_ids,
+                cursor=cursor,
+                limit=limit,
+            )
+        except HistoryAvailabilityError as exc:
+            raise availability_http_error(exc) from exc
+        except HTTPException:
+            raise
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        return {"resource_id": resource_id, **page}
+
+    @router.get("/resources/{resource_id}/versions/{version_ref}")
+    async def read_history_resource_version(
+        resource_id: str,
+        version_ref: str,
+        request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=64 * 1024, ge=1, le=256 * 1024),
+    ) -> Dict[str, Any]:
+        """Read one bounded base64 chunk of one exact listed version."""
+        user = require_user(request)
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        try:
+            client = service_client(account_id, request)
+            private_resource_ids = await resolve_history_resource_ids(
+                client, resource_id, request, owner, account_id
+            )
+            chunk = await read_history_version_chunk_for_candidates(
+                client,
+                private_resource_ids,
+                version_ref,
+                offset=offset,
+                length=limit,
+            )
+        except HistoryAvailabilityError as exc:
+            raise availability_http_error(exc) from exc
+        except HTTPException:
+            raise
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        content = chunk.get("content")
+        return {
+            "resource_id": resource_id,
+            "version": chunk["version"],
+            "offset": chunk["offset"],
+            "content_encoding": "base64",
+            "content": base64.b64encode(content).decode("ascii") if content is not None else None,
+            "eof": chunk["eof"],
+        }
+
+    @router.get("/resources/{resource_id}/versions/{version_ref}/restore-preview")
+    async def preview_history_resource_restore(
+        resource_id: str,
+        version_ref: str,
+        request: Request,
+    ) -> Dict[str, Any]:
+        """Review the selected source against the current private Files target."""
+        user = require_user(request)
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        try:
+            client = service_client(account_id, request)
+            private_resource_ids = await resolve_history_resource_ids(
+                client, resource_id, request, owner, account_id
+            )
+            private_resource_id = await find_history_version_resource_id(
+                client, private_resource_ids, version_ref
+            )
+            preview = await _bounded_history_io(
+                lambda: client.preview_resource_version_restore(private_resource_id, version_ref)
+            )
+        except HistoryAvailabilityError as exc:
+            raise availability_http_error(exc) from exc
+        except HTTPException:
+            raise
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        return public_history_preview(preview, resource_id)
+
+    @router.get("/settings")
+    async def get_history_settings(request: Request) -> Dict[str, Any]:
+        user = require_user(request)
+        owner = effective_user(request) or user or "local-installation"
+
+        def load_settings():
+            admin = is_admin(request, user)
+            result = visible_snapshot(owner, admin, request)
+            result["owner"] = owner
+            result["workspace_options"] = workspace_options(
+                owner,
+                request,
+                result.get("policy") or {},
+                admin=admin,
+            )
+            return result
+
+        return await _bounded_history_io(load_settings)
+
+    @router.put("/settings")
+    async def put_history_settings(request: Request) -> Dict[str, Any]:
+        user = require_user(request)
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "history settings must be a JSON object") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(422, "history settings must be a JSON object")
+        try:
+            expected = int(body.get("expected_revision"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(428, "expected_revision is required") from exc
+        requested = body.get("policy", body)
+        if not isinstance(requested, dict):
+            raise HTTPException(422, "policy must be an object")
+        admin = is_admin(request, user)
+        owner = effective_user(request) or user
+        account_id = account_id_for(request, owner)
+        client = service_client(account_id, request)
+        try:
+            current_response = await _bounded_history_io(client.get_policy)
+        except (HistoryClientError, OSError, ValueError) as exc:
+            raise HTTPException(503, f"history service unavailable: {exc}") from exc
+        current = dict(current_response.get("Policy") or {})
+        if not admin and "global" in requested:
+            raise HTTPException(403, "installation history target requires administration")
+        roots = authorized_roots(owner, admin)
+        patch = dict(requested)
+        if "scopes" in requested:
+            requested_scopes = requested.get("scopes") or []
+            if not isinstance(requested_scopes, list):
+                raise HTTPException(422, "scopes must be an array")
+            options = set(
+                await _bounded_history_io(
+                    lambda: workspace_options(owner, request, current, admin=admin)
+                )
+            )
+            for scope in requested_scopes:
+                if not isinstance(scope, dict):
+                    raise HTTPException(422, "scope must be an object")
+                scope_owner = str(scope.get("owner_account_id") or account_id).strip()
+                if not admin and scope_owner != account_id:
+                    raise HTTPException(403, "workspace history settings belong to their owner")
+                kind = str(scope.get("kind") or "").strip().lower()
+                if kind == "workspace" and str(scope.get("workspace_id") or "").strip() not in options:
+                    raise HTTPException(403, "workspace is not assigned to this account")
+                if kind == "workspace" and not str(scope.get("workspace_id") or "").strip():
+                    raise HTTPException(422, "workspace history settings require a workspace id")
+                if kind == "directory":
+                    root_id = str(scope.get("root_id") or "")
+                    selected = next((root for root in roots if root.get("id") == root_id and root.get("kind") == "recursive_directory"), None)
+                    if selected is None:
+                        raise HTTPException(403, "directory history settings require an assigned Files root")
+                    candidate = os.path.realpath(str(selected.get("canonical_path")))
+                scope["scope_id"] = scope_id(
+                    kind,
+                    candidate if kind == "directory" else str(scope.get("workspace_id") or ""),
+                    str(scope.get("workspace_id") or "") or None,
+                    scope_owner,
+                )
+                scope["revision"] = int(current.get("revision") or expected) + 1
+                scope["enabled"] = bool(scope.get("enabled", True))
+                scope["kind"] = {"global": "Global", "workspace": "Workspace", "directory": "Directory"}.get(kind, scope.get("kind"))
+                scope["owner_account_id"] = scope_owner
+                if scope["kind"] == "Directory":
+                    scope["root"] = candidate
+                    scope.pop("root_id", None)
+                    scope.pop("value", None)
+            if not admin:
+                preserved = [
+                    scope for scope in current.get("scopes") or []
+                    if isinstance(scope, dict) and scope.get("owner_account_id") != account_id
+                ]
+                patch["scopes"] = preserved + requested_scopes
+        merged = dict(current)
+        if isinstance(requested.get("global"), dict):
+            merged["global"] = {**(current.get("global") or {}), **requested["global"]}
+        if "scopes" in patch:
+            merged["scopes"] = patch["scopes"]
+        for key in ("revision",):
+            merged[key] = current.get(key)
+        # The worker owns merging scopes belonging to other accounts. Sending
+        # their rows or global policy as a normal actor broadens the request
+        # and causes the worker's authorization checks to reject it.
+        submission = merged if admin else {"revision": current.get("revision")}
+        if not admin and "scopes" in requested:
+            submission["scopes"] = requested_scopes
+        try:
+            await _bounded_history_io(
+                lambda: client.set_policy(submission, expected_revision=expected)
+            )
+        except HistoryClientError as exc:
+            message = str(exc)
+            status = 409 if "RevisionMismatch" in message or "revision" in message.lower() else 422
+            raise HTTPException(status, message) from exc
+        def load_updated_settings():
+            result = visible_snapshot(owner, admin, request)
+            result["owner"] = owner or "local-installation"
+            result["workspace_options"] = workspace_options(
+                owner,
+                request,
+                result.get("policy") or {},
+                admin=admin,
+            )
+            return result
+
+        return await _bounded_history_io(load_updated_settings)
 
     return router

@@ -9,6 +9,7 @@ import { tmpdir } from "../fixture/fixture"
 import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { Global } from "../../src/global"
+import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 
 const baseCtx: Omit<Tool.Context, "ask"> = {
   sessionID: SessionID.make("ses_test"),
@@ -67,7 +68,7 @@ describe("tool.assertExternalDirectory", () => {
 
     const directory = "/tmp/project"
     const target = "/tmp/outside/file.txt"
-    const expected = glob(path.join(path.dirname(target), "*"))
+    const expected = glob(path.join(path.dirname(AppFileSystem.resolve(target)), "*"))
 
     await Instance.provide({
       directory,
@@ -87,7 +88,7 @@ describe("tool.assertExternalDirectory", () => {
 
     const directory = "/tmp/project"
     const target = "/tmp/outside"
-    const expected = glob(path.join(target, "*"))
+    const expected = glob(path.join(AppFileSystem.resolve(target), "*"))
 
     await Instance.provide({
       directory,
@@ -139,6 +140,37 @@ describe("tool.assertExternalDirectory", () => {
     expect(requests.length).toBe(0)
   })
 
+  test("does NOT ask for paths under an orchestrator-created worktree base", async () => {
+    const { requests, ctx } = makeCtx()
+
+    // A child isolated into <data>/worktree/<projectID>/<name>. Its Instance may be
+    // bound to the main checkout (subagent inherits parent ctx, or worktree boot
+    // failed and it fell back to shared) — so the worktree path is OUTSIDE
+    // Instance.directory on purpose. Without the trust it would raise
+    // external_directory:ask and a background child with no replier would deadlock.
+    const wtTarget = path.join(
+      Global.Path.data,
+      "worktree",
+      "21e0df6f-0ff7-4b4e-9f19-9bf7d7f64ba1",
+      "t25-gap-a-reliable-idle-peer-relay",
+      "packages",
+      "opencode",
+      "src",
+      "tool",
+      "session.ts",
+    )
+
+    await Instance.provide({
+      directory: "/tmp/project", // wtTarget is OUTSIDE the project dir on purpose
+      fn: async () => {
+        await assertExternalDirectory(ctx, wtTarget)
+      },
+    })
+
+    // Orchestrator worktrees are app-managed, trusted workspaces — no ask.
+    expect(requests.length).toBe(0)
+  })
+
   test("still asks for non-memory paths outside the project (regression)", async () => {
     const { requests, ctx } = makeCtx()
 
@@ -146,6 +178,21 @@ describe("tool.assertExternalDirectory", () => {
       directory: "/tmp/project",
       fn: async () => {
         await assertExternalDirectory(ctx, "/tmp/outside/file.txt")
+      },
+    })
+
+    expect(requests.find((r) => r.permission === "external_directory")).toBeDefined()
+  })
+
+  test("still asks for a foreign path even when it merely resembles the worktree base name (regression)", async () => {
+    const { requests, ctx } = makeCtx()
+
+    // A user path that is NOT under <data>/worktree must still prompt: the trust is
+    // scoped to the app-managed base, it does not broadly weaken external_directory.
+    await Instance.provide({
+      directory: "/tmp/project",
+      fn: async () => {
+        await assertExternalDirectory(ctx, "/tmp/worktree/foreign/file.txt")
       },
     })
 

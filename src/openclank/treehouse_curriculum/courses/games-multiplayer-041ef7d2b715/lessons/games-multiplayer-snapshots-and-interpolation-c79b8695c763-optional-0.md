@@ -1,0 +1,1 @@
+x=3; the response distinguishes waiting/holding from guessing beyond the available sample.

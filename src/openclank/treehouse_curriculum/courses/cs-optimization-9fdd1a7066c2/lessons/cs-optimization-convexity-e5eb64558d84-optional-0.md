@@ -1,0 +1,1 @@
+Continuous set has x=0,value 0; discrete set has ±2,value 4 and is nonconvex.

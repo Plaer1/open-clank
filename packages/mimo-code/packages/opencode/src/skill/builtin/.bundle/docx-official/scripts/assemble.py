@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["lxml>=4.9"]
+# ///
 """Assemble an exploded `.docx` directory tree back into a `.docx`.
 
 Alternate implementation notes:
@@ -12,7 +16,7 @@ Alternate implementation notes:
       Useful for reproducible builds and content-addressed caches.
 
 Usage:
-    python assemble.py <source_dir> <destination.docx> [--sanity]
+    uv run assemble.py <source_dir> <destination.docx> [--sanity]
 """
 from __future__ import annotations
 
@@ -25,7 +29,8 @@ from typing import Iterable
 try:
     from lxml import etree as _et
 except ImportError as exc:  # pragma: no cover
-    sys.stderr.write("assemble.py needs `lxml`. Install with: pip install lxml\n")
+    sys.stderr.write("assemble.py needs `lxml`. Run with `uv run assemble.py` (auto-installs) "
+                     "or: pip install lxml\n")
     raise
 
 _CONTENT_TYPES_NAME = "[Content_Types].xml"

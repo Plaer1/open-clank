@@ -387,7 +387,7 @@ class WebhookManager:
     async def deliver_test(self, webhook_id: str, url: str, encrypted_secret: Optional[str]):
         """Public method for the test-webhook route."""
         decrypted = self._decrypt_secret(encrypted_secret)
-        await self._deliver(webhook_id, url, decrypted, "webhook.test", {"message": "Test ping from Odysseus"})
+        await self._deliver(webhook_id, url, decrypted, "webhook.test", {"message": "Test ping from Open Clank"})
 
     async def _send_request(self, url: str, body: str, headers: dict,
                             ip: ipaddress._BaseAddress) -> httpx.Response:

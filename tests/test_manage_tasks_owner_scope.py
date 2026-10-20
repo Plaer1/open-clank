@@ -35,9 +35,13 @@ _ENGINE = create_engine(
 )
 cdb.Base.metadata.create_all(_ENGINE)
 _TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-# do_manage_tasks does `from core.database import SessionLocal` at call time,
-# so patching the module attribute is enough to point it at the temp DB.
-cdb.SessionLocal = _TS
+
+
+@pytest.fixture(autouse=True)
+def task_database(monkeypatch):
+    # do_manage_tasks imports SessionLocal at call time. Keep the replacement
+    # inside pytest's restoration boundary so later modules retain the real DB.
+    monkeypatch.setattr(cdb, "SessionLocal", _TS)
 
 
 def _seed(task_id, owner):

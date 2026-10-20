@@ -1,0 +1,1 @@
+A basis expresses vectors as combinations; dependent vectors add no new independent direction. Eigenvectors keep their direction under a linear map. Least squares minimizes squared residual when exact equations cannot all hold. Games owns camera spaces/projection/normal transforms.

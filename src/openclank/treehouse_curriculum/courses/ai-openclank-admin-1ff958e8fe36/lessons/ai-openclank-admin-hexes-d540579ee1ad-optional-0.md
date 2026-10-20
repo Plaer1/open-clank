@@ -1,0 +1,1 @@
+If Git contains version A but the file now has uncommitted version B, preserve B before writing C. Recovering A alone would lose the user's current work. Keep the exact preserved bytes under the workspace's approved recovery authority.

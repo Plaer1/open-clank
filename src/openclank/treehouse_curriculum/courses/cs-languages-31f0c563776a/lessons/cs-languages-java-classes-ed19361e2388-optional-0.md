@@ -1,0 +1,1 @@
+One n=2, other n=0; a suitable increment/read operation.

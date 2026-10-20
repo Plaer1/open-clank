@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["lxml>=4.9"]
+# ///
 """Resolve every tracked revision in a `.docx` (accept-all semantics).
 
 Alternate implementation notes:
@@ -14,7 +18,7 @@ Alternate implementation notes:
       XSLT-shaped transform.
 
 Usage:
-    python resolve_revisions.py <input.docx> <output.docx>
+    uv run resolve_revisions.py <input.docx> <output.docx>
 """
 from __future__ import annotations
 
@@ -27,8 +31,8 @@ from typing import Iterable
 try:
     from lxml import etree as _et
 except ImportError as exc:  # pragma: no cover
-    sys.stderr.write("resolve_revisions.py needs `lxml`. "
-                     "Install with: pip install lxml\n")
+    sys.stderr.write("resolve_revisions.py needs `lxml`. Run with `uv run resolve_revisions.py` "
+                     "(auto-installs) or: pip install lxml\n")
     raise
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

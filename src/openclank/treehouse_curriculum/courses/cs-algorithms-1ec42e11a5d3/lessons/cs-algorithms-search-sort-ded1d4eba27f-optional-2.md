@@ -1,0 +1,1 @@
+Insertion sort grows a sorted prefix; merge sort divides, sorts halves, and merges, trading extra storage for O(n log n) comparison work. Stability preserves equal-key order. Comparison-sorting lower bounds use a comparison model; counting/radix methods rely on stronger key assumptions. For valid indices, the lower-bound invariant is A[j]<x for j<lo and A[j]≥x for j≥hi.

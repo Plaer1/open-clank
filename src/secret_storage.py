@@ -26,7 +26,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from core.platform_compat import safe_chmod
+from core.atomic_io import AtomicWriteConflict, atomic_write_bytes
 from src.constants import APP_KEY_FILE
 
 logger = logging.getLogger(__name__)
@@ -41,10 +41,18 @@ def _load_or_create_key() -> bytes:
         return _KEY_PATH.read_bytes()
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     key = Fernet.generate_key()
-    _KEY_PATH.write_bytes(key)
-    # POSIX: lock the key to 0o600. Windows: no-op (the user-profile data dir is
-    # already ACL-restricted); safe_chmod swallows both cases.
-    safe_chmod(_KEY_PATH, 0o600)
+    try:
+        # Creation is process-safe and cross-process-safe. A plain exists/write
+        # sequence allowed two first-use requests to return different keys,
+        # leaving one request's ciphertext permanently unreadable.
+        atomic_write_bytes(
+            str(_KEY_PATH),
+            key,
+            require_missing=True,
+            mode=0o600,
+        )
+    except AtomicWriteConflict:
+        return _KEY_PATH.read_bytes()
     logger.info(f"Generated new app key at {_KEY_PATH}")
     return key
 

@@ -1,0 +1,1 @@
+The test has concrete expected results for scale, orientation, UV, material and animation; a normal map cannot repair the box's silhouette.

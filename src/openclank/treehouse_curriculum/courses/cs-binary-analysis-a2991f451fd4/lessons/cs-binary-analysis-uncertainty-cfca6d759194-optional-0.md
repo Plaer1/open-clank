@@ -1,0 +1,1 @@
+Possible unpacking or runtime code generation; inspect when/how executable bytes appear, without equating either with maliciousness.

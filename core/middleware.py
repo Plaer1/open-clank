@@ -3,10 +3,12 @@
 
 import os
 import secrets
+from collections.abc import Mapping
 
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.routing import get_route_path
 
 
 # Per-process token that lets the in-app tool layer hit admin-gated
@@ -15,8 +17,34 @@ from starlette.responses import Response
 # same value from this module. Never persisted or exposed externally.
 INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
 INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
+INTERNAL_TOOL_OWNER_HEADER = "X-Open-Clank-Owner"
+INTERNAL_TOOL_WORKSPACE_HEADER = "X-Open-Clank-Workspace"
 # Pseudo-username on in-process tool-loopback requests; require_admin trusts it and it is reserved.
 INTERNAL_TOOL_USER = "internal-tool"
+
+
+def get_application_route_path(scope: Mapping[str, object]) -> str:
+    """Return the application-relative path used by Starlette routing.
+
+    Uvicorn prefixes ``scope["path"]`` with a configured ASGI ``root_path``;
+    Starlette removes that prefix before matching routes. Middleware policy
+    must use the same path form or a deployment prefix can change which
+    policy applies to an otherwise unchanged application route.
+    """
+    return get_route_path(scope)
+
+
+def with_asgi_root_path(scope: Mapping[str, object], path: str) -> str:
+    """Prefix an application path for a client-facing redirect target."""
+    root_path = scope.get("root_path", "")
+    if not isinstance(root_path, str) or not root_path:
+        return path
+    return f"{root_path.rstrip('/')}{path}"
+
+
+def path_is_route_or_child(path: str, prefix: str) -> bool:
+    """Return whether ``path`` is exactly ``prefix`` or below that route."""
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def is_cors_preflight(method: str, headers) -> bool:
@@ -33,26 +61,19 @@ def require_admin(request: Request):
     Allows access when auth is explicitly disabled, or when the request carries
     the in-process internal-tool token used by loopback agent tools.
     """
-    # In-process bypass for tool-layer loopback calls. Two paths:
-    # (a) header-direct (caller set X-Odysseus-Internal-Token), or
-    # (b) the auth middleware already validated the token and stamped
-    #     request.state.current_user = "internal-tool".
-    try:
-        hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-        if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
-            return
-        if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
-            return
-    except Exception:
-        pass
-
-    auth_mgr = getattr(request.app.state, "auth_manager", None)
-    if os.getenv("AUTH_ENABLED", "true").lower() == "false":
+    if getattr(request.state, "internal_tool_authenticated", False) and getattr(request.state, "authenticated", False):
         return
-    if not auth_mgr or not auth_mgr.is_configured:
-        raise HTTPException(403, "Admin only")
+    auth_mgr = getattr(request.app.state, "auth_manager", None)
+    if auth_mgr is None:
+        raise HTTPException(503, "Authentication unavailable")
     user = getattr(request.state, "current_user", None)
-    if not user or not auth_mgr.is_admin(user):
+    if not getattr(request.state, "authenticated", False) or not user or user not in auth_mgr.users:
+        raise HTTPException(403, "Admin only")
+    try:
+        permitted = auth_mgr.is_admin(user)
+    except Exception as exc:
+        raise HTTPException(503, "Privilege authority unavailable") from exc
+    if permitted is not True:
         raise HTTPException(403, "Admin only")
 
 
@@ -66,6 +87,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
         path = request.url.path
+        # Files content declares a stricter media policy. Multiple CSP headers
+        # are enforced by intersection, retaining both the app default and the
+        # resource sandbox without broadening any allowed source.
+        resource_csp = (
+            response.headers.get("Content-Security-Policy")
+            if path.startswith("/api/files-v1/content/") else None
+        )
 
         # Tool render endpoints
         is_tool_render = path.startswith("/api/tools/") and path.endswith("/render")
@@ -78,11 +106,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
 
-        is_https = (
-            request.url.scheme == "https"
-            or request.headers.get("X-Forwarded-Proto") == "https"
-        )
-        if is_https:
+        # Proxy middleware may establish ``request.url.scheme`` after applying
+        # its configured trust boundary. A directly supplied forwarded header
+        # has no such authority, so it cannot change transport policy here.
+        if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         if is_report:
@@ -123,4 +150,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )
+        if resource_csp and resource_csp != response.headers.get("Content-Security-Policy"):
+            response.headers.append("Content-Security-Policy", resource_csp)
         return response

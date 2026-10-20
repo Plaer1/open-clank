@@ -1,0 +1,1 @@
+The report includes observed speed behavior and explains why the early return prevents movement after an incomplete reset.

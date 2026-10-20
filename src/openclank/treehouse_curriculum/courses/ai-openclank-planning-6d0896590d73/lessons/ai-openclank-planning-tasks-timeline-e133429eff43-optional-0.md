@@ -1,0 +1,1 @@
+Create a clearly labeled test task in your own workspace, assign an explicit date/timezone, and locate its identity in the supported Timeline/Calendar projection. Verify one date change against the same record. No reminder, invitation or external send is required.

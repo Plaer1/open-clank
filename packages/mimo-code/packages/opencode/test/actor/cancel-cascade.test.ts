@@ -26,7 +26,6 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Goal } from "../../src/session/goal"
-import { TaskGateState } from "../../src/task/gate-state"
 import { SessionStatus } from "../../src/session/status"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
@@ -161,7 +160,6 @@ function makeLayer() {
   const prune = SessionPrune.layer.pipe(Layer.provide(checkpoint), Layer.provideMerge(deps))
   const prompt = SessionPrompt.layer.pipe(
     Layer.provide(Goal.defaultLayer),
-    Layer.provide(TaskGateState.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(summary),
     Layer.provide(checkpoint),
@@ -430,6 +428,51 @@ describe("Actor.cancel cascade", () => {
 
         const child2 = yield* reg.get(parent.id, "general-2")
         expect(child2?.status).toBe("running")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("cancelling an already-idle successful parent is a complete no-op", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* () {
+        const actor = yield* Actor.Service
+        const reg = yield* ActorRegistry.Service
+        const session = yield* Session.Service
+
+        const parent = yield* session.create({ title: "idle parent cancel" })
+        yield* reg.register({
+          sessionID: parent.id,
+          actorID: "parent-idle",
+          mode: "subagent",
+          agent: "general",
+          description: "idle parent",
+          contextMode: "none",
+          background: true,
+          lifecycle: "persistent",
+        })
+        yield* reg.updateStatus(parent.id, "parent-idle", { status: "running" })
+        yield* reg.updateStatus(parent.id, "parent-idle", { status: "idle", lastOutcome: "success" })
+        yield* reg.register({
+          sessionID: parent.id,
+          actorID: "child-running",
+          parentActorID: "parent-idle",
+          mode: "subagent",
+          agent: "general",
+          description: "still running child",
+          contextMode: "none",
+          background: true,
+          lifecycle: "ephemeral",
+        })
+        yield* reg.updateStatus(parent.id, "child-running", { status: "running" })
+
+        yield* actor.cancel(parent.id, "parent-idle", "forced")
+
+        const parentRow = yield* reg.get(parent.id, "parent-idle")
+        const childRow = yield* reg.get(parent.id, "child-running")
+        expect(parentRow?.lastOutcome).toBe("success")
+        expect(childRow?.status).toBe("running")
+        expect(childRow?.lastOutcome).toBeUndefined()
       }),
       { git: true, config: providerCfg },
     ),

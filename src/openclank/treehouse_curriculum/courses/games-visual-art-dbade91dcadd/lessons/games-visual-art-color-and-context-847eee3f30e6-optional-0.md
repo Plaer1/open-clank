@@ -1,0 +1,1 @@
+The response preserves identical patch values, reports perception as observation and supplies a usable alternate cue.

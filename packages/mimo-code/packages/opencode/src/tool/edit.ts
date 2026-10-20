@@ -21,18 +21,23 @@ import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
 import { assertFileRead } from "./read-state"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Flag } from "@/flag/flag"
+import { RecoverableError } from "./recoverable"
+import { fileResult } from "./file-contract"
+import { assertProjectFilePolicy } from "./project-policy"
+import { randomUUID } from "crypto"
 
 function normalizeLineEndings(text: string): string {
-  return text.replaceAll("\r\n", "\n")
+  return text.replaceAll("\r\n", "\n").replaceAll("\r", "\n")
 }
 
-function detectLineEnding(text: string): "\n" | "\r\n" {
-  return text.includes("\r\n") ? "\r\n" : "\n"
+function detectLineEnding(text: string): "\n" | "\r\n" | "\r" {
+  if (text.includes("\r\n")) return "\r\n"
+  return text.includes("\r") ? "\r" : "\n"
 }
 
-function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
+function convertToLineEnding(text: string, ending: "\n" | "\r\n" | "\r"): string {
   if (ending === "\n") return text
-  return text.replaceAll("\n", "\r\n")
+  return text.replaceAll("\n", ending)
 }
 
 const locks = new Map<string, Semaphore.Semaphore>()
@@ -52,6 +57,7 @@ const Parameters = z.object({
   old_string: z.string().describe("The text to replace"),
   new_string: z.string().describe("The text to replace it with (must be different from old_string)"),
   replace_all: z.boolean().optional().describe("Replace all occurrences of old_string (default false)"),
+  expected_fingerprint: z.string().optional().describe("Fingerprint returned by read; rejects stale edits"),
 })
 
 export const EditTool = Tool.define(
@@ -65,6 +71,12 @@ export const EditTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      resources: (params: z.infer<typeof Parameters>, ctx: Tool.Context) => {
+        const filepath = path.isAbsolute(params.file_path)
+          ? params.file_path
+          : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
+        return { reads: [filepath], writes: [filepath] }
+      },
       execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           if (!params.file_path) {
@@ -75,33 +87,61 @@ export const EditTool = Tool.define(
             throw new Error("No changes to apply: old_string and new_string are identical.")
           }
 
-          const filePath = path.isAbsolute(params.file_path)
+          const requested = path.isAbsolute(params.file_path)
             ? params.file_path
             : path.join(SessionCwd.get(ctx.sessionID), params.file_path)
-          yield* assertWriteAllowed(ctx, filePath)
+          const filePath = (yield* assertWriteAllowed(ctx, requested))!
+          const history = AppFileSystem.historyContextFromTool(ctx, filePath)
+          const actionId = randomUUID()
 
           // The "create new file" branch (oldString === "") is effectively a
           // write, so a prior Read isn't meaningful there. For real edits we
           // require Read first so the model is operating on current contents.
-          if (params.old_string !== "") {
-            assertFileRead(ctx, filePath, "edit")
-          }
+          const readFingerprint = params.old_string !== "" ? assertFileRead(ctx, filePath, "edit") : undefined
 
           let diff = ""
           let contentOld = ""
           let contentNew = ""
+          let oldFingerprint: string | undefined
+          let newFingerprint: string | undefined
+          let finalSize = 0
+          let finalEncoding: AppFileSystem.TextSnapshot["encoding"] = "utf-8"
+          let finalNewline: AppFileSystem.TextSnapshot["newline"] = "\n"
           yield* lock(filePath).withPermits(1)(
             Effect.gen(function* () {
               if (params.old_string === "") {
                 const existed = yield* afs.existsSafe(filePath)
+                if (existed) throw new RecoverableError(`edit: ${filePath} already exists; read and edit it instead.`)
                 contentNew = params.new_string
                 diff = trimDiff(createTwoFilesPatch(filePath, filePath, contentOld, contentNew))
+                const policy = yield* Effect.promise(() =>
+                  assertProjectFilePolicy(ctx, [{ path: filePath, content: contentNew }]),
+                )
                 yield* askEditUnlessMemory(ctx, filePath, {
                   patterns: [path.relative(Instance.worktree, filePath)],
                   diff,
                 })
-                yield* afs.writeWithDirs(filePath, params.new_string)
-                yield* format.file(filePath)
+                yield* afs.atomicWrite({
+                  path: filePath,
+                  content: params.new_string,
+                  actionId,
+                  history,
+                  requireMissing: true,
+                }).pipe(
+                  Effect.catchIf(
+                    (error) => error instanceof AppFileSystem.AtomicConflict,
+                    () => Effect.fail(new RecoverableError(`edit: ${filePath} was created concurrently. Read it and retry.`)),
+                  ),
+                )
+                if (!policy.enforced) {
+                  yield* format.file(filePath).pipe(Effect.catch(() => Effect.void))
+                }
+                const finalSnapshot = yield* afs.readTextSnapshot(filePath)
+                contentNew = finalSnapshot.text
+                newFingerprint = finalSnapshot.fingerprint
+                finalSize = finalSnapshot.size
+                finalEncoding = finalSnapshot.encoding
+                finalNewline = finalSnapshot.newline
                 yield* bus.publish(File.Event.Edited, { file: filePath })
                 yield* bus.publish(FileWatcher.Event.Updated, {
                   file: filePath,
@@ -113,13 +153,22 @@ export const EditTool = Tool.define(
               const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
               if (!info) throw new Error(`File ${filePath} not found`)
               if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
-              contentOld = yield* afs.readFileString(filePath)
+              const snapshot = yield* afs.readTextSnapshot(filePath)
+              oldFingerprint = snapshot.fingerprint
+              if (
+                (readFingerprint && snapshot.fingerprint !== readFingerprint) ||
+                (params.expected_fingerprint && params.expected_fingerprint !== snapshot.fingerprint)
+              ) {
+                throw new RecoverableError(`edit: ${filePath} changed since it was read. Read it again and retry.`)
+              }
+              contentOld = snapshot.text
 
               const ending = detectLineEnding(contentOld)
               const old = convertToLineEnding(normalizeLineEndings(params.old_string), ending)
               const next = convertToLineEnding(normalizeLineEndings(params.new_string), ending)
 
               contentNew = replace(contentOld, old, next, params.replace_all)
+              const candidateContent = AppFileSystem.encodeText(snapshot, contentNew)
 
               diff = trimDiff(
                 createTwoFilesPatch(
@@ -129,19 +178,41 @@ export const EditTool = Tool.define(
                   normalizeLineEndings(contentNew),
                 ),
               )
+              const policy = yield* Effect.promise(() =>
+                assertProjectFilePolicy(ctx, [{ path: filePath, content: candidateContent }]),
+              )
               yield* askEditUnlessMemory(ctx, filePath, {
                 patterns: [path.relative(Instance.worktree, filePath)],
                 diff,
               })
 
-              yield* afs.writeWithDirs(filePath, contentNew)
-              yield* format.file(filePath)
+              yield* afs.atomicWrite({
+                path: filePath,
+                content: candidateContent,
+                actionId,
+                history,
+                expectedFingerprint: snapshot.fingerprint,
+                mode: snapshot.mode,
+              }).pipe(
+                Effect.catchIf(
+                  (error) => error instanceof AppFileSystem.AtomicConflict,
+                  () => Effect.fail(new RecoverableError(`edit: ${filePath} changed during the edit. Read it again and retry.`)),
+                ),
+              )
+              if (!policy.enforced) {
+                yield* format.file(filePath).pipe(Effect.catch(() => Effect.void))
+              }
               yield* bus.publish(File.Event.Edited, { file: filePath })
               yield* bus.publish(FileWatcher.Event.Updated, {
                 file: filePath,
                 event: "change",
               })
-              contentNew = yield* afs.readFileString(filePath)
+              const finalSnapshot = yield* afs.readTextSnapshot(filePath)
+              contentNew = finalSnapshot.text
+              newFingerprint = finalSnapshot.fingerprint
+              finalSize = finalSnapshot.size
+              finalEncoding = finalSnapshot.encoding
+              finalNewline = finalSnapshot.newline
               diff = trimDiff(
                 createTwoFilesPatch(
                   filePath,
@@ -169,6 +240,8 @@ export const EditTool = Tool.define(
               diff,
               filediff,
               diagnostics: {},
+              action_id: actionId,
+          history: history?.status ?? { status: "unconfigured", durable: false, coverage: "NoCapture" },
             },
           })
 
@@ -184,6 +257,31 @@ export const EditTool = Tool.define(
               diagnostics,
               diff,
               filediff,
+              filepath: filePath,
+              old_fingerprint: oldFingerprint,
+              fingerprint: newFingerprint,
+              action_id: actionId,
+          history: history?.status ?? { status: "unconfigured", durable: false, coverage: "NoCapture" },
+              file: fileResult({
+                operation: "edit",
+                path: filePath,
+                kind: "text",
+                range: finalSize ? { unit: "byte", start: 0, end: finalSize - 1 } : null,
+                page: {
+                  unit: "byte",
+                  cursor: 0,
+                  next_cursor: null,
+                  has_more: false,
+                  returned: finalSize,
+                  total: finalSize,
+                },
+                bytes_considered: finalSize,
+                lines_considered: contentNew ? contentNew.split(/\r\n|\n|\r/).length : 0,
+                encoding: finalEncoding,
+                newline: finalNewline === "\n" ? "lf" : finalNewline === "\r\n" ? "crlf" : "cr",
+                media_type: AppFileSystem.mimeType(filePath),
+                fingerprint: newFingerprint,
+              }),
             },
             title: `${path.relative(Instance.worktree, filePath)}`,
             output,

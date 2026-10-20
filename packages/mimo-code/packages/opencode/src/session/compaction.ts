@@ -18,6 +18,7 @@ import { InstanceState } from "@/effect"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
+import { SessionPrefixSnapshot } from "./prefix-snapshot"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -54,6 +55,15 @@ function preserveRecentBudget(input: { cfg: Config.Info; model: Provider.Model }
   )
 }
 
+/** Native calculation used by selection and exposed for managed-turn checks. */
+export function preserveRecentBudgetFor(cfg: Config.Info, model: Provider.Model): number {
+  return preserveRecentBudget({ cfg, model })
+}
+
+export function tailTurnsFor(cfg: Config.Info): number {
+  return cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+}
+
 function turns(messages: MessageV2.WithParts[]) {
   const result: Turn[] = []
   for (let i = 0; i < messages.length; i++) {
@@ -77,7 +87,7 @@ export interface Interface {
     tokens: MessageV2.Assistant["tokens"]
     model: Provider.Model
   }) => Effect.Effect<boolean>
-  readonly prune: (input: { sessionID: SessionID; agentID?: string }) => Effect.Effect<void>
+  readonly prune: (input: { sessionID: SessionID; agentID?: string; cfg?: Config.Info }) => Effect.Effect<void>
   readonly process: (input: {
     parentID: MessageID
     messages: MessageV2.WithParts[]
@@ -85,6 +95,7 @@ export interface Interface {
     auto: boolean
     overflow?: boolean
     agentID?: string
+    cfg?: Config.Info
   }) => Effect.Effect<"continue" | "stop" | "text-repeat">
   readonly create: (input: {
     sessionID: SessionID
@@ -139,7 +150,7 @@ export const layer: Layer.Layer<
       cfg: Config.Info
       model: Provider.Model
     }) {
-      const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+      const limit = tailTurnsFor(input.cfg)
       if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
       const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
       const all = turns(input.messages)
@@ -182,9 +193,10 @@ export const layer: Layer.Layer<
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: {
       sessionID: SessionID
       agentID?: string
+      cfg?: Config.Info
     }) {
-      const cfg = yield* config.get()
-      if (!cfg.compaction?.prune) return
+      const cfg = input.cfg ?? (yield* config.get())
+      if (cfg.compaction?.prune === false) return
       log.info("pruning", { agentID: input.agentID ?? "main" })
 
       const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID, { agentID: input.agentID }).pipe(
@@ -237,15 +249,31 @@ export const layer: Layer.Layer<
       auto: boolean
       overflow?: boolean
       agentID?: string
+      cfg?: Config.Info
     }) {
-      const parent = input.messages.findLast((m) => m.info.id === input.parentID)
+      const parentIdx = input.messages.findLastIndex((m) => m.info.id === input.parentID)
+      const parent = parentIdx >= 0 ? input.messages[parentIdx] : undefined
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
       }
       const userMessage = parent.info
       const compactionPart = parent.parts.find((part): part is MessageV2.CompactionPart => part.type === "compaction")
 
-      let messages = input.messages
+      // Truncate history at the previous compaction boundary so a repeat
+      // compaction summarizes [previous summary + messages since], not the full raw
+      // history (which would grow unboundedly and overflow the compaction model).
+      // Only compaction boundaries are used — checkpoint boundaries inject a
+      // lossy rebuild and compaction benefits from seeing the full window since
+      // the last compaction (including any checkpoint rebuild text in between).
+      const boundaryIdx = input.messages.findLastIndex(
+        (m, i) =>
+          i < parentIdx &&
+          m.info.role === "user" &&
+          m.parts.some((p) => p.type === "compaction"),
+      )
+      const scoped = boundaryIdx >= 0 ? input.messages.slice(boundaryIdx) : input.messages
+
+      let messages = scoped
       let replay:
         | {
             info: MessageV2.User
@@ -253,20 +281,23 @@ export const layer: Layer.Layer<
           }
         | undefined
       if (input.overflow) {
-        const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
+        const idx = scoped.findIndex((m) => m.info.id === input.parentID)
         for (let i = idx - 1; i >= 0; i--) {
-          const msg = input.messages[i]
-          if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
+          const msg = scoped[i]
+          if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction" || p.type === "checkpoint")) {
             replay = { info: msg.info, parts: msg.parts }
-            messages = input.messages.slice(0, i)
+            messages = scoped.slice(0, i)
             break
           }
         }
         const hasContent =
-          replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
+          replay &&
+          messages.some(
+            (m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction" || p.type === "checkpoint"),
+          )
         if (!hasContent) {
           replay = undefined
-          messages = input.messages
+          messages = scoped
         }
       }
 
@@ -274,7 +305,7 @@ export const layer: Layer.Layer<
       const model = agent.model
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const selected = yield* select({
         messages: history,
@@ -314,8 +345,28 @@ export const layer: Layer.Layer<
       const prompt = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, { stripMedia: true })
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(
+        msgs,
+        model,
+        input.overflow ? { stripMedia: true } : { collapseCheckpointTail: true },
+      )
       const ctx = yield* InstanceState.context
+      // Match the parent request's stable profile defaults. Compaction has no
+      // separate session-prompt configuration in this owner.
+      const parentSession = yield* session.get(input.sessionID)
+      const parentAgent = yield* agents.get(userMessage.agent)
+      const profileKey = SessionPrefixSnapshot.profileKey({
+        providerID: userMessage.model.providerID,
+        modelID: userMessage.model.modelID,
+        agent: userMessage.agent,
+        agentID: userMessage.agentID ?? "main",
+        harness: "default",
+        systemMode: "append",
+        system: userMessage.system ?? "",
+        format: userMessage.format ?? { type: "text" },
+        permission: Agent.runtimePermission(parentAgent, parentSession.permission),
+      })
+      const frozenPrefix = yield* SessionPrefixSnapshot.get(input.sessionID, profileKey)
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
         role: "assistant",
@@ -353,8 +404,13 @@ export const layer: Layer.Layer<
         user: userMessage,
         agent,
         sessionID: input.sessionID,
-        tools: {},
+        // Preserve the frozen advertised prefix without granting compaction a
+        // second execution authority: restored entries contain schemas only.
+        tools: frozenPrefix?.tools ? SessionPrefixSnapshot.restoreTools(frozenPrefix.tools) : {},
+        activeTools: frozenPrefix?.tools?.map((item) => item.name),
+        toolChoice: "auto",
         system: [],
+        prebuiltSystem: frozenPrefix?.system,
         messages: [
           ...modelMessages,
           {

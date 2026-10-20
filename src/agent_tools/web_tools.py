@@ -7,17 +7,29 @@ from src.constants import MAX_OUTPUT_CHARS
 
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.search import comprehensive_web_search
+        from src.search import SearchService
         progress_cb = ctx.get("progress_cb") if isinstance(ctx, dict) else None
         raw = content.strip()
         query = raw
         time_filter = None
         max_pages = 5
+        provider = None
+        mode = "results"
+        intent = "web"
+        operation_id = None
         if raw.startswith("{"):
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict) and "query" in parsed:
                     query = str(parsed.get("query", "")).strip()
+                    if parsed.get("provider") is not None:
+                        provider = str(parsed.get("provider")).strip() or None
+                    if parsed.get("operation_id") is not None:
+                        operation_id = str(parsed.get("operation_id")).strip() or None
+                    if parsed.get("mode") in ("results", "read", "answer"):
+                        mode = parsed["mode"]
+                    if parsed.get("intent") in ("web", "image"):
+                        intent = parsed["intent"]
                     tf = parsed.get("time_filter") or parsed.get("freshness")
                     if isinstance(tf, str) and tf.lower() in ("day", "week", "month", "year"):
                         time_filter = tf.lower()
@@ -45,17 +57,11 @@ class WebSearchTool:
                 "tail": f"Searching web for: {query[:160]}",
             })
         try:
-            text, sources = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: comprehensive_web_search(
-                        query,
-                        max_pages=max_pages,
-                        time_filter=time_filter,
-                        return_sources=True,
-                    ),
-                ),
-                timeout=30,
+            response = await SearchService().search(
+                query, caller="code", mode=mode, provider=provider, count=max_pages,
+                freshness=time_filter, owner=(ctx.get("owner") or "") if isinstance(ctx, dict) else "",
+                deadline=30, intent=intent,
+                operation_id=operation_id,
             )
         except asyncio.TimeoutError:
             return {
@@ -67,6 +73,11 @@ class WebSearchTool:
                 "error": f"web_search failed: {type(e).__name__}: {str(e) or 'no details'}",
                 "exit_code": 1,
             }
+        if response.error:
+            return {"error": f"web_search: {response.error.get('message', response.status)}", "exit_code": 1,
+                    "status": response.status, "result": response.as_dict()}
+        text = "\n\n".join(f"{r.title}\n{r.snippet}" for r in response.results)
+        sources = [r.as_dict() for r in response.results]
         if progress_cb:
             await progress_cb({
                 "elapsed_s": 30,

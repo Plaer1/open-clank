@@ -1,15 +1,15 @@
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from types import SimpleNamespace
 from src.chat_processor import ChatProcessor
 
 def test_build_context_preface_web_search_success(monkeypatch):
     """Test that LLM correctly extracts and uses a web search query."""
-    mock_llm_call = MagicMock(return_value="extracted query")
-    monkeypatch.setattr("src.llm_core.llm_call", mock_llm_call)
+    mock_llm_call = AsyncMock(return_value="extracted query")
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", mock_llm_call)
 
-    mock_web_search = MagicMock(return_value=("Search Results", [{"url": "http://mock.com"}]))
-    monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
+    mock_web_search = AsyncMock(return_value=("Search Results", [{"url": "http://mock.com"}]))
+    monkeypatch.setattr("src.chat_processor._search_web_context", mock_web_search)
 
     processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
     session = SimpleNamespace(endpoint_url="http://local", model="test", headers={})
@@ -23,16 +23,16 @@ def test_build_context_preface_web_search_success(monkeypatch):
         use_skills=False
     ))
 
-    mock_web_search.assert_called_with("extracted query", time_filter=None, return_sources=True)
+    mock_web_search.assert_awaited_once_with("extracted query", time_filter=None, owner="")
 
 def test_build_context_preface_web_search_fallback_on_llm_failure(monkeypatch):
     """Test fallback to original query if LLM fails."""
-    def failing_llm(*args, **kwargs):
+    async def failing_llm(*args, **kwargs):
         raise ValueError("LLM down")
-    monkeypatch.setattr("src.llm_core.llm_call", failing_llm)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", failing_llm)
 
-    mock_web_search = MagicMock(return_value=("Search Results", []))
-    monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
+    mock_web_search = AsyncMock(return_value=("Search Results", []))
+    monkeypatch.setattr("src.chat_processor._search_web_context", mock_web_search)
 
     processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
     session = SimpleNamespace(endpoint_url="http://local", model="test", headers={})
@@ -46,15 +46,15 @@ def test_build_context_preface_web_search_fallback_on_llm_failure(monkeypatch):
         use_skills=False
     ))
 
-    mock_web_search.assert_called_with("First line", time_filter=None, return_sources=True)
+    mock_web_search.assert_awaited_once_with("First line", time_filter=None, owner="")
 
 def test_build_context_preface_web_search_fallback_on_empty_generation(monkeypatch):
     """Test fallback to original query if LLM returns empty string."""
-    mock_llm_call = MagicMock(return_value="   \n  ")
-    monkeypatch.setattr("src.llm_core.llm_call", mock_llm_call)
+    mock_llm_call = AsyncMock(return_value="   \n  ")
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", mock_llm_call)
 
-    mock_web_search = MagicMock(return_value=("Search Results", []))
-    monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
+    mock_web_search = AsyncMock(return_value=("Search Results", []))
+    monkeypatch.setattr("src.chat_processor._search_web_context", mock_web_search)
 
     processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
     session = SimpleNamespace(endpoint_url="http://local", model="test", headers={})
@@ -68,16 +68,16 @@ def test_build_context_preface_web_search_fallback_on_empty_generation(monkeypat
         use_skills=False
     ))
 
-    mock_web_search.assert_called_with("Fallback line", time_filter=None, return_sources=True)
+    mock_web_search.assert_awaited_once_with("Fallback line", time_filter=None, owner="")
 
 def test_build_context_preface_web_search_query_sanitization(monkeypatch):
     """Test that query is truncated and whitespace collapsed."""
     long_query = "word  " * 50
-    mock_llm_call = MagicMock(return_value=long_query)
-    monkeypatch.setattr("src.llm_core.llm_call", mock_llm_call)
+    mock_llm_call = AsyncMock(return_value=long_query)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", mock_llm_call)
 
-    mock_web_search = MagicMock(return_value=("Search Results", []))
-    monkeypatch.setattr("src.chat_processor.comprehensive_web_search", mock_web_search)
+    mock_web_search = AsyncMock(return_value=("Search Results", []))
+    monkeypatch.setattr("src.chat_processor._search_web_context", mock_web_search)
 
     processor = ChatProcessor(memory_manager=MagicMock(), personal_docs_manager=MagicMock())
     session = SimpleNamespace(endpoint_url="http://local", model="test", headers={})
@@ -91,6 +91,6 @@ def test_build_context_preface_web_search_query_sanitization(monkeypatch):
         use_skills=False
     ))
 
-    called_query = mock_web_search.call_args[0][0]
+    called_query = mock_web_search.await_args.args[0]
     assert len(called_query) <= 150
     assert "  " not in called_query

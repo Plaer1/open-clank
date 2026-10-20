@@ -1,102 +1,197 @@
-"""Owner-scope regression for /api/compare/start endpoint-key resolution.
+"""Normalized-provider regressions for ``POST /api/compare/start``."""
 
-start_comparison() takes caller-supplied endpoint URLs (endpoint_a/endpoint_b),
-matches a ModelEndpoint by base_url, and copies that row's *decrypted* api_key
-into the caller-owned [CMP] session's headers — which then drive that session's
-/api/chat_stream calls. The match must be exact-owner scoped so a user can't
-mint a comparison bound to ANOTHER user's private endpoint and spend their
-api_key / reach their base_url.
-Mirrors the session `_owned_endpoint` and research `_owned_enabled_endpoint`
-fixes.
-"""
-
+from pathlib import Path
 from types import SimpleNamespace
 
-import core.database
-from routes.compare_routes import _owned_endpoint_by_url
+import pytest
+from fastapi import HTTPException
+
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
 
-class _Predicate:
-    def __init__(self, check):
-        self._check = check
+class _FakeDB:
+    def __init__(self):
+        self.added = []
 
-    def __call__(self, row):
-        return self._check(row)
+    def add(self, value):
+        self.added.append(value)
 
-    def __or__(self, other):
-        return _Predicate(lambda row: self(row) or other(row))
+    def commit(self):
+        pass
 
-
-class _Column:
-    def __init__(self, name):
-        self.name = name
-
-    def __eq__(self, value):
-        return _Predicate(lambda row: getattr(row, self.name) == value)
+    def close(self):
+        pass
 
 
-class _ModelEndpoint:
-    base_url = _Column("base_url")
-    owner = _Column("owner")
+def _request(*, allowed_models=None):
+    privileges = {}
+    if allowed_models is not None:
+        privileges = {
+            "allowed_models_restricted": True,
+            "allowed_models": allowed_models,
+        }
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=SimpleNamespace(
+                    get_privileges=lambda _owner: privileges,
+                )
+            )
+        ),
+    )
 
 
-class _Query:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def filter(self, *predicates):
-        self._rows = [r for r in self._rows if all(p(r) for p in predicates)]
-        return self
-
-    def first(self):
-        return self._rows[0] if self._rows else None
+def _route(endpoint_id, model_id):
+    return SimpleNamespace(
+        public_endpoint_id=endpoint_id,
+        provider_model_id=model_id,
+        model_route_id=f"pmr-{endpoint_id}-{model_id}",
+    )
 
 
-class _DB:
-    def __init__(self, rows):
-        self._rows = rows
+def _start(session_manager):
+    from routes.compare_routes import setup_compare_routes
 
-    def query(self, model):
-        assert model is _ModelEndpoint
-        return _Query(self._rows)
-
-
-def _ep(base_url, owner):
-    return SimpleNamespace(base_url=base_url, owner=owner, api_key="sk-secret")
+    router = setup_compare_routes(session_manager)
+    return [
+        route.endpoint
+        for route in router.routes
+        if getattr(route, "path", "") == "/api/compare/start"
+    ][-1]
 
 
-def _resolve(monkeypatch, rows, base_url, owner):
-    monkeypatch.setattr(core.database, "ModelEndpoint", _ModelEndpoint)
-    return _owned_endpoint_by_url(_DB(rows), base_url, owner)
+@pytest.mark.asyncio
+async def test_raw_urls_are_never_execution_authority(monkeypatch):
+    import routes.compare_routes as compare
+
+    called = False
+
+    def _resolve(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(compare, "resolve_chat_route", _resolve)
+    start = _start(SimpleNamespace(create_session=lambda **_: None))
+    with pytest.raises(HTTPException) as exc:
+        await start(
+            _request(),
+            prompt="p",
+            model_a="a",
+            model_b="b",
+            endpoint_a="https://provider-a.example/v1",
+            endpoint_b="https://provider-b.example/v1",
+            endpoint_a_id="",
+            endpoint_b_id="",
+        )
+
+    assert exc.value.status_code == 422
+    assert called is False
 
 
-URL = "https://api.example.com/v1"
+@pytest.mark.asyncio
+async def test_compare_sessions_are_managed_and_secret_free(monkeypatch):
+    import routes.compare_routes as compare
+
+    db = _FakeDB()
+    monkeypatch.setattr(compare, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        compare,
+        "resolve_chat_route",
+        lambda *, endpoint_id, model_id, **_: _route(endpoint_id, model_id),
+    )
+    created = []
+    start = _start(SimpleNamespace(create_session=lambda **kw: created.append(kw)))
+
+    await start(
+        _request(),
+        prompt="p",
+        model_a="model-a",
+        model_b="model-b",
+        endpoint_a="https://ignored.example/a",
+        endpoint_b="https://ignored.example/b",
+        endpoint_a_id="conn-a",
+        endpoint_b_id="share:grant-b",
+        is_blind="false",
+    )
+
+    assert len(created) == 2
+    assert {row["endpoint_url"] for row in created} == {MANAGED_ENGINE_PUBLIC_URL}
+    assert {row["endpoint_id"] for row in created} == {"conn-a", "share:grant-b"}
+    assert {row["provider_model_route_id"] for row in created} == {
+        "pmr-conn-a-model-a",
+        "pmr-share:grant-b-model-b",
+    }
+    assert all("headers" not in row for row in created)
+    comparison = db.added[-1]
+    assert comparison.endpoint_a == MANAGED_ENGINE_PUBLIC_URL
+    assert comparison.endpoint_b == MANAGED_ENGINE_PUBLIC_URL
+    assert comparison.provider_model_route_a_id == "pmr-conn-a-model-a"
+    assert comparison.provider_model_route_b_id == "pmr-share:grant-b-model-b"
 
 
-def test_rejects_another_owners_private_endpoint(monkeypatch):
-    # bob owns the only endpoint at URL; alice supplying that URL gets None
-    # → no headers, no key copied into her comparison session.
-    rows = [_ep(URL, "bob")]
-    assert _resolve(monkeypatch, rows, URL, "alice") is None
+@pytest.mark.asyncio
+async def test_both_routes_validate_before_any_session_is_created(monkeypatch):
+    import routes.compare_routes as compare
+    from src.openclank.chat_routing import ChatRouteUnavailable
+
+    monkeypatch.setattr(compare, "SessionLocal", _FakeDB)
+
+    def _resolve(*, endpoint_id, model_id, **_kwargs):
+        if endpoint_id == "missing":
+            raise ChatRouteUnavailable("route unavailable")
+        return _route(endpoint_id, model_id)
+
+    monkeypatch.setattr(compare, "resolve_chat_route", _resolve)
+    created = []
+    start = _start(SimpleNamespace(create_session=lambda **kw: created.append(kw)))
+    with pytest.raises(HTTPException) as exc:
+        await start(
+            _request(),
+            prompt="p",
+            model_a="a",
+            model_b="b",
+            endpoint_a_id="conn-a",
+            endpoint_b_id="missing",
+        )
+
+    assert exc.value.status_code == 400
+    assert created == []
 
 
-def test_returns_callers_own_endpoint(monkeypatch):
-    rows = [_ep(URL, "bob"), _ep(URL, "alice")]
-    ep = _resolve(monkeypatch, rows, URL, "alice")
-    assert ep is not None and ep.owner == "alice"
+@pytest.mark.asyncio
+async def test_privilege_may_allow_stable_route_id(monkeypatch):
+    import routes.compare_routes as compare
+
+    db = _FakeDB()
+    route = _route("conn", "same-model")
+    monkeypatch.setattr(compare, "SessionLocal", lambda: db)
+    monkeypatch.setattr(compare, "resolve_chat_route", lambda **_: route)
+    created = []
+    start = _start(SimpleNamespace(create_session=lambda **kw: created.append(kw)))
+
+    await start(
+        _request(allowed_models=[route.model_route_id]),
+        prompt="p",
+        model_a="same-model",
+        model_b="same-model",
+        endpoint_a_id="conn",
+        endpoint_b_id="conn",
+    )
+    assert len(created) == 2
 
 
-def test_rejects_legacy_null_owner_row_for_authenticated_user(monkeypatch):
-    rows = [_ep(URL, None)]
-    assert _resolve(monkeypatch, rows, URL, "alice") is None
-
-
-def test_no_match_returns_none(monkeypatch):
-    rows = [_ep("https://other.example/v1", "alice")]
-    assert _resolve(monkeypatch, rows, URL, "alice") is None
-
-
-def test_unresolved_owner_only_sees_legacy_null_owner_row(monkeypatch):
-    rows = [_ep(URL, "bob"), _ep(URL, None)]
-    ep = _resolve(monkeypatch, rows, URL, None)
-    assert ep is not None and ep.owner is None
+def test_compare_has_no_legacy_endpoint_or_credential_path():
+    body = Path("routes/compare/compare_routes.py").read_text(encoding="utf-8")
+    assert "resolve_chat_route(" in body
+    assert "MANAGED_ENGINE_PUBLIC_URL" in body
+    for forbidden in (
+        "ModelEndpoint",
+        "api_key",
+        "build_headers",
+        "build_chat_url",
+        "_owned_endpoint_by_url",
+        "_owned_endpoint_by_id",
+        "_reject_raw_endpoint_url_for_non_admin",
+    ):
+        assert forbidden not in body

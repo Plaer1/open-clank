@@ -1,0 +1,1 @@
+The states have explicit transitions; the crate problem is distinguished from choosing a goal and from static route existence.

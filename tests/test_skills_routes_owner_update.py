@@ -6,8 +6,15 @@ import pytest
 from fastapi import Request
 from fastapi.datastructures import State
 
-from routes.skills_routes import SkillUpdateRequest, setup_skills_routes
+import routes.skills_routes as skills_routes
+from routes.skills_routes import (
+    SkillAddRequest,
+    SkillImportUrlRequest,
+    SkillUpdateRequest,
+    setup_skills_routes,
+)
 from services.memory.skill_format import slugify
+from services.memory.skill_importer import ResolvedSource
 from services.memory.skills import SkillsManager
 
 
@@ -83,13 +90,13 @@ async def test_update_skill_route_passes_owner_to_manager(tmp_path):
     result = await update_route(
         _request("alice"),
         "caveman-mode",
-        SkillUpdateRequest(status="published", description="alice updated"),
+        SkillUpdateRequest(description="alice updated"),
     )
 
     assert result == {"ok": True}
     alice_after = alice_path.read_text(encoding="utf-8")
     bob_after = bob_path.read_text(encoding="utf-8")
-    assert "status: published" in alice_after
+    assert "status: draft" in alice_after
     assert "alice updated" in alice_after
     assert "status: draft" in bob_after
     assert "bob original" in bob_after
@@ -132,5 +139,164 @@ async def test_save_skill_markdown_route_passes_owner_to_manager(tmp_path):
     assert result == {"ok": True, "name": "caveman-mode"}
     saved = skill_path.read_text(encoding="utf-8")
     assert "description: after" in saved
-    assert "status: published" in saved
+    assert "status: draft" in saved
     assert "- updated step" in saved
+
+
+@pytest.mark.asyncio
+async def test_authenticated_add_can_explicitly_publish(tmp_path):
+    sm = SkillsManager(str(tmp_path))
+    router = setup_skills_routes(sm)
+    add_route = _route_handler(router, "/api/skills/add", "POST")
+
+    result = await add_route(
+        _request("alice"),
+        SkillAddRequest(
+            name="human-published",
+            description="explicit user publish",
+            when_to_use="test",
+            procedure=["step"],
+            status="draft",
+        ),
+    )
+
+    skill = result["skill"]
+    sm.set_necessity(skill["skill_id"], True, owner="alice")
+    sm.set_audit(skill["skill_id"], "pass", worker_model="judge", owner="alice")
+    update_route = _route_handler(router, "/api/skills/{skill_id}", "PUT")
+    await update_route(
+        _request("alice"),
+        skill["name"],
+        SkillUpdateRequest(
+            status="published",
+            expected_revision=skill["revision"],
+            expected_hash=skill["content_hash"],
+        ),
+    )
+    assert sm.index_for(owner="alice")[0]["name"] == "human-published"
+
+
+@pytest.mark.asyncio
+async def test_add_requested_as_published_is_returned_as_staged(tmp_path):
+    sm = SkillsManager(str(tmp_path))
+    add_route = _route_handler(
+        setup_skills_routes(sm),
+        "/api/skills/add",
+        "POST",
+    )
+
+    result = await add_route(
+        _request("alice"),
+        SkillAddRequest(
+            name="needs-attestation",
+            description="must be audited",
+            procedure=["verify it"],
+            status="published",
+        ),
+    )
+
+    assert result["ok"] is True
+    assert result["staged"] is True
+    assert result["skill"]["status"] == "draft"
+    assert result["publish_readiness"]["ready"] is False
+    assert sm.load(owner="alice")[0]["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_url_import_persists_only_canonical_pinned_provenance(
+    tmp_path,
+    monkeypatch,
+):
+    from services.memory import skill_importer
+
+    sha = "c" * 40
+    source = ResolvedSource(
+        owner="Example",
+        repo="skills",
+        ref=sha,
+        path="bundles/pinned",
+        kind="directory",
+    )
+    monkeypatch.setenv("AUTH_ENABLED", "false")
+    monkeypatch.setattr(
+        skill_importer,
+        "fetch_skill_bundle",
+        lambda url: ({
+            "SKILL.md": textwrap.dedent("""\
+                ---
+                name: pinned-route
+                description: route provenance
+                status: published
+                ---
+
+                # Procedure
+                - verify
+                """),
+        }, source),
+    )
+    sm = SkillsManager(str(tmp_path))
+    route = _route_handler(
+        setup_skills_routes(sm),
+        "/api/skills/import-from-url",
+        "POST",
+    )
+
+    result = await route(
+        _request("alice"),
+        SkillImportUrlRequest(
+            url="https://github.com/Example/skills/tree/main/bundles/pinned"
+        ),
+    )
+
+    assert result["skill"]["status"] == "draft"
+    assert result["skill"]["source_uri"] == source.canonical_uri
+    assert result["skill"]["source_revision"] == sha
+    assert "main" not in result["skill"]["source_uri"]
+    assert "?" not in result["skill"]["source_uri"]
+    assert "@" not in result["skill"]["source_uri"]
+
+
+def test_passed_audit_uses_explicit_publish_authority(tmp_path, monkeypatch):
+    sm = SkillsManager(str(tmp_path))
+    sm.add_skill(
+        name="audited-skill",
+        description="audited",
+        when_to_use="test",
+        procedure=["step"],
+        owner="alice",
+    )
+    monkeypatch.setattr(
+        skills_routes,
+        "_audit_auto_publish_policy",
+        lambda owner: (True, 0.8),
+    )
+
+    status = skills_routes._audit_finalize_status(
+        sm,
+        "audited-skill",
+        "alice",
+        "pass",
+        0.95,
+    )
+    assert status == "draft"
+    assert sm.load(owner="alice")[0]["status"] == "draft"
+    sm.set_necessity("audited-skill", True, owner="alice")
+    sm.set_audit("audited-skill", "pass", worker_model="judge", owner="alice")
+    ready = sm.publish_readiness("audited-skill", "alice")
+    assert sm.publish_skill(
+        "audited-skill",
+        "alice",
+        expected_revision=ready["revision"],
+        expected_hash=ready["content_hash"],
+        publisher="user:alice",
+    )
+
+    status = skills_routes._audit_finalize_status(
+        sm,
+        "audited-skill",
+        "alice",
+        "fail",
+        0.95,
+    )
+    assert status == "draft"
+    assert sm.load(owner="alice")[0]["status"] == "draft"

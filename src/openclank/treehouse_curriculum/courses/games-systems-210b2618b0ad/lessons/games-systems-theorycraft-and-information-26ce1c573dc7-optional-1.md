@@ -1,0 +1,1 @@
+Subtract purchase cost once. Distinguish per-round value from efficiency per action.

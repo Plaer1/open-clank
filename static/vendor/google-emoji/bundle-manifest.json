@@ -1,0 +1,142 @@
+{
+  "complete": false,
+  "runtime_available": true,
+  "expected_kitchen": 147000,
+  "available_kitchen": 146983,
+  "google_sampler": 1916,
+  "google_resolvable": 1924,
+  "original_records": 151047,
+  "pack_bytes": 449189888,
+  "pack_sha256": "42adf0a79e4012ae71be7f5b3c348b51cdbfddc254a02829547cb60a58a4074c",
+  "noto_commit": "e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e",
+  "kitchen_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+  "exceptions": [
+    {
+      "identity": "k:1f349_26f3",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20240530/u26f3/u26f3_u1f349.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f35a_1f525",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20230803/u1f525/u1f525_u1f35a.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f399-fe0f_1f44d",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20260202/u1f44d/u1f44d_u1f399-ufe0f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f39e-fe0f_1f60e",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20240530/u1f39e-ufe0f/u1f39e-ufe0f_u1f60e.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f3ad_1fa77",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20250130/u1f3ad/u1f3ad_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f3f5-fe0f_1f414",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u1f414/u1f414_u1f3f5-ufe0f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f3f5-fe0f_1f419",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u1f419/u1f419_u1f3f5-ufe0f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f3f5-fe0f_1f430",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u1f430/u1f430_u1f3f5-ufe0f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f42f_1f512",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20260128/u1f512/u1f512_u1f42f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f44a_1f96f",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20260128/u1f44a/u1f44a_u1f96f.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f44d_1f937",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241023/u1f44d/u1f44d_u1f937.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f4da_1fa77",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20240530/u1f4da/u1f4da_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f6fc_1fa77",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u1f6fc/u1f6fc_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1f94b_1fa77",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u1f94b/u1f94b_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1fa77_265f-fe0f",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20250430/u265f-ufe0f/u265f-ufe0f_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1fa77_26a1",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20251029/u26a1/u26a1_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    },
+    {
+      "identity": "k:1fa77_2708-fe0f",
+      "source_url": "https://www.gstatic.com/android/keyboard/emojikitchen/20241021/u2708-ufe0f/u2708-ufe0f_u1fa77.png",
+      "source_commit": "062ffca53643d36946336cdc2c7655e2576f0a42",
+      "error": "HTTP 404"
+    }
+  ],
+  "policy": "Runtime-only integer-ID SQLite, lossless WebP and exact zlib SVG; full acquisition provenance separately preserved",
+  "runtime_schema": 2,
+  "kitchen_format": "webp",
+  "runtime_identity_sha256": "ce034852c9e38bc5a87b83104dcf7ad8c440227a9840728e490bd2e926065517",
+  "optimization": {
+    "profile": {
+      "name": "compact-lossless-webp-v2",
+      "max_dimension": 160,
+      "resampling": "nearest",
+      "webp_lossless": true,
+      "webp_method": 4,
+      "webp_effort": 75,
+      "webp_exact": true,
+      "google_svg": "exact-zlib",
+      "sqlite_page_size": 1024,
+      "runtime_schema": 2
+    },
+    "source_pack_sha256": "2c9e29cdffb64a173a7f2fc8b62ecb886331f422f71b935caf9298660bef116e",
+    "source_manifest_sha256": "5ef680bc040af8a33c22928c9fc616e580311f492aa8e031638bb2eda9ecd0af",
+    "pillow": "12.3.0",
+    "libwebp": "1.6.0",
+    "pipeline_sha256": "dae63934368461ce0bc1c225162997c6e426c5d41e8eac365c0d6697daccd8a2",
+    "runtime_helper_sha256": "9d312c0685e5afa9c73d167a9ab581d4ee0b7359e7435b28c665cc7fd8e31e3e",
+    "source_runtime_identity_sha256": "ce034852c9e38bc5a87b83104dcf7ad8c440227a9840728e490bd2e926065517"
+  }
+}

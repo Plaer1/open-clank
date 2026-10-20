@@ -23,6 +23,7 @@ import { Instance } from "@/project/instance"
 import { bootstrap } from "../bootstrap"
 import { SessionShare } from "@/share"
 import { Session } from "../../session"
+import { childProcessEnv } from "@/util/child-process-env"
 import type { SessionID } from "../../session/schema"
 import { MessageID, PartID } from "../../session/schema"
 import { Provider } from "../../provider"
@@ -32,7 +33,7 @@ import { SessionPrompt } from "@/session/prompt"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Git } from "@/git"
 import { setTimeout as sleep } from "node:timers/promises"
-import { Process } from "@/util"
+import { Log, Process } from "@/util"
 import { Effect } from "effect"
 
 type GitHubAuthor = {
@@ -339,7 +340,7 @@ export const GithubInstallCommand = cmd({
                   ? `start "" "${url}"`
                   : `xdg-open "${url}"`
 
-            exec(command, (error) => {
+            exec(command, { env: childProcessEnv() }, (error) => {
               if (error) {
                 prompts.log.warn(`Could not open browser. Please visit: ${url}`)
               }
@@ -444,7 +445,7 @@ export const GithubRunCommand = cmd({
       const context = isMock ? (JSON.parse(args.event!) as Context) : github.context
       if (!SUPPORTED_EVENTS.includes(context.eventName as (typeof SUPPORTED_EVENTS)[number])) {
         core.setFailed(`Unsupported event type: ${context.eventName}`)
-        process.exit(1)
+        await Log.exit(1)
       }
 
       // Determine event category for routing
@@ -708,7 +709,7 @@ export const GithubRunCommand = cmd({
           await revokeAppToken()
         }
       }
-      process.exit(exitCode)
+      await Log.exit(exitCode)
 
       function normalizeModel() {
         const value = process.env["MODEL"]

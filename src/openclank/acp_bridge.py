@@ -2,20 +2,27 @@
 
 import asyncio
 import base64
+import copy
 import binascii
 import hashlib
+import hmac
+import inspect
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional
 
-from src.memory_scope import chat_workspace
+from src.memory_scope import chat_workspace, memory_owner
 from src.openclank.acp_client import ACPClient, RPCError, TransportError
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 from src.openclank.permission_grants import derive_pattern
+from src.openclank.session_map import OwnerSessionMap, _EXPECTED_UNSET
 
 logger = logging.getLogger(__name__)
 
@@ -33,29 +40,181 @@ _LIFETOOLS_SERVER = Path(__file__).resolve().parent / "lifetools_server.py"
 
 # Path to the fm-mcp binary (frankenmemory)
 _FM_MCP_COMMAND = os.environ.get("FM_MCP_COMMAND", "fm-mcp")
+_MEMORY_BROKER_URL = ""
+_MEMORY_BROKER_TOKEN = ""
+_COPAL_BROKER_URL = ""
+_COPAL_BROKER_TOKEN = ""
+
+_NATIVE_MEDIA_SOURCE_BYTES = 150 * 1024 * 1024
+_NATIVE_MEDIA_PAYLOAD_BYTES = 50 * 1024 * 1024
+
+
+def configure_frankenmemory_broker(url: str, token: str) -> None:
+    """Configure the private app-owned memory transport inherited by lifetools.
+
+    The token is held in process memory and projected only into the scoped
+    lifetools descriptor; it is never put in the host-wide environment.
+    """
+    global _MEMORY_BROKER_URL, _MEMORY_BROKER_TOKEN
+    _MEMORY_BROKER_URL = str(url or "").strip()
+    _MEMORY_BROKER_TOKEN = str(token or "").strip()
+    if bool(_MEMORY_BROKER_URL) != bool(_MEMORY_BROKER_TOKEN):
+        raise ValueError("memory broker URL and token must be configured together")
+
+
+def configure_copal_broker(url: str, token: str) -> None:
+    """Configure the private app-owned Copal transport inherited by lifetools."""
+    global _COPAL_BROKER_URL, _COPAL_BROKER_TOKEN
+    _COPAL_BROKER_URL = str(url or "").strip()
+    _COPAL_BROKER_TOKEN = str(token or "").strip()
+    if bool(_COPAL_BROKER_URL) != bool(_COPAL_BROKER_TOKEN):
+        raise ValueError("Copal broker URL and token must be configured together")
+
+
+def copal_broker_token(master_token: str, owner: str, workspace: str) -> str:
+    owner = str(owner or "").strip()
+    workspace = str(workspace or "").strip()
+    if not master_token or not owner or not workspace:
+        raise ValueError("Copal broker scope is incomplete")
+    payload = f"open-clank-copal-broker-v1\0{owner}\0{workspace}".encode()
+    return hmac.new(master_token.encode(), payload, hashlib.sha256).hexdigest()
+
+
+def frankenmemory_broker_token(
+    master_token: str, owner: str, workspace_id: str
+) -> str:
+    owner = str(owner or "").strip()
+    workspace_id = str(workspace_id or "").strip()
+    if not master_token or not owner or not workspace_id:
+        raise ValueError("memory broker scope is incomplete")
+    payload = f"open-clank-memory-broker-v1\0{owner}\0{workspace_id}".encode()
+    return hmac.new(master_token.encode(), payload, hashlib.sha256).hexdigest()
+
+
+def frankenmemory_child_env(*, command: str | None = None) -> dict[str, str]:
+    """Project only Frankenmemory runtime configuration into child processes."""
+    from src.constants import FM_DB_PATH
+
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if value
+        and name in {"FM_DB_PATH", "FM_DB_ID"}
+    }
+    # Children must share the exact store path even when the parent relies on
+    # the compiled-in default: broker-mode providers gate direct sqlite v2
+    # reads on an explicit FM_DB_PATH, and an implicit default could drift
+    # from the broker's store.
+    env.setdefault("FM_DB_PATH", str(FM_DB_PATH))
+    db_path = env.get("FM_DB_PATH")
+    if db_path and not os.path.isabs(db_path):
+        raise ValueError("FM_DB_PATH must be absolute")
+
+    resolved_command = (
+        command
+        if command is not None
+        else os.environ.get("FM_MCP_COMMAND") or _FM_MCP_COMMAND
+    )
+    if resolved_command:
+        env["FM_MCP_COMMAND"] = resolved_command
+    return env
 
 
 def lifetools_mcp_descriptor(
     owner: str = "",
     session_id: str = "",
     workspace: str = "",
+    authority_workspace_id: str = "",
+    memory_workspace_id: str = "",
+    memory_enabled: bool = True,
+    copal_workspace: str = "default",
+    engine_session_aliases: Optional[list[str]] = None,
+    binding_revision: int = 0,
+    map_revision: int = 0,
+    mapping_revision: int = 0,
 ) -> dict:
     """Build the MCP server descriptor for the life-tools bridge.
 
     Returns a dict matching the ACP McpServerStdio shape:
     {name, command, args, env:[{name,value}]}
     """
+    skill_owner = str(owner or "").strip()
+    owner = memory_owner(owner)
+    workspace_id = str(memory_workspace_id or chat_workspace()).strip()
+    authority_workspace_id = str(authority_workspace_id or "").strip()
+    copal_workspace = str(copal_workspace or "default").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", copal_workspace):
+        raise ValueError("invalid Copal workspace for lifetools descriptor")
     scope = hashlib.sha256(
-        f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
+        f"{owner}\0{session_id}\0{workspace}\0{authority_workspace_id}\0{copal_workspace}".encode("utf-8")
     ).hexdigest()[:12]
+    child_env = {
+        "OWNER": owner,
+        "OPEN_CLANK_SKILL_OWNER": skill_owner,
+        "SESSION_ID": session_id,
+        "WORKSPACE": workspace,
+        "OPEN_CLANK_AUTHORITY_WORKSPACE_ID": authority_workspace_id,
+        "FM_SCOPE_AUTHORITY": "trusted-caller",
+        "FM_OWNER": owner,
+        "FM_WORKSPACE_ID": workspace_id,
+        "COPAL_WORKSPACE": copal_workspace,
+        "FM_MEMORY_ENABLED": "1" if memory_enabled else "0",
+        "OPEN_CLANK_ENGINE_SESSION_ALIASES": json.dumps(
+            list(engine_session_aliases or []), separators=(",", ":")
+        ),
+        "OPEN_CLANK_SESSION_BINDING_REVISION": str(max(0, int(binding_revision))),
+        "OPEN_CLANK_SESSION_MAP_REVISION": str(max(0, int(map_revision))),
+        "OPEN_CLANK_SESSION_MAPPING_REVISION": str(max(0, int(mapping_revision))),
+        **frankenmemory_child_env(command=_FM_MCP_COMMAND),
+    }
+    # The managed engine and its lifetools process use an owner-private data
+    # directory. Stable Workspace authority, however, lives in the app's
+    # canonical policy/auth stores. Project their paths explicitly so the
+    # trusted bridge can re-resolve the current immutable owner + Workspace on
+    # every tool call instead of trusting the baked physical cwd.
+    from src.constants import APP_DB, AUTH_FILE
+
+    child_env.update(
+        {
+            "OPEN_CLANK_AUTHORITY_DB_PATH": os.path.abspath(APP_DB),
+            "OPEN_CLANK_AUTHORITY_AUTH_PATH": os.path.abspath(AUTH_FILE),
+        }
+    )
+    # The lifetools process owns its Copal adapter, so carry the app's
+    # partitioned store into that process as well.  Without this, a
+    # disposable/partitioned app falls back to the repository default and
+    # collides with another running Copal bridge before the first tool call.
+    copal_root = os.environ.get("COPAL_LOOSE_ROOT", "").strip()
+    if copal_root:
+        child_env["COPAL_LOOSE_ROOT"] = copal_root
+    if _COPAL_BROKER_URL:
+        child_env.update(
+            {
+                "OPEN_CLANK_COPAL_BROKER_URL": _COPAL_BROKER_URL,
+                "OPEN_CLANK_COPAL_BROKER_TOKEN": copal_broker_token(
+                    _COPAL_BROKER_TOKEN, owner, copal_workspace
+                ),
+                "OPEN_CLANK_COPAL_BROKER_WORKSPACE": copal_workspace,
+            }
+        )
+    if _MEMORY_BROKER_URL:
+        from src.openclank.code_query import code_binding_token
+        child_env.update(
+            {
+                "OPEN_CLANK_MEMORY_BROKER_URL": _MEMORY_BROKER_URL,
+                "OPEN_CLANK_MEMORY_BROKER_TOKEN": frankenmemory_broker_token(
+                    _MEMORY_BROKER_TOKEN, owner, workspace_id
+                ),
+                **({"OPEN_CLANK_CODE_BINDING_TOKEN": code_binding_token(_MEMORY_BROKER_TOKEN, owner=owner, session_id=session_id, workspace_id=authority_workspace_id, binding_revision=max(0, int(binding_revision)))} if session_id and authority_workspace_id else {}),
+            }
+        )
     return {
         "name": f"lifetools_{scope}",
         "command": sys.executable,
         "args": [str(_LIFETOOLS_SERVER)],
         "env": [
-            {"name": "OWNER", "value": owner},
-            {"name": "SESSION_ID", "value": session_id},
-            {"name": "WORKSPACE", "value": workspace},
+            {"name": name, "value": value}
+            for name, value in child_env.items()
         ],
     }
 
@@ -73,25 +232,18 @@ def frankenmemory_mcp_descriptor(
     workspace defaults to the canonical chat workspace; pass one only for a
     genuinely workspace-scoped session (never a filesystem path for chat).
     """
-    owner = owner.strip()
+    owner = memory_owner(owner)
     workspace = workspace.strip() or chat_workspace()
-    if not owner:
-        raise ValueError("frankenmemory MCP sessions require an authenticated owner")
-    env_entries = [
-        {"name": "FM_WORKSPACE_ID", "value": workspace},
-        {"name": "FM_OWNER", "value": owner},
-        {"name": "FM_SESSION_ID", "value": session_id},
-    ]
-    # Phase 5: pass FM_DB_PATH explicitly so the bridged MCP server
-    # converges on the same db even if the env gets stripped by a proxy.
-    db_path = os.environ.get("FM_DB_PATH")
-    if db_path:
-        if not os.path.isabs(db_path):
-            raise ValueError("FM_DB_PATH must be absolute")
-        env_entries.append({"name": "FM_DB_PATH", "value": db_path})
-    db_id = os.environ.get("FM_DB_ID")
-    if db_id:
-        env_entries.append({"name": "FM_DB_ID", "value": db_id})
+    child_env = {
+        "FM_WORKSPACE_ID": workspace,
+        "FM_OWNER": owner,
+        "FM_SESSION_ID": session_id,
+        # This server is attached only so MiMo can register the scoped internal
+        # provider. Its model-visible tools are denied separately, and fm-mcp
+        # uses this marker as defense in depth for privileged/internal calls.
+        "FM_AGENT_BRIDGE": "1",
+        **frankenmemory_child_env(command=_FM_MCP_COMMAND),
+    }
 
     scope = hashlib.sha256(
         f"{owner}\0{session_id}\0{workspace}".encode("utf-8")
@@ -100,7 +252,10 @@ def frankenmemory_mcp_descriptor(
         "name": f"frankenmemory_{scope}",
         "command": _FM_MCP_COMMAND,
         "args": [],
-        "env": env_entries,
+        "env": [
+            {"name": name, "value": value}
+            for name, value in child_env.items()
+        ],
     }
 
 
@@ -146,7 +301,7 @@ def odysseus_mcp_descriptors(*, is_admin: bool) -> tuple[list[dict], list[str]]:
         finally:
             db.close()
     except Exception as exc:
-        logger.warning("failed to compile Odysseus MCP descriptors: %s", exc)
+        logger.warning("failed to compile Open Clank MCP descriptors: %s", exc)
         return [], []
 
 
@@ -278,11 +433,16 @@ class ACPBridge:
         permission_handler: Optional[Callable[[dict], Coroutine[Any, Any, dict]]] = None,
         memory_provider: Any = None,
         session_map_path: Optional[Path] = None,
+        managed_provider_context: Any = None,
+        session_workspace_adapter: Any = None,
+        lifecycle_epoch: str | None = None,
     ) -> None:
         self._client = client
         self._cwd = cwd
         self._owner = owner
         self._memory_provider = memory_provider
+        self._managed_provider_context = managed_provider_context
+        self._session_workspace_adapter = session_workspace_adapter
         self._delete_session_callback = None
         # Per-session turn state (only one active turn per session at a time)
         self._turns: Dict[str, _TurnState] = {}
@@ -290,10 +450,13 @@ class ACPBridge:
         self._queues: Dict[str, asyncio.Queue] = {}
         # Per-session available models from mimo's handshake (modelId → {modelId, name})
         self._session_models: Dict[str, list] = {}
-        # Full negotiated control-plane state, keyed by MiMo session id. The
-        # canonical desired selection is persisted on the Odysseus session.
+        # Full negotiated control-plane state, keyed by Open Clank agent session id. The
+        # canonical desired selection is persisted on the Open Clank session.
         self._session_state: Dict[str, dict] = {}
         self._session_context: Dict[str, dict] = {}
+        self._session_context_locks: Dict[str, asyncio.Lock] = {}
+        self._session_admission_locks: Dict[tuple[str, str], asyncio.Lock] = {}
+        self._pending_session_results: Dict[str, dict] = {}
         self.question_handler = QuestionHandler()
         from src.openclank.acp_terminal import ACPTerminalManager
 
@@ -303,21 +466,24 @@ class ACPBridge:
         # Latest full catalog from any handshake — mimo is the model
         # authority; /api/models reports this list up to the picker.
         self.available_models: list = []
-        # Odysseus-session → mimo-session remap for sessions whose mimo-side
+        # Open Clank-session → mimo-session remap for sessions whose mimo-side
         # state is gone (e.g. created before the MIMOCODE_HOME isolation).
         # Persisted so the remap survives server restarts.
-        self._session_map_path = session_map_path or (
-            Path(os.environ.get(
-                "ODYSSEUS_DATA_DIR",
-                str(Path(__file__).resolve().parents[2] / "data"),
-            )) / "mimocode" / "session-map.json"
-        )
-        try:
-            self._session_map: Dict[str, str] = json.loads(self._session_map_path.read_text())
-        except Exception:
-            self._session_map = {}
+        if session_map_path is not None:
+            self._session_map_path = session_map_path
+        else:
+            runtime_root = (
+                Path(
+                    os.environ.get("OPEN_CLANK_DATA_DIR")
+                    or os.environ.get("ODYSSEUS_DATA_DIR")
+                    or str(Path(__file__).resolve().parents[2] / "data")
+                ) / "runtime" / "agent-engine"
+            )
+            owner_key = hashlib.sha256(str(owner or "local").encode("utf-8")).hexdigest()
+            self._session_map_path = runtime_root / "owners" / owner_key / "session-map.json"
+        self._durable_session_map = OwnerSessionMap(self._session_map_path, self._owner, lifecycle_epoch=lifecycle_epoch)
+        self._session_map = self._durable_session_map.flat_current()
 
-        # Register callbacks with the real permission handler
         register_client_callbacks(
             client,
             permission_handler=permission_handler,
@@ -340,13 +506,96 @@ class ACPBridge:
         self.question_handler.on_request(self._surface_question)
         self.question_handler.on_resolved(self._clear_question)
         client.register_callback("_odysseus/question", self.question_handler.handle)
+        client.register_callback("_openclank/session/v1/cwd/change", self._handle_session_cwd_change)
+        client.register_callback("_openclank/session/v1/binding/read", self._handle_session_binding_read)
+        client.register_callback("_openclank/session/v1/code-context/read", self._handle_code_context_read)
+        client.register_callback("_openclank/session/v1/goal/completed", self._handle_goal_completed)
+        # History callbacks derive both account and stable chat from this
+        # admitted engine session. The engine never receives an owner selector.
+        from src.openclank.conversation_archive import get_conversation_archive
+        from src.openclank.managed_history import ManagedHistoryCallbacks
 
-        # C1: surface permission prompts through the active turn's SSE stream
+        self._managed_history_callbacks = ManagedHistoryCallbacks(
+            get_conversation_archive(), self._managed_history_binding
+        )
+        client.register_callback(
+            "_openclank/history/v1/query",
+            lambda params: self._managed_history_callbacks.dispatch("_openclank/history/v1/query", params),
+        )
+        client.register_callback(
+            "_openclank/history/v1/mutate",
+            lambda params: self._managed_history_callbacks.dispatch("_openclank/history/v1/mutate", params),
+        )
         if permission_handler is not None and hasattr(permission_handler, "on_request"):
             permission_handler.on_request(self._surface_permission)
 
+    async def _bind_engine_session(
+        self,
+        chat_id: str,
+        engine_id: str,
+        *,
+        expected_current: Optional[str] = None,
+        expected_mapping_revision: Optional[int] = None,
+    ) -> dict:
+        # Per-chat create/remap CAS uses only the chat's own current/mapping
+        # evidence.  A pre-read owner-wide map revision is not a valid expected
+        # axis here: an unrelated chat's bind/remap/forget would otherwise fail
+        # this chat even though its own mapping is unchanged.
+        try:
+            item = await self._durable_session_map.async_bind(
+                chat_id,
+                engine_id,
+                expected_map_revision=None,
+                expected_current=expected_current,
+                expected_mapping_revision=expected_mapping_revision,
+            )
+        except Exception:
+            # os.replace() may have succeeded while its directory fsync
+            # reported an error. Re-read the authority before treating the
+            # admission as lost; this is safe because the expected-current
+            # CAS remains the winner test.
+            current = await self._durable_session_map.async_lookup(chat_id)
+            if not current or current.get("current") != engine_id:
+                raise
+            map_revision, mapping_revision = await self._durable_session_map.async_revisions(chat_id)
+            item = dict(current)
+            item.update({"mapRevision": map_revision, "mappingRevision": mapping_revision})
+        self._session_map = await self._durable_session_map.async_flat_current()
+        return item
+
+    def _session_admission_lock(self, chat_id: str, owner: str) -> asyncio.Lock:
+        key = (str(owner or ""), str(chat_id))
+        return self._session_admission_locks.setdefault(key, asyncio.Lock())
+
+    def _session_map_entry(self, chat_id: str) -> dict:
+        return self._durable_session_map.lookup(chat_id) or {}
+
+    def _binding_revision_for_chat(self, chat_id: str) -> int:
+        from src.openclank.transcript_projection import get_managed_binding
+        binding = get_managed_binding(chat_id, owner=self._owner or None)
+        value = binding.get("workspaceRevision")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError("managed binding workspace revision is invalid")
+        return value
+
+    def _map_revisions_for_chat(self, chat_id: str) -> tuple[int, int]:
+        return self._durable_session_map.revisions(chat_id)
+
+
     def set_session_delete_callback(self, callback) -> None:
         self._delete_session_callback = callback
+
+    def set_session_workspace_adapter(self, callback) -> None:
+        """Install the host's per-chat workspace adapter.
+
+        The callback receives ``(chat_id, cwd)`` before the in-memory ACP
+        context is committed under the chat lock. It may be sync or async. A
+        rejection leaves both host state and the engine's local cwd unchanged;
+        this keeps physical cwd, stable file-policy workspace, Copal, and
+        memory axes separate while ensuring the next turn sees one committed
+        value.
+        """
+        self._session_workspace_adapter = callback
 
     async def cleanup_session(self, mimo_session_id: str) -> None:
         await self.terminal_manager.cleanup_session(mimo_session_id)
@@ -387,6 +636,13 @@ class ACPBridge:
             "meta": result.get("_meta") or previous.get("meta") or {},
             "current": self._current_config(config_options),
             "desired": previous.get("desired", {}),
+            "last_root_operation_id": previous.get("last_root_operation_id"),
+            "workspace": previous.get("workspace"),
+            "workspace_id": previous.get("workspace_id"),
+            "goal_id": previous.get("goal_id"),
+            "file_policy_workspace": previous.get("file_policy_workspace"),
+            "copal_workspace": previous.get("copal_workspace"),
+            "memory_workspace": previous.get("memory_workspace"),
         }
 
     def _bind_canonical_session(
@@ -394,12 +650,43 @@ class ACPBridge:
         mimo_session: str,
         odysseus_session: str,
         owner: str,
+        *,
+        physical_cwd: Optional[str] = None,
+        authority_workspace_id: str = "",
+        memory_enabled: bool = True,
+        engine_aliases: Optional[list[str]] = None,
+        binding_revision: int = 0,
+        map_revision: int = 0,
+        mapping_revision: int = 0,
+        copal_workspace: str = "default",
+        memory_workspace_id: str = "",
     ) -> None:
+        initial_cwd = str(physical_cwd or self._cwd).strip()
         self._session_context[mimo_session] = {
             "odysseus_session_id": odysseus_session,
             "owner": owner,
-            "workspace": self._cwd,
+            "workspace": initial_cwd,
+            "cwd": initial_cwd,
+            "physical_cwd": initial_cwd,
+            "file_policy_workspace": self._cwd,
+            "copal_workspace": copal_workspace,
+            "memory_workspace": memory_workspace_id or chat_workspace(),
             "incognito": False,
+            "managed_binding": {
+                "owner": owner,
+                "stableChatID": odysseus_session,
+                "engineSessionID": mimo_session,
+                "engineAliases": list(engine_aliases or [])[:16],
+                "memoryWorkspaceID": memory_workspace_id or chat_workspace(),
+                "authorityWorkspaceID": authority_workspace_id,
+                "copalWorkspace": copal_workspace,
+                "physicalCwd": initial_cwd,
+                "workspaceRevision": max(0, int(binding_revision)),
+                "mapRevision": max(0, int(map_revision)),
+                "mappingRevision": max(0, int(mapping_revision)),
+                "memoryEnabled": memory_enabled,
+                "transition": None,
+            },
         }
         state = self._session_state.get(mimo_session)
         if state is None:
@@ -418,24 +705,153 @@ class ACPBridge:
             state["desired"] = dict(state.get("current") or {})
         if previous.get("commands") and not state.get("commands"):
             state["commands"] = list(previous["commands"])
-        self._persist_session_state(mimo_session)
+        previous_workspace = str(previous.get("workspace") or "").strip()
+        binding = previous.get("managed_binding")
+        if isinstance(binding, dict):
+            previous_workspace = str(binding.get("physicalCwd") or "").strip()
+            candidate = dict(self._session_context[mimo_session].get("managed_binding") or {})
+            if candidate.get("engineSessionID") != binding.get("engineSessionID"):
+                # A remap preserves stable authority axes while publishing the
+                # newly admitted engine and locked map evidence.
+                binding = {
+                    **binding,
+                    "engineSessionID": candidate.get("engineSessionID"),
+                    "engineAliases": list(candidate.get("engineAliases") or []),
+                    "mapRevision": candidate.get("mapRevision"),
+                    "mappingRevision": candidate.get("mappingRevision"),
+                    "memoryEnabled": candidate.get("memoryEnabled", binding.get("memoryEnabled", True)),
+                    "transition": None,
+                }
+            self._session_context[mimo_session].update({
+                "workspace": previous_workspace,
+                "cwd": previous_workspace,
+                "physical_cwd": previous_workspace,
+                "managed_binding": dict(binding),
+            })
+        if previous_workspace and not isinstance(binding, dict):
+            state["workspace"] = previous_workspace
+            self._session_context[mimo_session].update(
+                {
+                    "workspace": previous_workspace,
+                    "cwd": previous_workspace,
+                    "physical_cwd": previous_workspace,
+                }
+            )
+        for key in ("workspace_id", "goal_id", "file_policy_workspace", "copal_workspace", "memory_workspace"):
+            value = str(previous.get(key) or "").strip()
+            if value:
+                state[key] = value
+                self._session_context[mimo_session][key] = value
+        self._persist_session_state(mimo_session, persist_binding=True)
 
-    def _persist_session_state(self, mimo_session: str) -> None:
+    def _persist_session_state(
+        self,
+        mimo_session: str,
+        *,
+        required: bool = False,
+        expected_workspace_revision: Optional[int] = None,
+        persist_binding: bool = False,
+    ) -> bool:
         context = self._session_context.get(mimo_session)
         state = self._session_state.get(mimo_session)
         if not context or state is None:
-            return
+            if required:
+                raise RuntimeError("session state is not bound to a persistable chat")
+            return False
+        saved_binding = None
+        prior_binding = None
         try:
-            from src.openclank.transcript_projection import save_mimo_state
+            from src.openclank.transcript_projection import get_managed_binding, save_managed_binding, save_mimo_state
 
-            saved = save_mimo_state(
-                context["odysseus_session_id"],
-                state,
-                owner=context["owner"] or None,
-            )
-            state["revision"] = saved["revision"]
+            # Prepare a detached snapshot so a failed projection commit cannot
+            # partially mutate the live in-memory state. Required callers use
+            # the return value as the authority boundary before acknowledging.
+            staged = dict(state)
+            for key in ("workspace", "workspace_id", "goal_id", "file_policy_workspace", "copal_workspace", "memory_workspace"):
+                if context.get(key):
+                    staged[key] = context[key]
+            managed_binding = copy.deepcopy(context.get("managed_binding")) if persist_binding else None
+            if managed_binding:
+                try:
+                    prior_binding = get_managed_binding(
+                        context["odysseus_session_id"], owner=context.get("owner") or self._owner
+                    )
+                except (KeyError, ValueError):
+                    prior_binding = None
+            save_kwargs = {"owner": context.get("owner") or self._owner or None}
+            if expected_workspace_revision is not None:
+                save_kwargs["expected_workspace_revision"] = expected_workspace_revision
+            if managed_binding:
+                binding_kwargs = {"owner": save_kwargs["owner"]}
+                if expected_workspace_revision is not None:
+                    binding_kwargs["expected_workspace_revision"] = expected_workspace_revision
+                # Binding replacement is a four-axis CAS.  Workspace
+                # revision alone cannot distinguish a stale remap from a
+                # later winner that happens to have the same cwd revision.
+                expected_binding = managed_binding
+                binding_kwargs.update({
+                    "expected_engine_session_id": (
+                        expected_binding.get("engineSessionID")
+                        if isinstance(expected_binding, dict) else None
+                    ),
+                    "expected_map_revision": (
+                        int(expected_binding.get("mapRevision") or 0)
+                        if isinstance(expected_binding, dict) else 0
+                    ),
+                    "expected_mapping_revision": (
+                        int(expected_binding.get("mappingRevision") or 0)
+                        if isinstance(expected_binding, dict) else 0
+                    ),
+                })
+                saved_binding = save_managed_binding(
+                    context["odysseus_session_id"], managed_binding, **binding_kwargs
+                )
+            state_save_kwargs = {"owner": save_kwargs["owner"]}
+            if not managed_binding and expected_workspace_revision is not None:
+                state_save_kwargs["expected_workspace_revision"] = expected_workspace_revision
+            saved = save_mimo_state(context["odysseus_session_id"], staged, **state_save_kwargs)
+            revision = saved["revision"]
+            state.update(staged)
+            if saved_binding:
+                context["managed_binding"] = copy.deepcopy(saved_binding)
+                state["managed_binding"] = copy.deepcopy(saved_binding)
+            state["revision"] = revision
+            return True
         except KeyError:
-            pass
+            if required:
+                raise
+            return False
+        except Exception:
+            if saved_binding and prior_binding:
+                try:
+                    save_managed_binding(
+                        context["odysseus_session_id"],
+                        prior_binding,
+                        owner=context.get("owner") or self._owner,
+                        expected_workspace_revision=saved_binding.get("workspaceRevision"),
+                        expected_engine_session_id=saved_binding.get("engineSessionID"),
+                        expected_map_revision=saved_binding.get("mapRevision"),
+                        expected_mapping_revision=saved_binding.get("mappingRevision"),
+                    )
+                except Exception:
+                    logger.exception("managed binding compensation failed for %s", mimo_session)
+                    self._fence_admission(context.get("odysseus_session_id"), "state compensation")
+            elif saved_binding:
+                try:
+                    from src.openclank.transcript_projection import delete_managed_binding
+
+                    delete_managed_binding(
+                        context["odysseus_session_id"],
+                        owner=context.get("owner") or self._owner,
+                        expected_workspace_revision=saved_binding.get("workspaceRevision"),
+                        expected_engine_session_id=saved_binding.get("engineSessionID"),
+                        expected_map_revision=saved_binding.get("mapRevision"),
+                        expected_mapping_revision=saved_binding.get("mappingRevision"),
+                    )
+                except Exception:
+                    logger.exception("managed binding deletion compensation failed for %s", mimo_session)
+                    self._fence_admission(context.get("odysseus_session_id"), "state deletion compensation")
+            raise
 
     def negotiated_state(self, odysseus_session: str) -> dict:
         mimo_session = self._session_map.get(odysseus_session)
@@ -463,6 +879,14 @@ class ACPBridge:
                 odysseus_session, cwd=cwd, owner=owner
             )
         state = self._session_state.get(mimo_session, {})
+        if config_id == "agent_profile":
+            # This is a host next-turn selection, distinct from public modes.
+            eligible = {item.get("id") for item in (state.get("modes") or {}).get("availableModes", []) if isinstance(item, dict) and item.get("id") not in {"plan", "chat"}}
+            if value and value not in eligible:
+                raise ValueError("Named profile is not currently eligible for this session")
+            state.setdefault("desired", {})["agent_profile"] = value
+            self._persist_session_state(mimo_session)
+            return dict(state)
         option = next(
             (
                 item
@@ -472,7 +896,7 @@ class ACPBridge:
             None,
         )
         if option is None:
-            raise ValueError(f"MiMo did not advertise config option {config_id!r}")
+            raise ValueError(f"Open Clank agent did not advertise config option {config_id!r}")
         allowed = [item.get("value") for item in option.get("options", [])]
         if allowed and value not in allowed:
             raise ValueError(
@@ -522,12 +946,18 @@ class ACPBridge:
                 and selected == options[0].get("label")
             )
             if approved and state.get("plan_state"):
-                state["plan_state"]["approved_revision"] = req.plan_revision
+                plan_state = state["plan_state"]
+                plan_state["approved_revision"] = req.plan_revision
+                plan_state["approved_digest"] = plan_state.get("digest")
+                plan_state["status"] = "approved"
             state.pop("pending_question", None)
             self._persist_session_state(req.mimo_session_id)
 
     async def _handle_session_update(self, mimo_session_id: str, update: dict) -> None:
         """Route a session/update notification to the right session's queue."""
+        # The cwd change request/ack callback is the authority boundary. This
+        # event is only a local/UI projection after that callback succeeds;
+        # stale or forged notifications must never mutate host workspace state.
         if update.get("sessionUpdate") == "available_commands_update":
             state = self._session_state.setdefault(mimo_session_id, {})
             state["commands"] = list(update.get("availableCommands") or [])
@@ -535,6 +965,290 @@ class ACPBridge:
         q = self._queues.get(mimo_session_id)
         if q is not None:
             await q.put(update)
+
+    async def _handle_session_cwd_change(self, params: dict) -> dict:
+        from src.openclank.managed_protocol import (
+            validate_managed_method_request,
+            validate_managed_method_result,
+        )
+
+        method = "_openclank/session/v1/cwd/change"
+        request = validate_managed_method_request(method, params)
+        result = await self._apply_session_cwd(
+            request["sessionID"],
+            request["requestedCwd"],
+            expected_workspace_revision=request["expectedWorkspaceRevision"],
+            transition_id=request["transitionID"],
+        )
+        return validate_managed_method_result(method, result)
+
+    def _managed_history_binding(self, mimo_session_id: str) -> tuple[str, str]:
+        """Return the current owner/chat only after durable admission checks."""
+        context = self._session_context.get(mimo_session_id) or {}
+        owner = str(context.get("owner") or self._owner or "").strip()
+        chat_id = str(context.get("odysseus_session_id") or "").strip()
+        if not owner or not chat_id:
+            raise ValueError("managed history session is not bound")
+        entry = self._durable_session_map.lookup(chat_id)
+        if not entry or entry.get("current") != mimo_session_id:
+            raise ValueError("managed history session is stale")
+        from src.openclank.transcript_projection import get_managed_binding
+
+        binding = get_managed_binding(chat_id, owner=owner)
+        if (
+            binding.get("owner") != owner
+            or binding.get("stableChatID") != chat_id
+            or binding.get("engineSessionID") != mimo_session_id
+        ):
+            raise ValueError("managed history binding mismatch")
+        return owner, chat_id
+
+    async def _handle_goal_completed(self, params: dict) -> dict:
+        from datetime import datetime, UTC
+        from src.openclank.managed_protocol import validate_managed_method_request, validate_managed_method_result
+        from src.openclank.files_service_client import history_binding_for
+        from src.openclank.achievement_producers import record_journal_activity
+        method = "_openclank/session/v1/goal/completed"
+        receipt = validate_managed_method_request(method, params)
+        session_id = receipt["sessionID"]
+        owner, chat_id = self._managed_history_binding(session_id)
+        context = self._session_context[session_id]
+        binding = history_binding_for(owner, "agent", context)
+        account_id = str((binding or {}).get("account_id") or "")
+        if not account_id:
+            raise ValueError("Goal receipt has no authenticated account binding")
+        # Owner/account/session come from admission, never caller facts. Only
+        # journal IDs and trusted evidence references cross this private seam.
+        replayed = await asyncio.to_thread(record_journal_activity, account_id, "goal.verified.completed",
+                    receipt["journalID"], {"goalId": receipt["goalID"], "transition": "verified_completed",
+                    "evidenceSatisfied": True, "evidenceRefs": receipt["evidenceRefs"], "modelClaimOnly": False},
+                    occurred_at=datetime.fromtimestamp(receipt["verifiedAt"] / 1000, UTC).isoformat(),
+                    workspace_id=str(context.get("workspace_id") or binding.get("workspace_id") or "default"))
+        return validate_managed_method_result(method, {"accepted": True, "replayed": replayed})
+
+    async def _handle_session_binding_read(self, params: dict) -> dict:
+        from src.openclank.managed_protocol import (
+            validate_managed_method_request,
+            validate_managed_method_result,
+        )
+
+        method = "_openclank/session/v1/binding/read"
+        request = validate_managed_method_request(method, params)
+        mimo_session_id = request["sessionID"]
+        context = self._session_context.get(mimo_session_id)
+        if not context:
+            raise ValueError("unknown managed engine session")
+        chat_id = str(context.get("odysseus_session_id") or "").strip()
+        durable_entry = self._durable_session_map.lookup(chat_id) if chat_id else None
+        if not chat_id or not durable_entry or durable_entry.get("current") != mimo_session_id:
+            raise ValueError("stale managed engine session")
+        entry = self._session_map_entry(chat_id)
+        if entry.get("current") != mimo_session_id:
+            raise ValueError("managed engine session mapping changed")
+        from src.openclank.transcript_projection import get_managed_binding
+        binding = get_managed_binding(chat_id, owner=self._owner or None)
+        if binding.get("engineSessionID") != mimo_session_id:
+            raise ValueError("managed binding engine mismatch")
+        if binding.get("owner") != self._owner or binding.get("stableChatID") != chat_id:
+            raise ValueError("managed binding identity mismatch")
+        required_strings = ("physicalCwd", "memoryWorkspaceID", "copalWorkspace")
+        if any(not isinstance(binding.get(key), str) or not binding[key].strip() for key in required_strings):
+            raise ValueError("managed binding is incomplete")
+        # Explicit empty means the chat has no selected Files authority.
+        # It is distinct from an omitted/malformed managed binding field.
+        authority_workspace = binding.get("authorityWorkspaceID")
+        if not isinstance(authority_workspace, str) or authority_workspace != authority_workspace.strip():
+            raise ValueError("managed binding authority workspace is invalid")
+        if not os.path.isabs(str(binding["physicalCwd"])) or str(Path(binding["physicalCwd"]).resolve(strict=False)) != binding["physicalCwd"]:
+            raise ValueError("managed binding cwd is not canonical")
+        aliases = binding.get("engineAliases")
+        if not isinstance(aliases, list) or len(aliases) > 16 or any(not isinstance(value, str) or not value for value in aliases) or len(set(aliases)) != len(aliases) or mimo_session_id in aliases:
+            raise ValueError("managed binding aliases are invalid")
+        for key in ("workspaceRevision", "mapRevision", "mappingRevision"):
+            if isinstance(binding.get(key), bool) or not isinstance(binding.get(key), int) or binding[key] < 0:
+                raise ValueError("managed binding revisions are invalid")
+        map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+        if binding["mapRevision"] > map_revision or binding["mappingRevision"] != mapping_revision:
+            raise ValueError("managed binding map revision mismatch")
+        result = {
+            "engineSessionID": mimo_session_id,
+            "stableChatID": chat_id,
+            "owner": binding["owner"],
+            "canonicalCwd": binding["physicalCwd"],
+            "workspaceRevision": int(binding.get("workspaceRevision") or 0),
+            "authorityWorkspaceID": binding["authorityWorkspaceID"],
+            "memoryWorkspaceID": binding["memoryWorkspaceID"],
+            "copalWorkspace": binding["copalWorkspace"],
+            "memoryEnabled": bool(binding.get("memoryEnabled", True)),
+            "engineAliases": list(binding["engineAliases"]),
+            "mapRevision": map_revision,
+            "mappingRevision": mapping_revision,
+        }
+        return validate_managed_method_result(method, result)
+
+    async def _apply_session_cwd(
+        self,
+        mimo_session_id: str,
+        cwd: Any,
+        *,
+        expected_workspace_revision: Optional[int] = None,
+        transition_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        value = str(cwd or "").strip()
+        transition_id = str(transition_id or uuid.uuid4().hex)
+        if not value or not os.path.isabs(value):
+            logger.warning("ignoring invalid session cwd update for %s", mimo_session_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "invalid_cwd"}
+        context = self._session_context.get(mimo_session_id)
+        if not context:
+            logger.warning("ignoring cwd update for unknown session %s", mimo_session_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "unknown_session"}
+        chat_id = str(context.get("odysseus_session_id") or "").strip()
+        if not chat_id or self._session_map.get(chat_id) != mimo_session_id:
+            logger.warning("ignoring stale cwd update for session %s", mimo_session_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "stale_engine_session"}
+        if str(context.get("owner") or self._owner) != self._owner:
+            logger.warning("ignoring cwd update from a different owner for %s", chat_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "owner_mismatch"}
+
+        def authority_matches_context() -> bool:
+            binding = context.get("managed_binding")
+            if not isinstance(binding, dict):
+                return False
+            try:
+                entry = self._durable_session_map.lookup(chat_id)
+                if not entry or entry.get("current") != mimo_session_id:
+                    return False
+                map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+                from src.openclank.transcript_projection import get_managed_binding
+
+                persisted = get_managed_binding(chat_id, owner=self._owner)
+                if not isinstance(persisted, dict):
+                    return False
+                if persisted.get("transition") is not None:
+                    return False
+                for key, expected in (
+                    ("owner", self._owner),
+                    ("stableChatID", chat_id),
+                    ("engineSessionID", mimo_session_id),
+                    ("physicalCwd", binding.get("physicalCwd")),
+                    ("workspaceRevision", binding.get("workspaceRevision")),
+                    ("mapRevision", binding.get("mapRevision")),
+                    ("mappingRevision", binding.get("mappingRevision")),
+                    ("memoryWorkspaceID", binding.get("memoryWorkspaceID")),
+                    ("authorityWorkspaceID", binding.get("authorityWorkspaceID")),
+                    ("copalWorkspace", binding.get("copalWorkspace")),
+                    ("memoryEnabled", binding.get("memoryEnabled")),
+                    ("engineAliases", binding.get("engineAliases")),
+                ):
+                    if persisted.get(key) != expected or binding.get(key) != expected:
+                        return False
+                workspace_revision = binding.get("workspaceRevision")
+                local_map_revision = binding.get("mapRevision")
+                local_mapping_revision = binding.get("mappingRevision")
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in (workspace_revision, local_map_revision, local_mapping_revision)
+                ):
+                    return False
+                return local_map_revision <= map_revision and local_mapping_revision == mapping_revision
+            except (KeyError, ValueError, TypeError, OSError):
+                return False
+
+        if not authority_matches_context():
+            logger.warning("ignoring cwd update against stale durable authority for %s", chat_id)
+            return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "stale_engine_session"}
+        canonical = str(Path(value).expanduser().resolve(strict=False))
+        lock = self._session_context_locks.setdefault(mimo_session_id, asyncio.Lock())
+        async with lock:
+            if not authority_matches_context():
+                logger.warning("ignoring cwd update after durable authority changed for %s", chat_id)
+                return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "stale_engine_session"}
+            previous_context = copy.deepcopy(context)
+            had_state = mimo_session_id in self._session_state
+            state = self._session_state.setdefault(mimo_session_id, {})
+            previous_state = copy.deepcopy(state)
+            previous_binding = dict(context.get("managed_binding") or {})
+            previous_cwd = str(previous_binding.get("physicalCwd") or context.get("workspace") or "").strip()
+            previous_workspace_revision = int(previous_binding.get("workspaceRevision") or 0)
+            if expected_workspace_revision is not None and previous_workspace_revision != int(expected_workspace_revision):
+                return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "workspace_revision_conflict"}
+            context["managed_binding"] = {
+                **previous_binding,
+                "owner": self._owner,
+                "stableChatID": chat_id,
+                "engineSessionID": mimo_session_id,
+                "physicalCwd": previous_cwd or canonical,
+                "workspaceRevision": previous_workspace_revision,
+                "transition": {
+                    "transitionID": transition_id,
+                    "requestedCwd": canonical,
+                    "previousRevision": previous_workspace_revision,
+                },
+            }
+            callback = self._session_workspace_adapter
+            if callback is None:
+                context["managed_binding"] = previous_binding
+                logger.warning("rejecting cwd update without a workspace authority for %s", chat_id)
+                return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "binding_unavailable"}
+            try:
+                result = callback(chat_id, canonical, dict(context))
+                if inspect.isawaitable(result):
+                    result = await result
+            except Exception as exc:
+                context["managed_binding"] = previous_binding
+                logger.warning("rejecting cwd update for %s: %s", chat_id, exc)
+                return None
+            approved = str(result or "").strip()
+            if approved != canonical:
+                context["managed_binding"] = previous_binding
+                logger.warning("rejecting noncanonical workspace approval for %s", chat_id)
+                return {"outcome": "rejected", "transitionID": transition_id, "committed": False, "code": "workspace_rejected"}
+            # Approval is complete before any ACP-visible state or transcript
+            # state changes. Stable policy/Copal/memory identities stay intact.
+            changed = canonical != previous_cwd
+            next_workspace_revision = previous_workspace_revision + (1 if changed else 0)
+            binding = {
+                **previous_binding,
+                "owner": self._owner,
+                "stableChatID": chat_id,
+                "engineSessionID": mimo_session_id,
+                "engineAliases": list(previous_binding.get("engineAliases") or []),
+                "memoryWorkspaceID": str(previous_binding.get("memoryWorkspaceID") or chat_workspace()),
+                "authorityWorkspaceID": str(previous_binding.get("authorityWorkspaceID") or context.get("authority_workspace_id") or ""),
+                "physicalCwd": canonical,
+                "workspaceRevision": next_workspace_revision,
+                "memoryEnabled": bool(previous_binding.get("memoryEnabled", True)),
+                "transition": None,
+            }
+            context.update({"workspace": canonical, "cwd": canonical, "physical_cwd": canonical, "managed_binding": binding})
+            state["workspace"] = canonical
+            state["managed_binding"] = binding
+            try:
+                self._persist_session_state(
+                    mimo_session_id,
+                    required=True,
+                    expected_workspace_revision=previous_workspace_revision,
+                    persist_binding=True,
+                )
+            except Exception as exc:
+                context.clear()
+                context.update(previous_context)
+                if had_state:
+                    state.clear()
+                    state.update(previous_state)
+                else:
+                    self._session_state.pop(mimo_session_id, None)
+                logger.warning("rejecting cwd update for %s: persistence failed: %s", chat_id, exc)
+                return None
+            result = {
+                "outcome": "accepted",
+                "canonicalCwd": canonical,
+                "workspaceRevision": next_workspace_revision,
+                "changed": changed,
+                "transitionID": transition_id,
+            }
+            return result
 
     async def open_session(
         self,
@@ -544,36 +1258,440 @@ class ACPBridge:
         extra_mcp_servers: Optional[list[dict]] = None,
         with_agent_tools: bool = True,
         with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
+        memory_workspace_id: str = "",
+        publish_handshake: bool = True,
+        provisional_session_id: Optional[str] = None,
     ) -> str:
         """Create a new mimo session and return the ses_… id directly.
 
         Also stores the available models from mimo's handshake so the bridge
         can match thesius model names to mimo model IDs later.
+        When ``provisional_session_id`` is omitted the bridge reserves one
+        first so create-and-publish always uses a known identity.
         """
-        target_cwd = cwd or self._cwd
+        requested_workspace = str(cwd or "").strip()
+        target_cwd = requested_workspace or self._cwd
         mcp_servers = ([
             lifetools_mcp_descriptor(
                 owner=owner if owner is not None else self._owner,
                 session_id=odysseus_session,
-                workspace=target_cwd,
+                workspace=requested_workspace,
+                authority_workspace_id=authority_workspace_id,
+                memory_workspace_id=memory_workspace_id or chat_workspace(),
+                memory_enabled=with_memory,
+                copal_workspace=copal_workspace,
+                binding_revision=0,
+                map_revision=0,
+                mapping_revision=0,
             ),
-        ] + ([frankenmemory_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
-                session_id=odysseus_session,
-            )] if with_memory else []) + list(extra_mcp_servers or [])) if with_agent_tools else []
-        result = await self._client.new_session(target_cwd, mcp_servers=mcp_servers)
+        ] + list(extra_mcp_servers or [])) if with_agent_tools else []
+        # Reserve-without-create, then create-and-publish under the reserved
+        # identity. Interruptions before SDK create delete nothing and name no
+        # orphan; after create, recovery names this exact ses_… id.
+        if provisional_session_id is None:
+            reserve = await self._client.reserve_session()
+            provisional_session_id = reserve["sessionID"]
+        result = await self._client.new_session(
+            target_cwd,
+            mcp_servers=mcp_servers,
+            provisional_session_id=provisional_session_id,
+        )
         session_id = result["sessionId"]
-        self._capture_handshake(session_id, result)
+        if session_id != provisional_session_id:
+            raise RuntimeError(
+                "engine create-and-publish did not keep the reserved provisional session id"
+            )
+        if publish_handshake:
+            self._capture_handshake(session_id, result)
+        else:
+            # Admission owns publication.  Keep the handshake private until
+            # the durable map and complete managed binding both exist.
+            self._pending_session_results[session_id] = dict(result)
 
         # Store mimo's available models so we can match thesius model names
         models = result.get("models", {})
         available = models.get("availableModels", [])
-        if available:
+        if available and publish_handshake:
             self._session_models[session_id] = available
             self.available_models = available
             logger.info("mimo session %s: %d models available", session_id, len(available))
 
         return session_id
+
+    def _publish_admitted_session(self, session_id: str) -> None:
+        result = self._pending_session_results.pop(session_id, None)
+        if result is None:
+            return
+        self._capture_handshake(session_id, result)
+        available = (result.get("models") or {}).get("availableModels", [])
+        if available:
+            self._session_models[session_id] = available
+
+    def _finalize_admitted_session(self, session_id: str) -> None:
+        available = self._session_models.get(session_id)
+        if available:
+            self.available_models = list(available)
+
+    async def _discard_unbound_engine_session(
+        self,
+        session_id: str,
+        *,
+        chat_id: Optional[str] = None,
+        cwd: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> None:
+        """Destructively discard a privately created engine session.
+
+        The engine requires the canonical physical cwd to resolve its durable
+        store. Prefer the exact persisted candidate binding, falling back only
+        to a caller-supplied canonical candidate cwd for the pre-binding
+        failure window.
+        """
+        candidate_cwd = None
+        binding_owner = owner if owner is not None else self._owner
+        if chat_id:
+            try:
+                from src.openclank.transcript_projection import get_managed_binding
+
+                binding = get_managed_binding(chat_id, owner=binding_owner)
+                if binding.get("engineSessionID") == session_id:
+                    value = binding.get("physicalCwd")
+                    if isinstance(value, str) and value and os.path.isabs(value) and str(Path(value).resolve(strict=False)) == value:
+                        candidate_cwd = value
+            except KeyError:
+                pass
+            except Exception:
+                logger.warning("unable to read candidate binding before discard %s", session_id)
+        if candidate_cwd is None and isinstance(cwd, str) and cwd and os.path.isabs(cwd):
+            candidate_cwd = str(Path(cwd).resolve(strict=False))
+        if candidate_cwd is None:
+            if chat_id:
+                self._fence_admission(chat_id, "candidate discard cwd unavailable")
+            raise RuntimeError("candidate discard requires an authoritative canonical cwd")
+        self._pending_session_results.pop(session_id, None)
+        self._session_models.pop(session_id, None)
+        self._session_state.pop(session_id, None)
+        self._session_context.pop(session_id, None)
+        self._turns.pop(session_id, None)
+        self._queues.pop(session_id, None)
+        try:
+            await self.cleanup_session(session_id)
+        except Exception:
+            logger.warning("failed to clean up unbound engine session %s", session_id)
+        discarded = False
+        discard = getattr(self._client, "discard_session", None)
+        if discard is not None:
+            try:
+                await discard(session_id, candidate_cwd)
+                discarded = True
+            except Exception:
+                logger.warning("failed to discard unbound engine session %s", session_id)
+        if not discarded:
+            if chat_id:
+                self._fence_admission(chat_id, "candidate engine discard")
+            raise RuntimeError("candidate engine discard was not confirmed")
+
+    def _fence_admission(self, chat_id: str, reason: str) -> None:
+        """Persist fail-closed authority when cross-store repair is unknown."""
+        try:
+            self._durable_session_map.fence(chat_id)
+            self._session_map = self._durable_session_map.flat_current()
+        except Exception as exc:
+            logger.exception("unable to persist admission fence for %s (%s)", chat_id, reason)
+            raise RuntimeError("managed admission fence could not be persisted") from exc
+
+    async def _recover_orphan_binding(self, odysseus_session: str) -> bool:
+        """Repair one SQLite ↔ session-map crash-seam candidate.
+
+        Projection-first staging can leave a complete candidate binding whose
+        mapping revision is exactly one past the authoritative map row.  That
+        pair is an explicit recoverable fence: discard the unexposed candidate
+        engine and rewrite the binding to the map winner.  Candidate-only
+        caches are cleaned exactly with the discarded engine.
+        """
+        from src.openclank.transcript_projection import get_managed_binding, save_managed_binding
+
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            target_entry = await self._durable_session_map.async_lookup(odysseus_session)
+            target = target_entry.get("current") if target_entry else None
+            if not target:
+                return False
+            orphan_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+            current_mapping_revision = int(target_entry.get("revision") or 0)
+            orphan_engine = orphan_binding.get("engineSessionID") if isinstance(orphan_binding, dict) else None
+            orphan_map_revision = orphan_binding.get("mapRevision") if isinstance(orphan_binding, dict) else None
+            orphan_mapping_revision = orphan_binding.get("mappingRevision") if isinstance(orphan_binding, dict) else None
+            if not (
+                isinstance(orphan_engine, str)
+                and orphan_engine
+                and orphan_engine != target
+                and target in (orphan_binding.get("engineAliases") or [])
+                and isinstance(orphan_map_revision, int)
+                and isinstance(orphan_mapping_revision, int)
+                and orphan_mapping_revision == current_mapping_revision + 1
+            ):
+                return False
+            await self._discard_unbound_engine_session(
+                orphan_engine,
+                chat_id=odysseus_session,
+                cwd=orphan_binding.get("physicalCwd"),
+                owner=self._owner,
+            )
+            recovered = dict(orphan_binding)
+            recovered["engineSessionID"] = target
+            recovered["engineAliases"] = [
+                value for value in (orphan_binding.get("engineAliases") or [])
+                if value not in {target, orphan_engine}
+            ]
+            recovered["mapRevision"] = await self._durable_session_map.async_map_revision()
+            recovered["mappingRevision"] = current_mapping_revision
+            recovered["transition"] = None
+            try:
+                save_managed_binding(
+                    odysseus_session,
+                    recovered,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_engine,
+                    expected_map_revision=orphan_map_revision,
+                    expected_mapping_revision=orphan_mapping_revision,
+                )
+            except Exception as exc:
+                self._fence_admission(odysseus_session, "orphan binding recovery")
+                raise RuntimeError("orphan managed binding recovery was not confirmed") from exc
+            return True
+
+    async def recover_admission_orphans(self) -> list[str]:
+        """Ordinary-restart recovery for the SQLite ↔ session-map crash seam.
+
+        Runs without a later remap: every mapped chat with a recoverable
+        candidate fence is repaired before new admission work proceeds.
+        """
+        recovered: list[str] = []
+        for chat_id in list(await self._durable_session_map.async_flat_current()):
+            try:
+                if await self._recover_orphan_binding(chat_id):
+                    recovered.append(chat_id)
+            except Exception:
+                logger.exception("managed admission recovery failed for %s", chat_id)
+                raise
+        self._session_map = await self._durable_session_map.async_flat_current()
+        return recovered
+
+    def _compensate_candidate_binding(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        previous_binding: Optional[dict],
+    ) -> None:
+        """Restore host authority only while this candidate still owns the map."""
+        if self._session_map_entry(chat_id).get("current") != candidate_id:
+            raise RuntimeError("candidate map authority moved before binding compensation")
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            get_managed_binding,
+            save_managed_binding,
+        )
+
+        current = get_managed_binding(chat_id, owner=owner)
+        candidate_revision = current.get("workspaceRevision")
+        candidate_engine = current.get("engineSessionID")
+        candidate_map = current.get("mapRevision")
+        candidate_mapping = current.get("mappingRevision")
+        if candidate_engine != candidate_id:
+            raise RuntimeError("candidate binding authority moved before compensation")
+        if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                   for value in (candidate_revision, candidate_map, candidate_mapping)):
+            raise RuntimeError("candidate managed binding has invalid CAS axes")
+        cas = {
+            "expected_engine_session_id": candidate_engine,
+            "expected_map_revision": candidate_map,
+            "expected_mapping_revision": candidate_mapping,
+        }
+        if isinstance(previous_binding, dict):
+            save_managed_binding(
+                chat_id,
+                previous_binding,
+                owner=owner,
+                expected_workspace_revision=candidate_revision,
+                **cas,
+            )
+        else:
+            delete_managed_binding(
+                chat_id,
+                owner=owner,
+                expected_workspace_revision=candidate_revision,
+                **cas,
+            )
+
+    def _compensate_staged_binding(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        previous_binding: Optional[dict],
+    ) -> None:
+        """CAS-restore a projection staged before map publication.
+
+        This path is used when map admission itself loses.  It deliberately
+        does not infer authority from the map: the complete candidate binding
+        axes are the cleanup guard, so a later winner cannot be removed.
+        """
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            get_managed_binding,
+            save_managed_binding,
+        )
+        current = get_managed_binding(chat_id, owner=owner)
+        if current.get("engineSessionID") != candidate_id:
+            raise RuntimeError("staged binding authority moved before compensation")
+        cas = {
+            "expected_workspace_revision": current.get("workspaceRevision"),
+            "expected_engine_session_id": candidate_id,
+            "expected_map_revision": current.get("mapRevision"),
+            "expected_mapping_revision": current.get("mappingRevision"),
+        }
+        if isinstance(previous_binding, dict):
+            save_managed_binding(chat_id, previous_binding, owner=owner, **cas)
+        else:
+            delete_managed_binding(chat_id, owner=owner, **cas)
+
+    def _compensate_staged_binding_if_current(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        previous_binding: Optional[dict],
+    ) -> bool:
+        """Restore a staged candidate only when it still owns the binding.
+
+        A loser may have failed before its projection write because another
+        process already published a winner.  In that case the current binding
+        is evidence of the winner, not a failed candidate to compensate.
+        """
+        from src.openclank.transcript_projection import get_managed_binding
+
+        current = get_managed_binding(chat_id, owner=owner)
+        if not current or current.get("engineSessionID") != candidate_id:
+            return False
+        self._compensate_staged_binding(chat_id, candidate_id, owner, previous_binding)
+        return True
+
+    def _align_binding_to_map(self, chat_id: str, engine_id: str, owner: str) -> None:
+        """Refresh only the map evidence after a CAS rollback mutation."""
+        from src.openclank.transcript_projection import get_managed_binding, save_managed_binding
+
+        binding = get_managed_binding(chat_id, owner=owner)
+        if binding.get("engineSessionID") != engine_id:
+            raise RuntimeError("rollback binding engine mismatch")
+        map_revision, mapping_revision = self._durable_session_map.revisions(chat_id)
+        if binding.get("mapRevision") == map_revision and binding.get("mappingRevision") == mapping_revision:
+            return
+        updated = dict(binding)
+        updated["mapRevision"] = map_revision
+        updated["mappingRevision"] = mapping_revision
+        save_managed_binding(
+            chat_id,
+            updated,
+            owner=owner,
+            expected_workspace_revision=int(binding.get("workspaceRevision") or 0),
+            expected_engine_session_id=engine_id,
+            expected_map_revision=binding.get("mapRevision"),
+            expected_mapping_revision=binding.get("mappingRevision"),
+        )
+
+    def _stage_candidate_binding(
+        self,
+        chat_id: str,
+        candidate_id: str,
+        owner: str,
+        *,
+        previous_binding: Optional[dict],
+        cwd: str,
+        authority_workspace_id: str,
+        memory_enabled: bool,
+        copal_workspace: str,
+        memory_workspace_id: str,
+        expected_current: Optional[str] | object = _EXPECTED_UNSET,
+        expected_mapping_revision: Optional[int] = None,
+    ) -> dict:
+        """Persist a complete candidate binding before publishing its map row.
+
+        The file map and SQLite projection cannot share one transaction.  The
+        safe ordering is therefore projection first, map second: a crash can
+        leave an unreferenced binding, but never an authoritative map entry
+        without its complete binding.  Every axis is checked again by both
+        stores and cleanup is CAS-protected.
+        """
+        from src.openclank.transcript_projection import save_managed_binding
+
+        entry = self._durable_session_map.lookup(chat_id)
+        old_engine = str(entry.get("current") or "") if entry else None
+        map_revision = self._durable_session_map.map_revision()
+        mapping_revision = int(entry.get("revision") or 0) if entry else 0
+        if expected_current is not _EXPECTED_UNSET and old_engine != expected_current:
+            raise ValueError("managed candidate map current changed during admission")
+        if expected_mapping_revision is not None and mapping_revision != int(expected_mapping_revision):
+            raise ValueError("managed candidate mapping revision changed during admission")
+        prior = dict(previous_binding) if isinstance(previous_binding, dict) else {}
+        if prior:
+            if prior.get("owner") != owner or prior.get("stableChatID") != chat_id:
+                raise RuntimeError("managed binding identity mismatch")
+            prior_mapping_revision = int(prior.get("mappingRevision") or 0)
+            if prior_mapping_revision != mapping_revision:
+                # A crash after projection-first staging leaves an orphaned
+                # candidate while the old map row remains authoritative.  The
+                # caller must destructively reconcile that candidate while
+                # holding the cross-process admission lock; never overwrite
+                # its binding here.
+                if old_engine and prior.get("engineSessionID") != old_engine and old_engine in (prior.get("engineAliases") or []) and prior_mapping_revision == mapping_revision + 1:
+                    raise RuntimeError("orphan candidate requires admission reconciliation")
+                else:
+                    raise RuntimeError("managed binding is stale relative to the durable map")
+            physical_cwd = str(prior.get("physicalCwd") or "").strip()
+            workspace_revision = int(prior.get("workspaceRevision") or 0)
+            aliases = list(prior.get("engineAliases") or [])
+            memory_workspace_id = str(prior.get("memoryWorkspaceID") or memory_workspace_id)
+            authority_workspace_id = str(prior.get("authorityWorkspaceID") or authority_workspace_id)
+            copal_workspace = str(prior.get("copalWorkspace") or copal_workspace)
+            memory_enabled = bool(prior.get("memoryEnabled", memory_enabled))
+        else:
+            physical_cwd = str(cwd or "").strip()
+            workspace_revision = 0
+            aliases = []
+        if not physical_cwd or not os.path.isabs(physical_cwd):
+            raise RuntimeError("managed candidate has no canonical physical cwd")
+        candidate = {
+            **prior,
+            "owner": owner,
+            "stableChatID": chat_id,
+            "engineSessionID": candidate_id,
+            "engineAliases": [value for value in dict.fromkeys([old_engine, *aliases]) if value and value != candidate_id][:16],
+            "memoryWorkspaceID": memory_workspace_id,
+            "authorityWorkspaceID": authority_workspace_id,
+            "copalWorkspace": copal_workspace,
+            "physicalCwd": str(Path(physical_cwd).resolve(strict=False)),
+            "workspaceRevision": workspace_revision,
+            "mapRevision": map_revision + 1,
+            "mappingRevision": mapping_revision + 1,
+            "memoryEnabled": memory_enabled,
+            "transition": None,
+        }
+        expected_binding_map_revision = int(prior.get("mapRevision") or 0) if prior else 0
+        expected_binding_mapping_revision = int(prior.get("mappingRevision") or 0) if prior else 0
+        save_managed_binding(
+            chat_id,
+            candidate,
+            owner=owner,
+            expected_workspace_revision=workspace_revision,
+            expected_engine_session_id=old_engine,
+            expected_map_revision=expected_binding_map_revision,
+            expected_mapping_revision=expected_binding_mapping_revision,
+        )
+        return candidate
 
     async def ensure_session(
         self,
@@ -581,6 +1699,42 @@ class ACPBridge:
         cwd: Optional[str] = None,
         owner: Optional[str] = None,
         extra_mcp_servers: Optional[list[dict]] = None,
+        with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
+    ) -> str:
+        if owner is not None and owner != self._owner:
+            raise ValueError("managed session owner does not match this bridge")
+        effective_owner = owner if owner is not None else self._owner
+        # Pending native history intents must not be reconstructed from the
+        # preserved full transcript after a restart or generation replacement.
+        # Explicit reconciliation reads the original native owner directly.
+        try:
+            from src.openclank.transcript_projection import get_mimo_state
+            from src.openclank.session_operations import visibility
+            visibility(get_mimo_state(odysseus_session, owner=effective_owner), require_settled=True)
+        except KeyError:
+            pass  # bounded auxiliary sessions have no canonical host row
+        async with self._session_admission_lock(odysseus_session, effective_owner):
+            return await self._ensure_session_locked(
+                odysseus_session,
+                cwd=cwd,
+                owner=owner,
+                extra_mcp_servers=extra_mcp_servers,
+                with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
+            )
+
+    async def _ensure_session_locked(
+        self,
+        odysseus_session: str,
+        cwd: Optional[str] = None,
+        owner: Optional[str] = None,
+        extra_mcp_servers: Optional[list[dict]] = None,
+        with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
     ) -> str:
         """Load the mimo session into the ACP agent's memory.
 
@@ -591,41 +1745,210 @@ class ACPBridge:
         Also refreshes the available models from mimo so the bridge always
         has the latest model list (covers session reconnect after restart).
         """
-        target = self._session_map.get(odysseus_session)
+        target_entry = await self._durable_session_map.async_lookup(odysseus_session)
+        target = target_entry.get("current") if target_entry else None
         if target is None:
+            effective_owner = owner if owner is not None else self._owner
+            previous_binding = None
+            expected_candidate_current: Optional[str] | object = None
+            expected_candidate_mapping_revision = 0
+            async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                if await self._durable_session_map.async_lookup(odysseus_session) is not None:
+                    raise RuntimeError("managed session mapping appeared during fresh admission")
+                expected_candidate_current = None
+                expected_candidate_mapping_revision = 0
+                try:
+                    from src.openclank.transcript_projection import get_managed_binding
+
+                    previous_binding = get_managed_binding(
+                        odysseus_session, owner=effective_owner or None
+                    ) or None
+                except (KeyError, ValueError):
+                    previous_binding = None
+                if previous_binding:
+                    from src.openclank.transcript_projection import delete_managed_binding
+
+                    try:
+                        await self._discard_unbound_engine_session(
+                            str(previous_binding["engineSessionID"]),
+                            chat_id=odysseus_session,
+                            owner=effective_owner,
+                        )
+                        delete_managed_binding(
+                            odysseus_session,
+                            owner=effective_owner,
+                            expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                            expected_engine_session_id=previous_binding.get("engineSessionID"),
+                            expected_map_revision=previous_binding.get("mapRevision"),
+                            expected_mapping_revision=previous_binding.get("mappingRevision"),
+                        )
+                    except Exception as exc:
+                        self._fence_admission(odysseus_session, "orphan managed binding")
+                        raise RuntimeError("orphan managed binding could not be reconciled") from exc
+                    previous_binding = None
+            # Reserve-without-create, then create-and-publish under that exact
+            # identity (see open_session). Candidate binding is staged after
+            # create and before map publish so concurrent fresh admissions can
+            # still race cleanly on CAS; interruptions before SDK create delete
+            # nothing and name no orphan.
             new_id = await self.open_session(
                 cwd=cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
-            )
-            self._session_map[odysseus_session] = new_id
-            self._bind_canonical_session(
-                new_id,
-                odysseus_session,
-                owner if owner is not None else self._owner,
+                with_agent_tools=False,
+                with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
+                publish_handshake=False,
             )
             try:
-                self._session_map_path.parent.mkdir(parents=True, exist_ok=True)
-                self._session_map_path.write_text(json.dumps(self._session_map, indent=1))
-            except Exception as exc:
-                logger.warning("failed to persist session map: %s", exc)
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                    self._stage_candidate_binding(
+                        odysseus_session,
+                        new_id,
+                        effective_owner,
+                        previous_binding=previous_binding,
+                        cwd=cwd or self._cwd,
+                        authority_workspace_id=authority_workspace_id,
+                        memory_enabled=with_memory,
+                        copal_workspace=copal_workspace,
+                        memory_workspace_id=chat_workspace(),
+                        expected_current=expected_candidate_current,
+                        expected_mapping_revision=expected_candidate_mapping_revision,
+                    )
+                    await self._bind_engine_session(
+                        odysseus_session,
+                        new_id,
+                        expected_current=None,
+                        expected_mapping_revision=0,
+                    )
+                self._publish_admitted_session(new_id)
+                self._bind_canonical_session(
+                    new_id,
+                    odysseus_session,
+                    owner if owner is not None else self._owner,
+                    physical_cwd=cwd or self._cwd,
+                    authority_workspace_id=authority_workspace_id,
+                    memory_enabled=with_memory,
+                    map_revision=self._map_revisions_for_chat(odysseus_session)[0],
+                    mapping_revision=self._map_revisions_for_chat(odysseus_session)[1],
+                    copal_workspace=copal_workspace,
+                )
+                await self.resume_session(
+                    odysseus_session,
+                    new_id,
+                    with_memory=with_memory,
+                    copal_workspace=copal_workspace,
+                    authority_workspace_id=authority_workspace_id,
+                )
+                self._finalize_admitted_session(new_id)
+            except Exception:
+                preserve_candidate = False
+                candidate_discarded = False
+                try:
+                    winner = self._session_map_entry(odysseus_session).get("current")
+                    if winner and winner != new_id:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
+                        candidate_discarded = True
+                        self._session_map = self._durable_session_map.flat_current()
+                        await self.resume_session(
+                            odysseus_session,
+                            winner,
+                            with_memory=with_memory,
+                            copal_workspace=copal_workspace,
+                            authority_workspace_id=authority_workspace_id,
+                        )
+                        return winner
+                    if winner == new_id:
+                        try:
+                            self._compensate_candidate_binding(
+                                odysseus_session,
+                                new_id,
+                                effective_owner,
+                                previous_binding,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "candidate binding compensation failed for %s", odysseus_session
+                            )
+                            self._fence_admission(odysseus_session, "candidate binding compensation")
+                            preserve_candidate = True
+                            raise
+                        try:
+                            current_entry = self._session_map_entry(odysseus_session)
+                            self._durable_session_map.forget(
+                                odysseus_session,
+                                expected_map_revision=None,
+                                expected_current=new_id,
+                                expected_mapping_revision=int(current_entry.get("revision") or 0),
+                            )
+                        except Exception:
+                            self._fence_admission(odysseus_session, "candidate map rollback")
+                            preserve_candidate = True
+                            raise
+                        self._session_map = self._durable_session_map.flat_current()
+                    else:
+                        self._compensate_staged_binding_if_current(
+                            odysseus_session,
+                            new_id,
+                            effective_owner,
+                            previous_binding,
+                        )
+                finally:
+                    if not preserve_candidate and not candidate_discarded:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=cwd or self._cwd, owner=effective_owner)
+                raise
             return new_id
+        from src.openclank.transcript_projection import get_managed_binding
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            target_entry = self._durable_session_map.lookup(odysseus_session)
+            target = target_entry.get("current") if target_entry else None
+            if not target:
+                raise RuntimeError("managed session mapping disappeared during admission")
+        if await self._recover_orphan_binding(odysseus_session):
+            async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                target_entry = self._durable_session_map.lookup(odysseus_session)
+                target = target_entry.get("current") if target_entry else None
+                if not target:
+                    raise RuntimeError("managed session mapping disappeared during admission")
+        restored_workspace = self.mapped_session_workspace(odysseus_session)
+        persisted_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+        persisted_owner = persisted_binding["owner"]
+        persisted_memory = str(persisted_binding["memoryWorkspaceID"])
+        persisted_authority = str(persisted_binding["authorityWorkspaceID"])
+        persisted_copal = str(persisted_binding["copalWorkspace"])
+        persisted_memory_enabled = bool(persisted_binding["memoryEnabled"])
+        persisted_aliases = list(persisted_binding["engineAliases"])
+        persisted_binding_revision = int(persisted_binding["workspaceRevision"])
+        persisted_map_revision = int(persisted_binding["mapRevision"])
+        persisted_mapping_revision = int(persisted_binding["mappingRevision"])
+        expected_candidate_current = target
+        expected_candidate_mapping_revision = int(target_entry.get("revision") or 0)
+        # A mapped chat is host-owned state. A caller's cwd can seed only a new
+        # chat; it must not revert a persisted engine workspace on reconnect.
+        resume_cwd = str(restored_workspace or cwd or self._cwd).strip()
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
+                owner=persisted_owner,
                 session_id=odysseus_session,
-                workspace=cwd or self._cwd,
-            ),
-            frankenmemory_mcp_descriptor(
-                owner=owner if owner is not None else self._owner,
-                session_id=odysseus_session,
+                workspace=resume_cwd,
+                authority_workspace_id=persisted_authority,
+                memory_workspace_id=persisted_memory,
+                memory_enabled=bool(with_memory),
+                copal_workspace=persisted_copal,
+                engine_session_aliases=persisted_aliases,
+                binding_revision=persisted_binding_revision,
+                map_revision=persisted_map_revision,
+                mapping_revision=persisted_mapping_revision,
             ),
             *(extra_mcp_servers or []),
         ]
         try:
-            result = await self._client.resume_session(target, cwd or self._cwd, mcp_servers=mcp_servers)
+            result = await self._client.resume_session(target, resume_cwd, mcp_servers=mcp_servers)
         except RPCError as e:
+            if not e.session_missing:
+                raise
             # mimo doesn't know this session (state predates the isolated
             # MIMOCODE_HOME, or its store was wiped). The full chat history
             # rides in every prompt, so a fresh mimo session continues the
@@ -633,23 +1956,132 @@ class ACPBridge:
             logger.warning(
                 "mimo resume failed for %s (%s) — opening a fresh mimo session", target, e
             )
+            previous_binding = None
+            try:
+                from src.openclank.transcript_projection import get_managed_binding
+
+                previous_binding = get_managed_binding(
+                    odysseus_session,
+                    owner=(owner if owner is not None else self._owner) or None,
+                ) or None
+            except (KeyError, ValueError):
+                previous_binding = None
             new_id = await self.open_session(
-                cwd=cwd,
+                cwd=resume_cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
                 extra_mcp_servers=extra_mcp_servers,
-            )
-            self._session_map[odysseus_session] = new_id
-            self._bind_canonical_session(
-                new_id,
-                odysseus_session,
-                owner if owner is not None else self._owner,
+                with_agent_tools=False,
+                with_memory=with_memory,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
+                memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
+                publish_handshake=False,
             )
             try:
-                self._session_map_path.parent.mkdir(parents=True, exist_ok=True)
-                self._session_map_path.write_text(json.dumps(self._session_map, indent=1))
-            except Exception as we:
-                logger.warning("failed to persist session map: %s", we)
+                async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+                    self._stage_candidate_binding(
+                        odysseus_session,
+                        new_id,
+                        owner if owner is not None else self._owner,
+                        previous_binding=previous_binding,
+                        cwd=resume_cwd,
+                        authority_workspace_id=authority_workspace_id,
+                        memory_enabled=with_memory,
+                        copal_workspace=copal_workspace,
+                        memory_workspace_id=str((self._session_context.get(target) or {}).get("managed_binding", {}).get("memoryWorkspaceID") or chat_workspace()),
+                        expected_current=expected_candidate_current,
+                        expected_mapping_revision=expected_candidate_mapping_revision,
+                    )
+                    await self._bind_engine_session(
+                        odysseus_session,
+                        new_id,
+                        expected_current=target,
+                        expected_mapping_revision=int((target_entry or {}).get("revision") or 0),
+                    )
+                self._publish_admitted_session(new_id)
+                self._bind_canonical_session(
+                    new_id,
+                    odysseus_session,
+                    owner if owner is not None else self._owner,
+                    physical_cwd=resume_cwd,
+                    authority_workspace_id=authority_workspace_id,
+                    memory_enabled=with_memory,
+                    engine_aliases=list(self._session_map_entry(odysseus_session).get("aliases", [])),
+                    map_revision=self._map_revisions_for_chat(odysseus_session)[0],
+                    mapping_revision=self._map_revisions_for_chat(odysseus_session)[1],
+                    copal_workspace=copal_workspace,
+                )
+                await self.resume_session(
+                    odysseus_session,
+                    new_id,
+                    with_memory=with_memory,
+                    copal_workspace=copal_workspace,
+                    authority_workspace_id=authority_workspace_id,
+                )
+                self._finalize_admitted_session(new_id)
+            except Exception:
+                preserve_candidate = False
+                candidate_discarded = False
+                try:
+                    winner = self._session_map_entry(odysseus_session).get("current")
+                    if winner and winner != new_id:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
+                        candidate_discarded = True
+                        self._session_map = self._durable_session_map.flat_current()
+                        await self.resume_session(
+                            odysseus_session,
+                            winner,
+                            with_memory=with_memory,
+                            copal_workspace=copal_workspace,
+                            authority_workspace_id=authority_workspace_id,
+                        )
+                        return winner
+                    if winner == new_id:
+                        try:
+                            self._compensate_candidate_binding(
+                                odysseus_session,
+                                new_id,
+                                owner if owner is not None else self._owner,
+                                previous_binding,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "candidate binding compensation failed for %s", odysseus_session
+                            )
+                            self._fence_admission(odysseus_session, "candidate binding compensation")
+                            preserve_candidate = True
+                            raise
+                        try:
+                            current_entry = self._session_map_entry(odysseus_session)
+                            self._durable_session_map.bind(
+                                odysseus_session,
+                                target,
+                                expected_map_revision=None,
+                                expected_current=new_id,
+                                expected_mapping_revision=int(current_entry.get("revision") or 0),
+                            )
+                            self._align_binding_to_map(
+                                odysseus_session,
+                                target,
+                                owner if owner is not None else self._owner,
+                            )
+                        except Exception:
+                            self._fence_admission(odysseus_session, "candidate map rollback or binding alignment")
+                            preserve_candidate = True
+                            raise
+                        self._session_map = self._durable_session_map.flat_current()
+                    else:
+                        self._compensate_staged_binding_if_current(
+                            odysseus_session,
+                            new_id,
+                            owner if owner is not None else self._owner,
+                            previous_binding,
+                        )
+                finally:
+                    if not preserve_candidate and not candidate_discarded:
+                        await self._discard_unbound_engine_session(new_id, chat_id=odysseus_session, cwd=resume_cwd, owner=owner if owner is not None else self._owner)
+                raise
             return new_id
 
         # Refresh available models from mimo (handles reconnect after restart)
@@ -664,27 +2096,73 @@ class ACPBridge:
             target,
             odysseus_session,
             owner if owner is not None else self._owner,
+            physical_cwd=resume_cwd,
+            authority_workspace_id=authority_workspace_id,
+            memory_enabled=with_memory,
+            engine_aliases=list(self._session_map_entry(odysseus_session).get("aliases", [])),
+            map_revision=self._map_revisions_for_chat(odysseus_session)[0],
+            mapping_revision=self._map_revisions_for_chat(odysseus_session)[1],
+            copal_workspace=copal_workspace,
         )
 
         return target
 
-    async def resume_session(self, odysseus_session: str, mimo_session_id: str) -> None:
+    async def resume_session(
+        self,
+        odysseus_session: str,
+        mimo_session_id: str,
+        *,
+        with_memory: bool = True,
+        copal_workspace: str = "default",
+        authority_workspace_id: str = "",
+    ) -> None:
         """Re-establish a session after a crash/restart.
 
         odysseus_session IS the mimo session id. Re-attaches the standard
-        MCP servers (lifetools + frankenmemory) so the session has tools.
+        life-tools server so the session has tools and a memory scope carrier.
         """
+        workspace = self.mapped_session_workspace(odysseus_session)
+        durable_entry = self._durable_session_map.lookup(odysseus_session)
+        if not durable_entry or durable_entry.get("current") != mimo_session_id:
+            raise RuntimeError("managed session engine is no longer the durable current mapping")
+        from src.openclank.transcript_projection import get_managed_binding
+        persisted_binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+        map_revision, mapping_revision = self._durable_session_map.revisions(odysseus_session)
+        binding_map_revision = persisted_binding.get("mapRevision")
+        binding_mapping_revision = persisted_binding.get("mappingRevision")
+        binding_workspace_revision = persisted_binding.get("workspaceRevision")
+        valid_revisions = all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in (binding_map_revision, binding_mapping_revision, binding_workspace_revision)
+        )
+        if (
+            persisted_binding.get("owner") != self._owner
+            or persisted_binding.get("stableChatID") != odysseus_session
+            or persisted_binding.get("engineSessionID") != mimo_session_id
+            or not valid_revisions
+            or binding_map_revision > map_revision
+            or binding_mapping_revision != mapping_revision
+            or persisted_binding.get("transition") is not None
+        ):
+            raise RuntimeError("managed session binding is no longer the durable current mapping")
         mcp_servers = [
             lifetools_mcp_descriptor(
-                owner=self._owner,
+                owner=persisted_binding["owner"],
                 session_id=odysseus_session,
-                workspace=self._cwd,
-            ),
-            frankenmemory_mcp_descriptor(
-                owner=self._owner,
+                workspace=workspace,
+                authority_workspace_id=str(persisted_binding["authorityWorkspaceID"]),
+                memory_workspace_id=str(persisted_binding["memoryWorkspaceID"]),
+                # Conversational memory enablement is a per-call carrier flag.
+                # The managed binding entry itself stays installed either way.
+                memory_enabled=bool(with_memory),
+                copal_workspace=str(persisted_binding["copalWorkspace"]),
+                engine_session_aliases=list(persisted_binding["engineAliases"]),
+                binding_revision=binding_workspace_revision,
+                map_revision=map_revision,
+                mapping_revision=mapping_revision,
             ),
         ]
-        await self._client.resume_session(mimo_session_id, self._cwd, mcp_servers=mcp_servers)
+        await self._client.resume_session(mimo_session_id, workspace, mcp_servers=mcp_servers)
 
     def _match_model(self, mimo_session: str, thesius_model: str) -> str:
         """Match a thesius model name to a mimo modelId.
@@ -728,29 +2206,306 @@ class ACPBridge:
         return self._session_models.get(odysseus_session, [])
 
     def mapped_session_id(self, odysseus_session: str) -> str:
+        self._session_map = self._durable_session_map.flat_current()
         return self._session_map.get(odysseus_session, odysseus_session)
 
-    def mapped_sessions(self) -> dict[str, str]:
+    def mapped_session_workspace(self, odysseus_session: str) -> str:
+        entry = self._durable_session_map.lookup(odysseus_session)
+        self._session_map = self._durable_session_map.flat_current()
+        mimo_session = str(entry.get("current") or "") if entry else odysseus_session
+        if entry:
+            try:
+                from src.openclank.transcript_projection import get_managed_binding
+                binding = get_managed_binding(odysseus_session, owner=self._owner or None)
+            except Exception as exc:
+                raise RuntimeError("managed session binding is unavailable") from exc
+            map_revision, mapping_revision = self._map_revisions_for_chat(odysseus_session)
+            # A complete candidate binding can be committed before its map
+            # replace.  Only async admission can confirm destructive cleanup
+            # of that exact candidate before repairing the old pair.
+            if (
+                binding.get("engineSessionID") != mimo_session
+                and mimo_session in (binding.get("engineAliases") or [])
+                and binding.get("mappingRevision") == mapping_revision + 1
+                and isinstance(binding.get("mapRevision"), int)
+                and not isinstance(binding.get("mapRevision"), bool)
+                and 0 <= binding.get("mapRevision") <= map_revision + 1
+            ):
+                raise RuntimeError("mapped managed session has an unadopted candidate binding")
+            if binding.get("owner") != self._owner or binding.get("stableChatID") != odysseus_session or binding.get("engineSessionID") != mimo_session or isinstance(binding.get("mapRevision"), bool) or not isinstance(binding.get("mapRevision"), int) or binding.get("mapRevision") < 0 or binding.get("mapRevision") > map_revision or binding.get("mappingRevision") != mapping_revision or binding.get("transition") is not None:
+                raise RuntimeError("mapped managed session binding is stale")
+            restored = str(binding.get("physicalCwd") or "").strip()
+            if restored and os.path.isabs(restored) and str(Path(restored).resolve(strict=False)) == restored:
+                return restored
+            raise RuntimeError("mapped managed session has no authoritative physical cwd")
+        current = str(self._session_context.get(mimo_session, {}).get("workspace") or "").strip()
+        if current:
+            return current
+        return self._cwd
+
+    def mapped_sessions(self, owner: Optional[str] = None) -> dict[str, str]:
+        if owner is not None and owner != self._owner:
+            return {}
+        self._session_map = self._durable_session_map.flat_current()
         return dict(self._session_map)
 
     def forget_session(self, odysseus_session: str) -> None:
-        mimo_session = self._session_map.pop(odysseus_session, odysseus_session)
+        # Map and owner-qualified projection are one logical authority pair.
+        # Serialize the whole transition with the stable parent-level guard so
+        # a concurrent candidate cannot stage or publish between our map CAS
+        # and binding/projection cleanup.
+        with self._durable_session_map.chat_admission_lock(odysseus_session):
+            self._forget_session_locked(odysseus_session)
+
+    async def forget_session_async(self, odysseus_session: str) -> None:
+        """Forget authority without blocking the event loop on flock."""
+        async with self._durable_session_map.async_chat_admission_lock(odysseus_session):
+            await self._forget_session_locked_async(odysseus_session)
+
+    async def _fence_admission_async(self, chat_id: str, reason: str) -> None:
+        """Persist fail-closed authority off the event loop."""
+        try:
+            await self._durable_session_map.async_fence(chat_id)
+            self._session_map = await self._durable_session_map.async_flat_current()
+        except Exception as exc:
+            logger.exception("unable to persist admission fence for %s (%s)", chat_id, reason)
+            raise RuntimeError("managed admission fence could not be persisted") from exc
+
+    async def _forget_session_locked_async(self, odysseus_session: str) -> None:
+        """Map-first idempotent forget with every map op off the event loop.
+
+        ``forget_session_async`` must not take ``fcntl.flock`` on the loop:
+        one long map lock would freeze unrelated chats. All OwnerSessionMap
+        calls therefore route through ``async_*`` / ``async_call``.
+        """
+        expected_engine = self._session_map.get(odysseus_session)
+        if expected_engine is None:
+            expected_engine = odysseus_session
+        entry = await self._durable_session_map.async_lookup(odysseus_session)
+        if entry is None:
+            from src.openclank.transcript_projection import (
+                delete_managed_binding,
+                delete_projection,
+                get_managed_binding,
+            )
+
+            try:
+                orphan_binding = await asyncio.to_thread(
+                    get_managed_binding, odysseus_session, owner=self._owner
+                )
+            except KeyError:
+                return
+            except Exception as exc:
+                await self._fence_admission_async(
+                    odysseus_session, "managed binding read during orphan forget"
+                )
+                raise RuntimeError(
+                    "managed binding authority could not be read during orphan forget"
+                ) from exc
+            if not orphan_binding:
+                try:
+                    # A previous map-first attempt may already have removed
+                    # the binding and crashed before projection cleanup.  The
+                    # projection is independently owner-qualified, so retry
+                    # it even when the canonical binding is now empty.
+                    await asyncio.to_thread(
+                        delete_projection, odysseus_session, owner=self._owner
+                    )
+                except KeyError:
+                    pass
+                except Exception as exc:
+                    raise RuntimeError(
+                        "orphan managed projection cleanup was not confirmed"
+                    ) from exc
+                return
+            try:
+                await asyncio.to_thread(
+                    delete_managed_binding,
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_binding.get("engineSessionID"),
+                    expected_map_revision=orphan_binding.get("mapRevision"),
+                    expected_mapping_revision=orphan_binding.get("mappingRevision"),
+                )
+                await asyncio.to_thread(
+                    delete_projection, odysseus_session, owner=self._owner
+                )
+            except KeyError:
+                return
+            except Exception as exc:
+                raise RuntimeError(
+                    "orphan managed authority cleanup was not confirmed"
+                ) from exc
+            return
+        if entry.get("current") != expected_engine:
+            self._session_map = await self._durable_session_map.async_flat_current()
+            return
+        mimo_session = expected_engine
+        map_revision, mapping_revision = await self._durable_session_map.async_revisions(
+            odysseus_session
+        )
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            delete_projection,
+            get_managed_binding,
+        )
+
+        try:
+            previous_binding = await asyncio.to_thread(
+                get_managed_binding, odysseus_session, owner=self._owner
+            )
+        except KeyError:
+            previous_binding = None
+        except Exception as exc:
+            await self._fence_admission_async(
+                odysseus_session, "managed binding read during forget"
+            )
+            raise RuntimeError(
+                "managed binding authority could not be read during forget"
+            ) from exc
+        try:
+            await self._durable_session_map.async_forget(
+                odysseus_session,
+                expected_map_revision=None,
+                expected_current=mimo_session,
+                expected_mapping_revision=mapping_revision,
+            )
+        except Exception:
+            raise
+        if previous_binding:
+            try:
+                await asyncio.to_thread(
+                    delete_managed_binding,
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                    expected_engine_session_id=mimo_session,
+                    expected_map_revision=previous_binding.get("mapRevision"),
+                    expected_mapping_revision=previous_binding.get("mappingRevision"),
+                )
+            except Exception as exc:
+                # The map-first prefix is intentionally fail-closed.  The
+                # owner-qualified binding remains available for idempotent
+                # restart cleanup; the map is already absent, so do not add a
+                # quarantine marker that would block that retry path.
+                raise RuntimeError("managed binding deletion was not confirmed") from exc
+        self._session_map = await self._durable_session_map.async_flat_current()
         self._session_models.pop(mimo_session, None)
         self._session_state.pop(mimo_session, None)
         self._session_context.pop(mimo_session, None)
         self._turns.pop(mimo_session, None)
         self._queues.pop(mimo_session, None)
         try:
-            self._session_map_path.parent.mkdir(parents=True, exist_ok=True)
-            self._session_map_path.write_text(json.dumps(self._session_map, indent=1))
+            await asyncio.to_thread(delete_projection, odysseus_session, owner=self._owner)
+        except KeyError:
+            pass
         except Exception as exc:
-            logger.warning("failed to persist session map after cleanup: %s", exc)
-        try:
-            from src.openclank.transcript_projection import delete_projection
+            raise RuntimeError("managed projection deletion was not confirmed") from exc
 
-            delete_projection(odysseus_session)
+    def _forget_session_locked(self, odysseus_session: str) -> None:
+        # The local map identifies the engine this bridge owns.  A stale bridge
+        # must verify that exact candidate against durable authority; it must
+        # never adopt the fresh winner merely because it is the latest row.
+        expected_engine = self._session_map.get(odysseus_session)
+        if expected_engine is None:
+            expected_engine = odysseus_session
+        entry = self._durable_session_map.lookup(odysseus_session)
+        if entry is None:
+            from src.openclank.transcript_projection import (
+                delete_managed_binding,
+                delete_projection,
+                get_managed_binding,
+            )
+            try:
+                orphan_binding = get_managed_binding(odysseus_session, owner=self._owner)
+            except KeyError:
+                return
+            except Exception as exc:
+                self._fence_admission(odysseus_session, "managed binding read during orphan forget")
+                raise RuntimeError("managed binding authority could not be read during orphan forget") from exc
+            if not orphan_binding:
+                try:
+                    # A previous map-first attempt may already have removed
+                    # the binding and crashed before projection cleanup.  The
+                    # projection is independently owner-qualified, so retry
+                    # it even when the canonical binding is now empty.
+                    delete_projection(odysseus_session, owner=self._owner)
+                except KeyError:
+                    pass
+                except Exception as exc:
+                    raise RuntimeError("orphan managed projection cleanup was not confirmed") from exc
+                return
+            try:
+                delete_managed_binding(
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=orphan_binding.get("workspaceRevision"),
+                    expected_engine_session_id=orphan_binding.get("engineSessionID"),
+                    expected_map_revision=orphan_binding.get("mapRevision"),
+                    expected_mapping_revision=orphan_binding.get("mappingRevision"),
+                )
+                delete_projection(odysseus_session, owner=self._owner)
+            except KeyError:
+                return
+            except Exception as exc:
+                raise RuntimeError("orphan managed authority cleanup was not confirmed") from exc
+            return
+        if entry.get("current") != expected_engine:
+            self._session_map = self._durable_session_map.flat_current()
+            return
+        mimo_session = expected_engine
+        map_revision, mapping_revision = self._durable_session_map.revisions(odysseus_session)
+        from src.openclank.transcript_projection import (
+            delete_managed_binding,
+            delete_projection,
+            get_managed_binding,
+        )
+
+        try:
+            previous_binding = get_managed_binding(odysseus_session, owner=self._owner)
+        except KeyError:
+            previous_binding = None
         except Exception as exc:
-            logger.debug("projection cleanup skipped for %s: %s", odysseus_session, exc)
+            self._fence_admission(odysseus_session, "managed binding read during forget")
+            raise RuntimeError("managed binding authority could not be read during forget") from exc
+        try:
+            self._durable_session_map.forget(
+                odysseus_session,
+                expected_map_revision=None,
+                expected_current=mimo_session,
+                expected_mapping_revision=mapping_revision,
+            )
+        except Exception:
+            raise
+        if previous_binding:
+            try:
+                delete_managed_binding(
+                    odysseus_session,
+                    owner=self._owner,
+                    expected_workspace_revision=previous_binding.get("workspaceRevision"),
+                    expected_engine_session_id=mimo_session,
+                    expected_map_revision=previous_binding.get("mapRevision"),
+                    expected_mapping_revision=previous_binding.get("mappingRevision"),
+                )
+            except Exception as exc:
+                # The map-first prefix is intentionally fail-closed.  The
+                # owner-qualified binding remains available for idempotent
+                # restart cleanup; the map is already absent, so do not add a
+                # quarantine marker that would block that retry path.
+                raise RuntimeError("managed binding deletion was not confirmed") from exc
+        self._session_map = self._durable_session_map.flat_current()
+        self._session_models.pop(mimo_session, None)
+        self._session_state.pop(mimo_session, None)
+        self._session_context.pop(mimo_session, None)
+        self._turns.pop(mimo_session, None)
+        self._queues.pop(mimo_session, None)
+        try:
+            delete_projection(odysseus_session, owner=self._owner)
+        except KeyError:
+            pass
+        except Exception as exc:
+            raise RuntimeError("managed projection deletion was not confirmed") from exc
 
     async def _maybe_inject_digest(
         self,
@@ -758,18 +2513,19 @@ class ACPBridge:
         *,
         owner: Optional[str],
         incognito: bool,
+        memory_read_allowed: bool = True,
     ) -> list:
         """Memory injection for one mimo turn: returns (messages, trusted_block).
 
         The untrusted index card is prepended to turns that don't carry one
-        (Odysseus-prefaced turns already have it; the sentinel keeps it
+        (Open Clank-prefaced turns already have it; the sentinel keeps it
         single — this covers resume flows and any future mimo-first path).
         The TRUSTED guidance block (T6) is returned to the caller so it can
         ride envelope.system_prompt — true system tier — instead of being
-        demoted to synthetic prompt text. If the Odysseus preface already
+        demoted to synthetic prompt text. If the Open Clank preface already
         produced a trusted block, that exact text is reused (no second
         digest fetch, no drift). Fail-open: no digest, no blocks."""
-        if incognito or self._memory_provider is None:
+        if incognito or not memory_read_allowed or self._memory_provider is None:
             return messages, ""
         if not hasattr(self._memory_provider, "digest"):
             return messages, ""
@@ -811,6 +2567,84 @@ class ACPBridge:
         out.insert(insert_at, untrusted_context_message("memory bank index", card))
         return out, trusted_block
 
+    async def _handle_code_context_read(self, params):
+        """Existing managed channel, actual final request payload; no cache."""
+        from src.openclank.managed_protocol import validate_managed_method_request, validate_managed_method_result
+        method = "_openclank/session/v1/code-context/read"
+        request = validate_managed_method_request(method, params)
+        key = (request["sessionID"], request["bindingRevision"], request["requestID"])
+        jobs = self.__dict__.setdefault("_code_context_requests", {})
+        result = dict(bindingRevision=request["bindingRevision"], requestID=request["requestID"], requestFingerprint=request["requestFingerprint"], card=None, reason="unavailable")
+        if request.get("action") == "cancel":
+            binding = await self._handle_session_binding_read({"sessionID": request["sessionID"]})
+            if binding["workspaceRevision"] != request["bindingRevision"]:
+                return validate_managed_method_result(method, result)
+            entry = jobs.get(key)
+            if entry and entry[1] == request["requestFingerprint"]:
+                entry[0].cancel()
+            result["reason"] = "cancelled"
+            return validate_managed_method_result(method, result)
+        if key in jobs or len(jobs) >= 16 or sum(k[0] == key[0] for k in jobs) >= 4:
+            result["reason"] = "busy"
+            return validate_managed_method_result(method, result)
+        # Register synchronously before the FIRST binding/source await. ACP
+        # dispatch creates callbacks in wire order, so immediate cancel cannot
+        # overtake registration and be forgotten. No eviction of active tasks.
+        task = asyncio.current_task()
+        jobs[key] = (task, request["requestFingerprint"])
+        try:
+            return await self._run_code_context_read(request)
+        except asyncio.CancelledError:
+            result["reason"] = "cancelled"
+            return validate_managed_method_result(method, result)
+        finally:
+            if jobs.get(key, (None,))[0] is task:
+                jobs.pop(key, None)
+
+    async def _cancel_code_context_requests(self, session_id):
+        tasks = [entry[0] for key, entry in self.__dict__.get("_code_context_requests", {}).items() if key[0] == session_id and entry[0] is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_code_context_read(self, request):
+        from src.openclank.managed_protocol import validate_managed_method_result
+        method = "_openclank/session/v1/code-context/read"
+        binding = await self._handle_session_binding_read({"sessionID": request["sessionID"]})
+        result = dict(bindingRevision=request["bindingRevision"], requestID=request["requestID"], requestFingerprint=request["requestFingerprint"], card=None, reason="unavailable")
+        context = self._session_context.get(request["sessionID"], {})
+        if (binding["workspaceRevision"] != request["bindingRevision"] or not binding["memoryEnabled"] or not binding["authorityWorkspaceID"] or context.get("incognito") or context.get("auxiliary") or context.get("memory_read_allowed") is not True or self._memory_provider is None):
+            return validate_managed_method_result(method, result)
+        try:
+            from core.models import get_session_manager_instance
+            from src.constants import AUTH_FILE
+            from src.tool_execution import _read_only_auth_snapshot
+            from routes.prefs_routes import _load_for_user
+            from src.openclank.file_policy import FilePolicyRepository
+            from src.openclank.code_context import append_code_context
+            messages = request["retainedMessages"]
+            if len(json.dumps(messages, ensure_ascii=False, separators=(",", ":")).encode()) > 1024 * 1024:
+                return validate_managed_method_result(method, result)
+            manager=get_session_manager_instance()
+            session=manager.get_session(binding["stableChatID"]) if manager is not None else None
+            if session is None or session.owner != self._owner or session.workspace_id != binding["authorityWorkspaceID"] or getattr(session, "archived", False):
+                return validate_managed_method_result(method, result)
+            out = await append_code_context(messages=messages,message=request["query"],session=session,provider=self._memory_provider,
+                repository=FilePolicyRepository(),auth_manager=_read_only_auth_snapshot(os.environ.get("OPEN_CLANK_AUTHORITY_AUTH_PATH") or AUTH_FILE),
+                prefs=_load_for_user(self._owner),owner=self._owner,max_bytes=request["availableByteTokens"],max_tokens=request["availableByteTokens"],prefs_reader=lambda: _load_for_user(self._owner))
+            current = await self._handle_session_binding_read({"sessionID": request["sessionID"]})
+            current_context = self._session_context.get(request["sessionID"], {})
+            if current != binding or manager.get_session(binding["stableChatID"]) is not session or session.owner != self._owner or session.workspace_id != binding["authorityWorkspaceID"] or getattr(session, "archived", False) or getattr(session, "incognito", False) or current_context.get("incognito") or current_context.get("auxiliary") or current_context.get("memory_read_allowed") is not True:
+                return validate_managed_method_result(method, result)
+            if len(out) == len(messages) + 1:
+                at = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), len(messages))
+                card = out[at]
+                if card.get("role") == "user" and isinstance(card.get("content"), str) and len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode()) <= request["availableByteTokens"]:
+                    result.update(card=card["content"], reason=None)
+        except Exception:
+            pass
+        return validate_managed_method_result(method, result)
+
     async def run_turn(
         self,
         odysseus_session: str,
@@ -824,27 +2658,66 @@ class ACPBridge:
 
         cwd: per-chat workspace override (else the bridge's global default).
         """
-        if odysseus_session in self._session_map and self._delete_session_callback:
-            await self._delete_session_callback(odysseus_session)
+        prior_mimo_session = self._session_map.get(odysseus_session)
+        prior_context = self._session_context.get(prior_mimo_session or "", {})
+        mapped_workspace = self.mapped_session_workspace(odysseus_session)
+        effective_cwd = str(
+            (prior_context.get("workspace") or prior_context.get("cwd") or mapped_workspace)
+            if prior_mimo_session is not None
+            else (cwd or mapped_workspace)
+        ).strip()
         envelope = json.loads(json.dumps(turn_envelope or {}, default=str))
+        # These are host-authenticated routing fields. Never infer them from
+        # the provider session id or accept model/user payload identity.
+        envelope["chat_id"] = odysseus_session
+        if prior_context.get("workspace_id"):
+            envelope["workspace_id"] = prior_context["workspace_id"]
+        if prior_context.get("goal_id") and not envelope.get("goal_id"):
+            envelope["goal_id"] = prior_context["goal_id"]
+        authority_workspace_id = str(
+            envelope.get("authority_workspace_id") or ""
+        ).strip()
+        if authority_workspace_id and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", authority_workspace_id
+        ):
+            yield f"event: error\ndata: {json.dumps({'code': 'INVALID_AUTHORITY_WORKSPACE', 'error': 'The Workspace authority identity is invalid', 'status': 409, 'retryable': False})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        if authority_workspace_id:
+            envelope["workspace_id"] = authority_workspace_id
+        copal_workspace = str(envelope.get("copal_workspace") or "default").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", copal_workspace):
+            yield f"event: error\ndata: {json.dumps({'code': 'INVALID_COPAL_WORKSPACE', 'error': 'Copal workspace is invalid', 'status': 400, 'retryable': False})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
         incognito = bool(envelope.get("incognito"))
         auxiliary = envelope.get("lane") == "auxiliary"
+        memory_read_allowed = bool(envelope.get("memory_read_allowed", True))
         extra_mcp_servers, mcp_disabled = odysseus_mcp_descriptors(
             is_admin=bool(envelope.get("is_admin")) and not incognito
         )
         envelope.setdefault("disabled_tools", []).extend(mcp_disabled)
         if incognito or auxiliary:
             mimo_session = await self.open_session(
-                cwd=cwd,
+                cwd=effective_cwd,
                 owner=owner,
                 odysseus_session=odysseus_session,
                 with_agent_tools=not auxiliary,
                 with_memory=False,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
             self._session_context[mimo_session] = {
                 "odysseus_session_id": odysseus_session,
                 "owner": owner if owner is not None else self._owner,
-                "workspace": cwd or self._cwd,
+                "workspace": effective_cwd,
+                "cwd": effective_cwd,
+                "physical_cwd": effective_cwd,
+                "file_policy_workspace": effective_cwd,
+                "memory_workspace": chat_workspace(),
+                "copal_workspace": copal_workspace,
+                "authority_workspace_id": authority_workspace_id,
+                "workspace_id": authority_workspace_id,
                 "incognito": True,
                 "auxiliary": auxiliary,
                 "is_admin": bool(envelope.get("is_admin")),
@@ -853,18 +2726,51 @@ class ACPBridge:
         else:
             mimo_session = await self.ensure_session(
                 odysseus_session,
-                cwd=cwd,
+                cwd=effective_cwd,
                 owner=owner,
                 extra_mcp_servers=extra_mcp_servers,
+                with_memory=memory_read_allowed,
+                copal_workspace=copal_workspace,
+                authority_workspace_id=authority_workspace_id,
             )
+            existing_context = self._session_context.get(mimo_session, {})
             self._session_context.setdefault(mimo_session, {}).update({
-                "workspace": cwd or self._cwd,
+                "workspace": effective_cwd,
+                "cwd": effective_cwd,
+                "physical_cwd": effective_cwd,
+                "file_policy_workspace": self._session_context.get(mimo_session, {}).get(
+                    "file_policy_workspace", effective_cwd
+                ),
+                "authority_workspace_id": authority_workspace_id,
+                "workspace_id": authority_workspace_id or existing_context.get("workspace_id"),
+                "goal_id": envelope.get("goal_id") or existing_context.get("goal_id"),
                 "incognito": False,
                 "is_admin": bool(envelope.get("is_admin")),
                 "interaction_policy": envelope.get("interaction_policy", "interactive"),
+                "copal_workspace": copal_workspace,
             })
-        turn_id = _turn_source_id(messages)
+        metadata_root = _message_root_operation_id(messages)
+        supplied_root = str(envelope.get("root_operation_id") or "").strip()
+        if metadata_root and supplied_root and metadata_root != supplied_root:
+            yield f'event: error\ndata: {json.dumps({"code": "ROOT_OPERATION_MISMATCH", "error": "The persisted turn operation identity did not match the execution envelope", "status": 409, "retryable": False})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
+        turn_id = metadata_root or supplied_root or _turn_source_id(messages)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,191}", turn_id):
+            yield f'event: error\ndata: {json.dumps({"code": "INVALID_ROOT_OPERATION", "error": "The turn operation identity is invalid", "status": 409, "retryable": False})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
+        envelope["root_operation_id"] = turn_id
         envelope["root_turn_id"] = turn_id
+        # Host-side tool callbacks resolve this nonsecret context rather than
+        # inventing an operation identity from the long-lived session ID.
+        self._session_context.setdefault(mimo_session, {}).update({
+            "root_operation_id": turn_id,
+            "memory_read_allowed": memory_read_allowed and not incognito and not auxiliary,
+            "provider_grant_id": (
+                str(envelope.get("provider_grant_id") or "").strip() or None
+            ),
+        })
         if not incognito and not auxiliary and not turn_id.startswith("turn-"):
             from src.agent_actor_accounting import begin_agent_turn
 
@@ -874,6 +2780,9 @@ class ACPBridge:
                 yield "data: [DONE]\n\n"
                 return
         control_state = self._session_state.get(mimo_session, {})
+        if not auxiliary and control_state is not None:
+            control_state["last_root_operation_id"] = turn_id
+            self._persist_session_state(mimo_session)
         try:
             if auxiliary:
                 raise KeyError("auxiliary turns have no transcript projection")
@@ -886,9 +2795,9 @@ class ACPBridge:
             record_projection(
                 snapshot,
                 mimo_session_id=mimo_session,
-                workspace=cwd or self._cwd,
-                endpoint_url="mimo://acp",
-                model=model or "mimo",
+                workspace=effective_cwd,
+                endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+                model=model or "openclank-engine",
                 turn_id=turn_id,
                 mode_config_revision=int(control_state.get("revision") or 0),
             )
@@ -900,22 +2809,36 @@ class ACPBridge:
         self._turns[mimo_session] = state
 
         desired = control_state.get("desired", {})
-        desired_mode = desired.get("mode")
-        if desired_mode:
-            try:
-                await self.set_config_option(
-                    odysseus_session,
-                    "mode",
-                    desired_mode,
-                    cwd=cwd,
-                    owner=owner,
-                )
-            except (ValueError, RPCError) as exc:
-                logger.warning("MiMo mode restore failed (%s): %s", desired_mode, exc)
-                yield f'data: {json.dumps({"type": "config_error", "config": "mode", "requested": desired_mode, "error": str(exc)})}\n\n'
-                yield f'event: error\ndata: {json.dumps({"error": f"MiMo rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
-                yield "data: [DONE]\n\n"
-                return
+        profile = str(desired.get("agent_profile") or "")
+        if envelope.get("mode") == "agent" and profile:
+            envelope["agent_profile"] = profile
+        else:
+            envelope.pop("agent_profile", None)
+        # The Open Clank interaction mode is the authority for this turn.
+        # Persisted ACP state is only a negotiated cache and must never let a
+        # stale provider-native mode override a newly captured Chat/Plan/Agent
+        # choice.  Chat and Agent both use ACP's internal build mode.
+        desired_mode = str(
+            envelope.get("provider_mode")
+            or ("plan" if envelope.get("mode") == "plan" else "build")
+        ).strip().lower()
+        if desired_mode not in {"build", "plan"}:
+            desired_mode = "build"
+        selected_runtime_model = str(desired.get("model") or model or "")
+        try:
+            await self.set_config_option(
+                odysseus_session,
+                "mode",
+                desired_mode,
+                cwd=effective_cwd,
+                owner=owner,
+            )
+        except (ValueError, RPCError) as exc:
+            logger.warning("Open Clank agent mode negotiation failed (%s): %s", desired_mode, exc)
+            yield f'data: {json.dumps({"type": "config_error", "config": "mode", "requested": desired_mode, "error": str(exc)})}\n\n'
+            yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected mode {desired_mode!r}; the prompt was not sent", "status": 409})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
 
         # Tell mimo which model to use. The thesius model name (e.g. "deepseek-v4-pro")
         # may not match mimo's provider/model format ("deepseek/deepseek-v4-pro").
@@ -932,6 +2855,7 @@ class ACPBridge:
                 result = await self._client.set_session_config_option(
                     mimo_session, "model", model_id
                 )
+                selected_runtime_model = model_id
                 self._capture_handshake(mimo_session, result)
                 self._session_state[mimo_session].setdefault("desired", {})[
                     "model"
@@ -949,7 +2873,7 @@ class ACPBridge:
                     if item.get("modelId")
                 ]
                 yield f'data: {json.dumps({"type": "config_error", "config": "model", "requested": model, "available": available, "error": str(e)})}\n\n'
-                yield f'event: error\ndata: {json.dumps({"error": f"MiMo rejected model {model!r}; the prompt was not sent", "status": 409})}\n\n'
+                yield f'event: error\ndata: {json.dumps({"error": f"Open Clank agent rejected model {model!r}; the prompt was not sent", "status": 409})}\n\n'
                 yield "data: [DONE]\n\n"
                 return
 
@@ -959,7 +2883,10 @@ class ACPBridge:
 
         # Build the prompt parts from odysseus messages
         messages, trusted_block = await self._maybe_inject_digest(
-            messages, owner=owner, incognito=incognito or auxiliary
+            messages,
+            owner=owner,
+            incognito=incognito or auxiliary,
+            memory_read_allowed=memory_read_allowed,
         )
         if trusted_block:
             # T6: endorsed guidance rides the persona seam to TRUE system
@@ -969,14 +2896,82 @@ class ACPBridge:
             envelope["system_prompt"] = (
                 f"{base_system}\n\n{trusted_block}" if base_system else trusted_block
             )
+        # General entries are saved defaults subordinate to this turn's
+        # explicit request. Reuse the host's pinned boundary snapshot; edits
+        # while this turn runs affect subsequent operations only.
+        from src.general_hex_runtime import turn_hex_snapshot
+        from src.general_hex_composition import defaults_instruction
+        try:
+            hex_snapshot = await asyncio.to_thread(
+                turn_hex_snapshot, self._memory_provider, owner_id=owner, boundary_id=turn_id,
+                workspace=effective_cwd or None,
+                workspace_id=str(envelope.get("authority_workspace_id") or "") or None,
+                task_id=odysseus_session, persist=not incognito,
+            )
+            envelope["general_hex_snapshot_ref"] = {
+                "boundary_id": turn_id, "snapshot_hash": hex_snapshot["snapshot_hash"],
+                "budget": hex_snapshot["budget"],
+            }
+            defaults = defaults_instruction(hex_snapshot)
+            if defaults:
+                base_system = str(envelope.get("system_prompt") or "").rstrip()
+                envelope["system_prompt"] = f"{base_system}\n\n{defaults}" if base_system else defaults
+        except (ValueError, OSError) as exc:
+            envelope["general_hex_snapshot_ref"] = {"state": "unavailable", "reason": str(exc)}
+            logger.info("General Hex defaults unavailable: %s", exc)
         prompt_parts = _build_prompt_parts(
             messages,
             turn_id=turn_id,
-            workspace=cwd or self._cwd,
+            workspace=effective_cwd,
             authoritative_system=str(envelope.get("system_prompt") or ""),
         )
         prompt_meta = {"odysseus": envelope}
+        if _literal_slash(messages): prompt_meta["openclankLiteralSlash"] = True
         prompt_meta["odysseus"]["tools"] = _mimo_tool_policy(envelope)
+        if self._managed_provider_context is not None:
+            try:
+                route_context = await self._managed_provider_context(
+                    selected_runtime_model,
+                    grant_id=(str(envelope.get("provider_grant_id") or "").strip() or None),
+                )
+                managed_wire = route_context.to_wire(
+                    root_operation_id=turn_id,
+                )
+                for source, target in (
+                    ("preferred_provider_account_id", "preferredAccountID"),
+                    ("inherited_provider_account_id", "inheritedAccountID"),
+                ):
+                    value = str(envelope.get(source) or "").strip()
+                    if value:
+                        managed_wire[target] = value
+                prompt_meta["openclankProvider"] = managed_wire
+            except Exception as exc:
+                logger.warning(
+                    "managed provider route resolution rejected model %r: %s",
+                    selected_runtime_model,
+                    exc,
+                )
+                yield f'event: error\ndata: {json.dumps({"code": "MANAGED_PROVIDER_ROUTE_UNAVAILABLE", "error": str(exc), "status": 409, "retryable": False})}\n\n'
+                yield "data: [DONE]\n\n"
+                return
+
+        logging_outcome = "unknown"
+        logging_context = {}
+        logging_callbacks = getattr(self, "_logging_callbacks", None)
+        if logging_callbacks is not None:
+            try:
+                logging_context = await asyncio.to_thread(logging_callbacks.register_logging_operation, turn_id,
+                    {"operation_type": "chat", "session_id": odysseus_session, "run_id": turn_id,
+                     "actor_id": "main", "actor_kind": "foreground", "incognito": incognito or auxiliary,
+                     "workspace_id": str(envelope.get("authority_workspace_id") or "") or None,
+                     "connection_id": managed_wire.get("connectionID") if self._managed_provider_context is not None else None,
+                     "route_id": managed_wire.get("modelRouteID") if self._managed_provider_context is not None else None,
+                     "model_id": managed_wire.get("modelID") if self._managed_provider_context is not None else None,
+                     "billing_lane": managed_wire.get("billingLane") if self._managed_provider_context is not None else None})
+                if logging_context.get("operationID"):
+                    managed_wire["operationID"] = logging_context["operationID"]
+            except Exception as exc:
+                logger.warning("chat logging admission unavailable: %s", type(exc).__name__)
 
         # Fire the prompt request (blocks until stopReason, notifications arrive concurrently)
         prompt_task = asyncio.ensure_future(
@@ -1025,28 +3020,54 @@ class ACPBridge:
                 yield "data: [DONE]\n\n"
                 return
 
+            logging_outcome = "completed"
             state.stop_reason = result.get("stopReason", "end_turn")
             state.usage = result.get("usage")
+            usage_meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+            for field, key in (("normalizationProfile", "normalization_profile"), ("metricCoverage", "metric_coverage"),
+                               ("coveredDispatchIDs", "covered_dispatch_ids"), ("lossReasons", "loss_reasons"),
+                               ("identityCoverage", "identity_coverage")):
+                if field in result or field in usage_meta:
+                    state.metrics[key] = result[field] if field in result else usage_meta[field]
 
             # Emit final metrics
             elapsed = time.time() - state.turn_start
             metrics = {
                 "response_time": round(elapsed, 2),
-                "model": model or "mimo",
+                "model": model or "openclank-engine",
                 "stop_reason": state.stop_reason,
                 "root_turn_id": turn_id,
+                "root_operation_id": turn_id,
+                "operation_id": logging_context.get("operationID"),
+                "identity_coverage": logging_context.get("identityCoverage", "partial"),
                 **state.metrics,
             }
             if state.usage:
-                metrics["input_tokens"] = state.usage.get("inputTokens", 0)
-                metrics["output_tokens"] = state.usage.get("outputTokens", 0)
-                metrics["total_tokens"] = state.usage.get("totalTokens", 0)
-                metrics["thinking_tokens"] = state.usage.get("thoughtTokens", 0)
-                metrics["cache_read_tokens"] = state.usage.get("cachedReadTokens", 0)
-                metrics["cache_write_tokens"] = state.usage.get("cachedWriteTokens", 0)
+                if "inputTokens" in state.usage:
+                    metrics["input_tokens"] = state.usage["inputTokens"]
+                if "outputTokens" in state.usage:
+                    metrics["output_tokens"] = state.usage["outputTokens"]
+                if "totalTokens" in state.usage:
+                    metrics["total_tokens"] = state.usage["totalTokens"]
+                if "thoughtTokens" in state.usage:
+                    metrics["thinking_tokens"] = state.usage["thoughtTokens"]
+                if "cachedReadTokens" in state.usage:
+                    metrics["cache_read_tokens"] = state.usage["cachedReadTokens"]
+                if "cachedWriteTokens" in state.usage:
+                    metrics["cache_write_tokens"] = state.usage["cachedWriteTokens"]
                 metrics["usage_source"] = "reported"
             else:
                 metrics["usage_source"] = "estimated"
+
+            # Ordinary numeric usage is independent of Advanced admission and
+            # visible reply persistence. Preserve the actual aggregate coverage,
+            # including missing categories and unresolved dispatch overlap.
+            if logging_callbacks is not None:
+                try:
+                    await asyncio.to_thread(logging_callbacks.record_logging_metrics, turn_id, metrics, logging_outcome)
+                except Exception as exc:
+                    logger.warning("chat ordinary usage write unavailable: %s", type(exc).__name__)
+                    metrics["loss_reasons"] = list(dict.fromkeys([*(metrics.get("loss_reasons") or []), "ordinary_usage_write_failed"]))
 
             yield f'data: {json.dumps({"type": "metrics", "data": metrics})}\n\n'
 
@@ -1059,6 +3080,7 @@ class ACPBridge:
             yield "data: [DONE]\n\n"
 
         except (asyncio.CancelledError, GeneratorExit):
+            logging_outcome = "cancelled"
             # Client disconnected — cancel the turn
             try:
                 await self._client.cancel(mimo_session)
@@ -1068,12 +3090,18 @@ class ACPBridge:
         finally:
             self._turns.pop(mimo_session, None)
             self._queues.pop(mimo_session, None)
+            await self._cancel_code_context_requests(mimo_session)
             if not prompt_task.done():
                 prompt_task.cancel()
                 try:
                     await prompt_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if logging_callbacks is not None:
+                try:
+                    await asyncio.to_thread(logging_callbacks.finish_logging_operation, turn_id, logging_outcome)
+                except Exception as exc:
+                    logger.warning("chat logging finalization unavailable: %s", type(exc).__name__)
             if incognito:
                 self._session_context.pop(mimo_session, None)
                 self._session_state.pop(mimo_session, None)
@@ -1085,7 +3113,7 @@ class ACPBridge:
                             mimo_session_id=mimo_session,
                         )
                     except Exception as exc:
-                        logger.warning("failed to delete incognito MiMo session %s: %s", mimo_session, exc)
+                        logger.warning("failed to delete incognito Open Clank agent session %s: %s", mimo_session, exc)
 
     def _persist_plan_update(self, mimo_session_id: str, payload: dict) -> dict:
         state = self._session_state.setdefault(mimo_session_id, {})
@@ -1093,7 +3121,7 @@ class ACPBridge:
         combined = {
             key: value
             for key, value in previous.items()
-            if key not in ("digest", "revision", "approved_revision")
+            if key not in ("digest", "revision", "approved_revision", "approved_digest")
         }
         combined.update(payload)
         material = json.dumps(combined, ensure_ascii=False, sort_keys=True, default=str)
@@ -1107,6 +3135,11 @@ class ACPBridge:
             "revision": revision,
             "approved_revision": (
                 previous.get("approved_revision")
+                if previous.get("digest") == digest
+                else None
+            ),
+            "approved_digest": (
+                previous.get("approved_digest")
                 if previous.get("digest") == digest
                 else None
             ),
@@ -1195,6 +3228,12 @@ class ACPBridge:
 
         elif update_type == "available_commands_update":
             sses.append(f'data: {json.dumps({"type": "commands_update", "data": _sanitize_event_value(update)})}\n\n')
+
+        elif update_type == "_openclank_session_cwd":
+            # The notification handler commits this per-chat workspace before
+            # the update reaches the turn queue. Surface it for the current
+            # client turn without ever changing the process cwd.
+            sses.append(f'data: {json.dumps({"type": "session_cwd", "data": _sanitize_event_value(update)})}\n\n')
 
         elif update_type == "current_mode_update":
             sses.append(f'data: {json.dumps({"type": "mode_update", "data": _sanitize_event_value(update)})}\n\n')
@@ -1286,13 +3325,27 @@ def _content_text(content: Any) -> str:
     return str(content or "")
 
 
-def _turn_source_id(messages: list) -> str:
+def _message_root_operation_id(messages: list) -> str:
+    """Return the server-persisted root identity on the latest user turn."""
+
     for message in reversed(messages):
         if message.get("role") != "user":
             continue
         metadata = message.get("metadata") or {}
+        if metadata.get("root_operation_id"):
+            return str(metadata["root_operation_id"])
         if metadata.get("_db_id"):
             return str(metadata["_db_id"])
+    return ""
+
+
+def _turn_source_id(messages: list) -> str:
+    persisted = _message_root_operation_id(messages)
+    if persisted:
+        return persisted
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
         material = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str)
         return f"turn-{hashlib.sha256(material.encode('utf-8')).hexdigest()[:24]}"
     return f"turn-{hashlib.sha256(json.dumps(messages, default=str).encode('utf-8')).hexdigest()[:24]}"
@@ -1319,19 +3372,50 @@ def _path_within(path: str, root: str) -> bool:
         return False
 
 
-def _data_uri(value: str) -> tuple[str, str] | None:
+def _data_uri(value: str, *, declared_mime: str = "") -> tuple[str, str] | None:
     if not value.startswith("data:") or "," not in value:
         return None
     header, payload = value[5:].split(",", 1)
     fields = header.split(";")
     mime = fields[0] or "application/octet-stream"
-    if "base64" in fields[1:]:
-        try:
-            base64.b64decode(payload, validate=True)
-        except (ValueError, binascii.Error):
-            return None
-        return mime, payload
-    return mime, base64.b64encode(urllib.parse.unquote_to_bytes(payload)).decode("ascii")
+    # ACP native media crosses as an exact byte payload.  Plain/percent data
+    # URLs are intentionally rejected so they cannot be mistaken for base64.
+    if "base64" not in fields[1:] or not payload:
+        return None
+    if declared_mime and mime.lower() != declared_mime.lower():
+        return None
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) > _NATIVE_MEDIA_SOURCE_BYTES or len(payload.encode("ascii")) > _NATIVE_MEDIA_PAYLOAD_BYTES:
+        return None
+    return mime, payload
+
+
+def _media_error_part(name: str, reason: str) -> dict:
+    return {
+        "type": "text",
+        "text": f"[Attachment unavailable: {name} ({reason})]",
+    }
+
+
+def _bounded_blob(payload: Any) -> bool:
+    if not isinstance(payload, str) or not payload:
+        return False
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error):
+        return False
+    return len(raw) <= _NATIVE_MEDIA_SOURCE_BYTES and len(payload.encode("ascii")) <= _NATIVE_MEDIA_PAYLOAD_BYTES
+
+
+def _is_native_media_mime(mime: str) -> bool:
+    normalized = str(mime or "").split(";", 1)[0].strip().lower()
+    return normalized.startswith(("image/", "audio/", "video/")) or normalized in {
+        "application/pdf",
+        "application/octet-stream",
+    }
 
 
 def _content_parts(
@@ -1364,8 +3448,9 @@ def _content_parts(
         if kind in ("image", "image_url"):
             image = block.get("image_url") if kind == "image_url" else block
             uri = image.get("url") if isinstance(image, dict) else block.get("uri")
-            data = _data_uri(uri or "")
             name = next(names, "image")
+            declared_mime = str((image or {}).get("mediaType") or block.get("mimeType") or "") if isinstance(image, dict) else ""
+            data = _data_uri(uri or "", declared_mime=declared_mime)
             if data:
                 result.append({
                     "type": "image",
@@ -1373,19 +3458,31 @@ def _content_parts(
                     "mimeType": data[0],
                     "uri": f"attachment://{urllib.parse.quote(name)}",
                 })
+            elif isinstance(uri, str) and uri.startswith("data:"):
+                result.append(_media_error_part(name, "malformed or unsupported data URL"))
+            elif isinstance(uri, str) and uri.startswith(("http://", "https://")):
+                result.append(_media_error_part(name, "remote media bytes are unproven"))
             elif isinstance(uri, str) and _safe_resource_uri(uri, workspace):
                 result.append({
                     "type": "image",
                     "uri": uri,
                     "mimeType": block.get("mimeType") or "image/*",
                 })
+            else:
+                result.append(_media_error_part(name, "missing, unsafe, or unsupported image URI"))
             continue
         if kind in ("audio", "input_audio"):
             audio = block.get("audio") or block.get("input_audio") or {}
             uri = audio.get("url", "") if isinstance(audio, dict) else ""
             data = _data_uri(uri)
             if not data and isinstance(audio, dict) and audio.get("data"):
-                data = (f"audio/{audio.get('format') or 'mpeg'}", audio["data"])
+                raw_payload = str(audio["data"])
+                try:
+                    raw = base64.b64decode(raw_payload, validate=True)
+                except (ValueError, binascii.Error):
+                    raw = b""
+                if raw and len(raw) <= _NATIVE_MEDIA_SOURCE_BYTES and len(raw_payload.encode("ascii")) <= _NATIVE_MEDIA_PAYLOAD_BYTES:
+                    data = (f"audio/{audio.get('format') or 'mpeg'}", raw_payload)
             if data:
                 name = next(names, "audio")
                 result.append({
@@ -1396,10 +3493,20 @@ def _content_parts(
                         "blob": data[1],
                     },
                 })
+            elif uri.startswith(("http://", "https://")):
+                result.append(_media_error_part(next(names, "audio"), "remote media bytes are unproven"))
+            elif uri.startswith("data:") or (isinstance(audio, dict) and audio.get("data")):
+                result.append(_media_error_part(next(names, "audio"), "malformed or oversized audio payload"))
+            elif isinstance(audio, dict) and audio:
+                result.append(_media_error_part(next(names, "audio"), "missing, unsafe, or unsupported audio URI"))
             continue
         if kind == "resource_link":
             uri = str(block.get("uri") or "")
-            if _safe_resource_uri(uri, workspace):
+            mime = str(block.get("mimeType") or "application/octet-stream")
+            remote_native = uri.startswith(("http://", "https://")) and _is_native_media_mime(mime)
+            if remote_native:
+                result.append(_media_error_part(str(block.get("name") or "resource"), "remote native media bytes are unproven"))
+            elif _safe_resource_uri(uri, workspace):
                 result.append({
                     "type": "resource_link",
                     "uri": uri,
@@ -1407,16 +3514,33 @@ def _content_parts(
                     "mimeType": str(block.get("mimeType") or "application/octet-stream"),
                     "size": block.get("size"),
                 })
+            else:
+                result.append(_media_error_part(str(block.get("name") or "resource"), "unsupported or unsafe resource URI"))
             continue
         if kind == "resource" and isinstance(block.get("resource"), dict):
             resource = block["resource"]
             uri = str(resource.get("uri") or "")
-            if _safe_resource_uri(uri, workspace) and (
-                isinstance(resource.get("text"), str)
-                or isinstance(resource.get("blob"), str)
-            ):
+            text_value = resource.get("text")
+            blob_value = resource.get("blob")
+            has_text = "text" in resource
+            has_blob = "blob" in resource
+            valid_text = has_text and not has_blob and isinstance(text_value, str) and len(text_value.encode("utf-8")) <= _NATIVE_MEDIA_SOURCE_BYTES
+            valid_blob = has_blob and not has_text and _bounded_blob(blob_value)
+            if _safe_resource_uri(uri, workspace) and (valid_text or valid_blob):
                 result.append({"type": "resource", "resource": dict(resource)})
+            else:
+                result.append(_media_error_part(uri or "resource", "malformed, oversized, or unsafe resource"))
+        elif any(key in block for key in ("url", "uri", "data", "image_url", "input_audio")):
+            result.append(_media_error_part(str(kind or "attachment"), "unsupported media shape"))
     return result
+
+
+def _literal_slash(messages: list) -> bool:
+    current = next((item for item in reversed(messages) if item.get("role") == "user"), {})
+    content = current.get("content")
+    if isinstance(content, list):
+        content = next((item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"), "")
+    return isinstance(content, str) and bool(re.match(r"^/literal(?:\s|$)", content))
 
 
 def _build_prompt_parts(
@@ -1495,7 +3619,9 @@ def _build_prompt_parts(
         current_parts.insert(0, {"type": "text", "text": prefix.rstrip()})
     else:
         current = first_text["text"]
-        if current.startswith("/mimo:"):
+        if re.match(r"^/literal(?:\s|$)", current):
+            current = re.sub(r"^/literal(?:[ \t])?", "", current, count=1)
+        elif current.startswith("/mimo:"):
             current = "/" + current[len("/mimo:"):]
         first_text["text"] = prefix + current
     parts.extend(current_parts)
@@ -1509,7 +3635,8 @@ _MIMO_TOOL_ALIASES = {
     "write_file": {"write", "edit", "apply_patch", "patch"},
     "web_search": {"websearch", "web_search"},
     "web_fetch": {"webfetch", "web_fetch"},
-    "manage_memory": {"memory", "frankenmemory_*"},
+    "manage_memory": {"memory"},
+    "recall_memory": {"memory"},
 }
 
 
@@ -1517,10 +3644,14 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
     if envelope.get("lane") == "auxiliary":
         return {"*": False}
     allowed = envelope.get("allowed_tools")
-    policy: dict[str, bool] = {"*": False} if allowed is not None else {}
+    policy: dict[str, bool] = {"frankenmemory_*": False}
+    if allowed is not None:
+        policy["*"] = False
     for raw_name in allowed or []:
         name = str(raw_name)
         normalized = name.replace("mcp__", "").replace(":", "_")
+        if normalized.startswith("frankenmemory_"):
+            continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {normalized}):
             policy[alias] = True
         policy[f"lifetools_*_{normalized}"] = True
@@ -1533,10 +3664,31 @@ def _mimo_tool_policy(envelope: dict) -> dict[str, bool]:
         policy[f"lifetools_*_{normalized}"] = False
     for raw_name in envelope.get("forced_tools") or []:
         name = str(raw_name)
+        normalized = name.replace("mcp__", "").replace(":", "_")
+        if normalized.startswith("frankenmemory_"):
+            continue
         if allowed is not None and name not in allowed:
             continue
         for alias in _MIMO_TOOL_ALIASES.get(name, {name}):
             policy.setdefault(alias, True)
+    # Native OpenCode file/search/process tools are never the authority lane.
+    # Server-minted brokered_file_tools selectively re-enable only the private
+    # lifetools adapters after current AgentScope projection.
+    from src.tool_security import SCOPED_FILE_TOOLS, STRICT_NATIVE_MIMO_TOOLS
+
+    for native_name in STRICT_NATIVE_MIMO_TOOLS:
+        policy[native_name] = False
+    brokered = set(map(str, envelope.get("brokered_file_tools") or ())) & set(SCOPED_FILE_TOOLS)
+    explicitly_disabled = set(map(str, envelope.get("disabled_tools") or ()))
+    explicitly_allowed = None if allowed is None else set(map(str, allowed or ()))
+    for public_name in SCOPED_FILE_TOOLS:
+        enabled = (
+            public_name in brokered
+            and public_name not in explicitly_disabled
+            and (explicitly_allowed is None or public_name in explicitly_allowed)
+        )
+        policy[f"lifetools_*_{public_name}"] = enabled
+    policy["frankenmemory_*"] = False
     return policy
 
 
@@ -1661,14 +3813,14 @@ class QuestionHandler:
     @staticmethod
     def _questions(value: Any) -> list[dict]:
         if not isinstance(value, list) or not 1 <= len(value) <= 16:
-            raise ValueError("MiMo question must contain 1-16 prompts")
+            raise ValueError("Open Clank agent question must contain 1-16 prompts")
         result: list[dict] = []
         for raw in value:
             if not isinstance(raw, dict):
-                raise ValueError("MiMo question prompt must be an object")
+                raise ValueError("Open Clank agent question prompt must be an object")
             question = str(raw.get("question") or "").strip()[:4_096]
             if not question:
-                raise ValueError("MiMo question text is required")
+                raise ValueError("Open Clank agent question text is required")
             options = []
             for option in list(raw.get("options") or [])[:100]:
                 if not isinstance(option, dict):
@@ -1706,6 +3858,16 @@ class QuestionHandler:
             or context.get("interaction_policy") == "fail_on_interaction"
         ):
             return {"rejected": True}
+        # Permission mode "auto": questions never block the turn — the worker
+        # gets the standard rejection and proceeds on its own judgment.
+        try:
+            from src.permission_mode import suppresses_questions
+
+            if suppresses_questions(owner):
+                logger.info("question suppressed by owner permission mode (auto)")
+                return {"rejected": True}
+        except Exception:
+            pass
         projection = {}
         if not incognito:
             from src.openclank.transcript_projection import get_projection
@@ -1730,7 +3892,7 @@ class QuestionHandler:
             await self._on_request(req)
             return await req.wait()
         except Exception as exc:
-            logger.warning("failed to surface MiMo question: %s", exc)
+            logger.warning("failed to surface Open Clank agent question: %s", exc)
             return {"rejected": True}
         finally:
             self.pending_requests.pop(req.request_id, None)
@@ -1789,6 +3951,7 @@ class PermissionRequest:
     __slots__ = (
         "request_id", "tool_call", "raw_input", "options", "title",
         "session_id", "odysseus_session_id", "owner", "workspace",
+        "authority_workspace_id",
         "turn_id", "revision", "_future",
     )
 
@@ -1803,6 +3966,7 @@ class PermissionRequest:
         odysseus_session_id: str = "",
         owner: str = "",
         workspace: str = "",
+        authority_workspace_id: str = "",
         turn_id: str = "",
         revision: int = 0,
     ) -> None:
@@ -1815,12 +3979,13 @@ class PermissionRequest:
         self.odysseus_session_id = odysseus_session_id
         self.owner = owner
         self.workspace = workspace
+        self.authority_workspace_id = authority_workspace_id
         self.turn_id = turn_id
         self.revision = revision
         self._future: asyncio.Future[str] = asyncio.get_event_loop().create_future()
 
     async def wait(self, timeout: Optional[float] = None) -> str:
-        """Wait for the human's choice. Returns 'once', 'always', or 'reject'.
+        """Wait for the human's choice.
 
         C1 (e's ruling): no timeout by default — the prompt waits forever
         and the turn blocks until answered.
@@ -1902,14 +4067,20 @@ class PermissionHandler:
         """
         tool_call = params.get("toolCall", {})
         title = tool_call.get("title", "unknown tool")
+        forced_ask = title in {"bash_delete", "bash_destructive"}
         raw_input = tool_call.get("rawInput", {})
-        options = params.get("options", ["once", "always", "reject"])
+        options = params.get("options", ["once", "chat", "workspace", "always", "reject"])
         session_id = params.get("sessionId", "")
         filepath = raw_input.get("filepath", "") if isinstance(raw_input, dict) else ""
         context = self._context_resolver(session_id) if self._context_resolver else {}
         owner = str(context.get("owner") or "")
         odysseus_session = str(context.get("odysseus_session_id") or "")
         workspace = str(context.get("workspace") or "")
+        authority_workspace_id = str(
+            context.get("authority_workspace_id") or ""
+        )
+        from src.openclank.operation_approvals import canonical_workspace_id
+        authority_workspace_id = canonical_workspace_id(owner, authority_workspace_id)
         incognito = bool(context.get("incognito"))
         is_admin = bool(context.get("is_admin"))
 
@@ -1918,27 +4089,38 @@ class PermissionHandler:
         if owner and not is_admin:
             return self._approve("reject")
 
-        # ── safe-dirs auto-approve ──
-        # Any request whose target file is inside a configured safe dir is
-        # approved immediately so the always-on assistant doesn't block on
-        # known workspaces.
-        allowed_roots = [] if incognito else ([workspace] if workspace else self._safe_dirs)
-        if filepath and allowed_roots and any(
-            _path_within(filepath, root) for root in allowed_roots
-        ):
-            logger.info("auto-approved %s: %s (safe-dirs match)", title, filepath)
-            return self._approve()
-
+        # Installation safe-directory hints are not a second consent store.
+        # Every reusable approval is checked in the canonical ledger below.
         # ── stored durable grants ──
-        if not incognito and self._grant_store is not None and self._grant_store.match(
-            title,
-            filepath=filepath or None,
-            owner=owner,
-            session_id=odysseus_session,
-            workspace=workspace,
-        ):
-            logger.info("auto-approved %s: %s (stored grant)", title, filepath or "*")
-            return self._approve()
+        if not incognito and not forced_ask:
+            try:
+                from src.openclank.operation_approvals import (
+                    match_operation_approval,
+                )
+
+                if match_operation_approval(
+                    owner=owner,
+                    permission_type=title,
+                    filepath=filepath or "",
+                    session_id=odysseus_session,
+                    workspace_id=authority_workspace_id,
+                    workspace_path=workspace,
+                ):
+                    logger.info("auto-approved %s: %s (canonical grant)", title, filepath or "*")
+                    return self._approve("once")
+            except Exception:
+                pass
+        # ── owner permission mode (yolo/auto) ──
+        # Approve with once semantics — no durable grant, no UI wait. The
+        # fail_on_interaction and non-admin rejects above stay authoritative.
+        try:
+            from src.permission_mode import auto_approves
+
+            if not forced_ask and auto_approves(owner):
+                logger.info("auto-approved %s: %s (permission mode)", title, filepath or "*")
+                return self._approve("once")
+        except Exception:
+            pass
 
         # ── surface to the UI and wait (forever) for the human ──
         if self._on_request is None:
@@ -1965,6 +4147,7 @@ class PermissionHandler:
             odysseus_session_id=odysseus_session,
             owner=owner,
             workspace=workspace,
+            authority_workspace_id=authority_workspace_id,
             turn_id=str(projection.get("active_turn_id") or ""),
             revision=int(projection.get("transcript_revision") or 0),
         )
@@ -1978,22 +4161,56 @@ class PermissionHandler:
                 return self._approve("reject")
 
             option_id = await req.wait()
-            if incognito and option_id == "always":
+            if (incognito or forced_ask) and option_id in {"chat", "workspace", "always"}:
                 option_id = "once"
 
-            if not incognito and option_id == "always" and self._grant_store is not None:
+            if not incognito and option_id in {"chat", "workspace", "always"} and self._grant_store is not None:
                 from src.openclank.permission_grants import derive_pattern
+                from src.openclank.permission_grants import grant_scope_for_lifetime
                 pattern = derive_pattern(raw_input)
-                self._grant_store.add(
-                    title,
-                    pattern,
-                    owner=owner,
+                (
+                    grant_session,
+                    grant_workspace,
+                    grant_workspace_id,
+                ) = grant_scope_for_lifetime(
+                    option_id,
                     session_id=odysseus_session,
                     workspace=workspace,
+                    workspace_id=authority_workspace_id,
                 )
-                logger.info("stored durable grant: (%s, %s)", title, pattern)
+                if (
+                    option_id == "always"
+                    or grant_session
+                    or grant_workspace
+                    or grant_workspace_id
+                ):
+                    from src.openclank.operation_approvals import (
+                        record_operation_approval,
+                    )
 
-            return self._approve(option_id)
+                    persisted = record_operation_approval(
+                        owner=owner,
+                        permission_type=title,
+                        pattern=pattern,
+                        lifetime=option_id,
+                        session_id=grant_session,
+                        workspace_id=grant_workspace_id,
+                        target_path=filepath or workspace,
+                    )
+                    if not persisted:
+                        option_id = "once"
+                        logger.info("approval persistence unavailable; using Once")
+                    else:
+                        logger.info("stored canonical %s grant: (%s, %s)", option_id, title, pattern)
+                else:
+                    # There is no stable scope to persist against; preserve
+                    # the safe Once semantics instead of minting an account-
+                    # wide approval under a misleading label.
+                    option_id = "once"
+
+            # Keep the managed engine from caching a second approval ledger.
+            # Reusable consent is resolved afresh by this bridge on each ask.
+            return self._approve("once" if option_id in {"chat", "workspace", "always"} else option_id)
         finally:
             self.pending_requests.pop(request_id, None)
 
@@ -2002,7 +4219,7 @@ class PermissionHandler:
 
         Args:
             request_id: the permission request ID
-            option_id: 'once', 'always', or 'reject'
+            option_id: 'once', 'chat', 'workspace', 'always', or 'reject'
 
         Returns True if the request was found and resolved, False otherwise.
         """
@@ -2011,6 +4228,51 @@ class PermissionHandler:
             req.resolve(option_id)
             return True
         return False
+
+    def reject_scope(
+        self,
+        *,
+        session_id: str = "",
+        workspace: str = "",
+        authority_workspace_id: str = "",
+        all_pending: bool = False,
+    ) -> int:
+        """Reject pending approvals covered by a reset domain.
+
+        Canonical Location/All-agent resets cannot safely map every legacy raw
+        pending filepath back to a stable Location yet, so their fail-closed
+        behavior is to reject all pending requests for this owner.
+        """
+        if (
+            not session_id
+            and not workspace
+            and not authority_workspace_id
+            and not all_pending
+        ):
+            return 0
+        rejected = 0
+        for req in list(self.pending_requests.values()):
+            if req._future.done():
+                continue
+            if not all_pending and session_id and req.odysseus_session_id != session_id:
+                continue
+            if not all_pending and workspace and authority_workspace_id:
+                if (
+                    req.authority_workspace_id != authority_workspace_id
+                    and req.workspace != workspace
+                ):
+                    continue
+            elif not all_pending and workspace and req.workspace != workspace:
+                continue
+            elif (
+                not all_pending
+                and authority_workspace_id
+                and req.authority_workspace_id != authority_workspace_id
+            ):
+                continue
+            req.resolve("reject")
+            rejected += 1
+        return rejected
 
     def resolve_for(
         self,

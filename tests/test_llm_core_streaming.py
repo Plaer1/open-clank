@@ -54,7 +54,7 @@ def _drive(monkeypatch, lines, model="gemini-3.1-pro-preview-customtools"):
 
     async def run():
         events = []
-        async for chunk in llm_core.stream_llm(
+        async for chunk in llm_core._legacy_stream_llm(
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             model,
             [{"role": "user", "content": "hi"}],

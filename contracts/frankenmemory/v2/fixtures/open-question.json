@@ -1,0 +1,21 @@
+{
+  "contract_version": "frankenmemory.v2",
+  "operation": "knowledge.create",
+  "scope": {"owner_id": "owner-e", "workspace_id": "workspace-main", "project_id": null},
+  "payload": {
+    "block_id": "kb_question_chromadb",
+    "subject_entity_id": "entity_chromadb",
+    "predicate": "definition",
+    "claim_slot": "definition",
+    "cardinality": "single",
+    "value": {"type": "null"},
+    "expected_value_type": "string",
+    "kind": "open_question",
+    "status": "open",
+    "confidence": 0,
+    "trust": 0,
+    "activation": "manual",
+    "activation_rationale": "User asked for an explanation.",
+    "revision": 1
+  }
+}

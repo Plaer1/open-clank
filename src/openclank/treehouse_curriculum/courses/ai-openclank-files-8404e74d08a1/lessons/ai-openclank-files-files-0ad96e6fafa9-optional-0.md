@@ -1,0 +1,1 @@
+In an authorized scratch location, create a small note, open it, move it within the permitted scope and verify the resulting path/content. If practicing trash/restore, use only that disposable note and verify restored bytes. Do not publish it as part of this exercise.

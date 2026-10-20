@@ -1,0 +1,1 @@
+Safety claim holds for this described trace; liveness fails. A finite observation alone does not prove all future behavior.

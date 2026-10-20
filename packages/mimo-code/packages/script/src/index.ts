@@ -1,5 +1,4 @@
 import { $ } from "bun"
-import semver from "semver"
 import path from "path"
 
 const rootPkgPath = path.resolve(import.meta.dir, "../../../package.json")
@@ -10,11 +9,8 @@ if (!expectedBunVersion) {
   throw new Error("packageManager field not found in root package.json")
 }
 
-// relax version requirement
-const expectedBunVersionRange = `^${expectedBunVersion}`
-
-if (!semver.satisfies(process.versions.bun, expectedBunVersionRange)) {
-  throw new Error(`This script requires bun@${expectedBunVersionRange}, but you are using bun@${process.versions.bun}`)
+if (process.versions.bun !== expectedBunVersion) {
+  throw new Error(`This script requires exactly bun@${expectedBunVersion}, but you are using bun@${process.versions.bun}`)
 }
 
 const env = {
@@ -31,9 +27,23 @@ const CHANNEL = await (async () => {
 })()
 const IS_PREVIEW = CHANNEL !== "latest"
 
+const SHORT_SHA = await (async () => {
+  if (process.env["MIMOCODE_COMMIT_SHA"]) return process.env["MIMOCODE_COMMIT_SHA"]!
+  try {
+    const sha = await $`git rev-parse --short HEAD`.text()
+    return sha.trim()
+  } catch {
+    return null
+  }
+})()
+
 const VERSION = await (async () => {
   if (env.MIMOCODE_VERSION) return env.MIMOCODE_VERSION
-  if (IS_PREVIEW) return `0.0.0-${CHANNEL}-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`
+  if (IS_PREVIEW) {
+    if (SHORT_SHA) return `0.0.0-${CHANNEL}-${SHORT_SHA}`
+    const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 12)
+    return `0.0.0-${CHANNEL}-${ts}`
+  }
   const version = await Bun.file(path.resolve(import.meta.dir, "../../opencode/package.json"))
     .json()
     .then((data: any) => data.version)

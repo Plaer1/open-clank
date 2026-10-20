@@ -1,0 +1,1 @@
+At bump entry, bump is above main; x=2 and helper return is3. Main compares that result with3 and returns0: successful process exit0, empty stdout. A breakpoint/locals observation would cover only the selected run; symbols, optimization and debugger timing affect what is visible.

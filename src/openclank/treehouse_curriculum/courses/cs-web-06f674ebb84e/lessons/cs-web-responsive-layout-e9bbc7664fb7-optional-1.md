@@ -1,0 +1,1 @@
+A screenshot at one width cannot establish responsive behavior.

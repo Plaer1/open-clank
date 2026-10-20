@@ -1,0 +1,1 @@
+Gradle9.7.1/Loom1.18.4 loads under25; compiler/release and game child are21; exact Loader0.19.5/API0.141.6+1.21.11 recorded. Actual build and development launch succeeded with evidence; failed setup remains pending. Version text alone is not execution.

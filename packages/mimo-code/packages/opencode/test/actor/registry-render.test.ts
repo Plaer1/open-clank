@@ -61,9 +61,16 @@ describe("ActorRegistry.renderForAgent", () => {
             contextMode: "none",
             background: true,
             lifecycle: "ephemeral",
+            requestedModel: "standard",
+            effectiveModel: { providerID: "openai", modelID: "gpt-5" },
           }),
         ),
       )
+      const projected = await rt.runPromise(
+        ActorRegistry.Service.use((svc) => svc.get(parent.id, actorId)),
+      )
+      expect(projected?.requestedModel).toBe("standard")
+      expect(projected?.effectiveModel).toEqual({ providerID: "openai", modelID: "gpt-5" })
       await rt.runPromise(ActorRegistry.Service.use((svc) => svc.updateStatus(parent.id, actorId, { status: "running" })))
 
       const result = await rt.runPromise(

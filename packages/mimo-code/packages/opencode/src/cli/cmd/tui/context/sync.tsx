@@ -18,6 +18,8 @@ import type {
   ProviderListResponse,
   ProviderAuthMethod,
   VcsInfo,
+  SessionGoalGetResponse,
+  SessionRecoveryResponse,
 } from "@mimo-ai/sdk/v2"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useProject } from "@tui/context/project"
@@ -31,6 +33,7 @@ import { useArgs } from "./args"
 import { batch, onMount } from "solid-js"
 import { Log } from "@/util"
 import { emptyConsoleState, type ConsoleState } from "@/config/console-state"
+import { mergeSessionTitle } from "../util/session-title"
 
 /**
  * The SDK regenerated the task list as an inline anonymous array on
@@ -112,9 +115,38 @@ export type GoalVerdict = {
 }
 
 export type SessionGoal = {
-  condition?: string
+  state?: SessionGoalGetResponse["state"]
+  analytics?: SessionGoalGetResponse["analytics"]
   verdicts: { [messageID: string]: GoalVerdict }
   lastMessageID?: string
+}
+
+/**
+ * Solid MERGES plain objects into an existing store node, so a status that
+ * omits a field would inherit it from the previous status. Wrap with
+ * solid-store `reconcile` so each status stands alone.
+ */
+export function nextSessionStatus(status: SessionStatus) {
+  return reconcile(status)
+}
+
+// Pick the bucket the session view should render. `main` is the normal case; a
+// peer child runs its turns under agentID == its own sessionID, so attaching to
+// one lands on agentID "main" with an empty main bucket and must fall back to
+// the self-id bucket. A session whose turns ran under an ACTOR id has neither
+// key, so the last arm picks the newest non-empty bucket.
+export function selectMessages<M extends { id: string }>(
+  buckets: Record<string, M[]> | undefined,
+  agentID: string,
+  sessionID: string,
+): M[] {
+  if (agentID !== "main" || buckets?.["main"]?.length) return buckets?.[agentID] ?? []
+  if (buckets?.[sessionID]?.length) return buckets[sessionID]
+  const newest = Object.entries(buckets ?? {})
+    .filter(([key, msgs]) => key !== "main" && msgs.length > 0)
+    .sort(([, a], [, b]) => (b.at(-1)?.id ?? "").localeCompare(a.at(-1)?.id ?? ""))
+    .at(0)
+  return newest?.[1] ?? []
 }
 
 export type ActorEntry = {
@@ -178,6 +210,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       session_status: {
         [sessionID: string]: SessionStatus
       }
+      session_recovery: {
+        [sessionID: string]: SessionRecoveryResponse
+      }
+      session_recovery_active: {
+        [sessionID: string]: boolean
+      }
       session_goal: {
         [sessionID: string]: SessionGoal
       }
@@ -228,6 +266,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         all: [],
         default: {},
         connected: [],
+        authenticated: [],
       },
       console_state: emptyConsoleState,
       provider_auth: {},
@@ -241,6 +280,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       provider_default: {},
       session: [],
       session_status: {},
+      session_recovery: {},
+      session_recovery_active: {},
       session_goal: {},
       session_diff: {},
       session_cwd: {},
@@ -263,6 +304,29 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const event = useEvent()
     const project = useProject()
     const sdk = useSDK()
+
+    const mergeSession = (next: Session, current: Session | undefined) => {
+      return mergeSessionTitle(current, next)
+    }
+    const applySessionList = (sessions: Session[]) => {
+      const current = new Map(store.session.map((session) => [session.id, session]))
+      setStore("session", reconcile(sessions.map((session) => mergeSession(session, current.get(session.id)))))
+    }
+
+    async function refreshGoal(sessionID: string) {
+      const response = await sdk.client.session.goal.get({ sessionID }).catch(() => undefined)
+      const data = response?.data
+      if (!data) return
+      setStore("session_goal", sessionID, (prev) => {
+        if (prev?.state && prev.state.revision > data.state.revision) return prev
+        return {
+          state: data.state,
+          analytics: data.analytics,
+          verdicts: prev?.verdicts ?? {},
+          lastMessageID: prev?.lastMessageID,
+        }
+      })
+    }
 
     const fullSyncedSessions = new Set<string>()
     let syncedWorkspace = project.workspace.current()
@@ -418,6 +482,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               delete s.permission[sid]
               delete s.question[sid]
               delete s.session_status[sid]
+              delete s.session_recovery[sid]
+              delete s.session_recovery_active[sid]
               delete s.session_goal[sid]
               delete s.session_diff[sid]
               delete s.session_cwd[sid]
@@ -438,7 +504,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         case "session.updated": {
           const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
           if (result.found) {
-            setStore("session", result.index, reconcile(event.properties.info))
+            setStore("session", result.index, reconcile(mergeSession(event.properties.info, store.session[result.index])))
             break
           }
           setStore(
@@ -452,8 +518,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
         case "session.status": {
           setStore("session_status", event.properties.sessionID, event.properties.status)
+          if (event.properties.status.type === "idle") setStore("session_recovery_active", event.properties.sessionID, false)
           break
         }
+
+        case "session.error":
+          if (event.properties.sessionID) setStore("session_recovery_active", event.properties.sessionID, false)
+          break
 
         case "session.goal": {
           // Merge: a clear event (goal:undefined) keeps the accumulated verdicts
@@ -474,11 +545,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               lastMessageID = v.messageID
             }
             return {
-              condition: event.properties.goal?.condition,
+              state: prev?.state,
+              analytics: prev?.analytics,
               verdicts,
               lastMessageID,
             }
           })
+          void refreshGoal(event.properties.sessionID)
           break
         }
 
@@ -692,9 +765,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const exit = useExit()
     const args = useArgs()
 
+    let bootstrapGeneration = 0
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
+      const generation = ++bootstrapGeneration
       const workspace = project.workspace.current()
+      const directory = sdk.directory
       if (workspace !== syncedWorkspace) {
         fullSyncedSessions.clear()
         syncedWorkspace = workspace
@@ -705,6 +781,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       const sessionListPromise = sdk.client.session
         .list({ start: start, roots: true })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+      const stale = () => generation !== bootstrapGeneration || sdk.directory !== directory || project.workspace.current() !== workspace
 
       // blocking - include session.list when continuing a session
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
@@ -749,38 +826,40 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             const config = responses[4]
             const sessions = responses[5]
 
-            batch(() => {
-              setStore("provider", reconcile(providers.providers))
-              setStore("provider_default", reconcile(providers.default))
-              setStore("provider_next", reconcile(providerList))
-              setStore("console_state", reconcile(consoleState))
-              setStore("agent", reconcile(agents))
-              setStore("config", reconcile(config))
-              if (sessions !== undefined) setStore("session", reconcile(sessions))
-            })
+            if (!stale()) {
+              batch(() => {
+                setStore("provider", reconcile(providers.providers))
+                setStore("provider_default", reconcile(providers.default))
+                setStore("provider_next", reconcile(providerList))
+                setStore("console_state", reconcile(consoleState))
+                setStore("agent", reconcile(agents))
+                setStore("config", reconcile(config))
+                if (sessions !== undefined) applySessionList(sessions)
+              })
+            }
           })
         })
         .then(() => {
-          if (store.status !== "complete") setStore("status", "partial")
+          if (!stale() && store.status !== "complete") setStore("status", "partial")
           // non-blocking
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
-            consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
-            sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
+            ...(args.continue ? [] : [sessionListPromise.then((sessions) => { if (!stale()) applySessionList(sessions) })]),
+            consoleStatePromise.then((consoleState) => { if (!stale()) setStore("console_state", reconcile(consoleState)) }),
+            sdk.client.command.list({ workspace }).then((x) => { if (!stale()) setStore("command", reconcile(x.data ?? [])) }),
+            sdk.client.lsp.status({ workspace }).then((x) => { if (!stale()) setStore("lsp", reconcile(x.data ?? [])) }),
+            sdk.client.mcp.status({ workspace }).then((x) => { if (!stale()) setStore("mcp", reconcile(x.data ?? {})) }),
             sdk.client.experimental.resource
               .list({ workspace })
-              .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+              .then((x) => { if (!stale()) setStore("mcp_resource", reconcile(x.data ?? {})) }),
+            sdk.client.formatter.status({ workspace }).then((x) => { if (!stale()) setStore("formatter", reconcile(x.data ?? [])) }),
             sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
+              if (!stale()) setStore("session_status", reconcile(x.data ?? {}))
             }),
-            sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
+            sdk.client.provider.auth({ workspace }).then((x) => { if (!stale()) setStore("provider_auth", reconcile(x.data ?? {})) }),
+            sdk.client.vcs.get({ workspace }).then((x) => { if (!stale()) setStore("vcs", reconcile(x.data)) }),
             project.workspace.sync(),
           ]).then(() => {
-            setStore("status", "complete")
+            if (!stale()) setStore("status", "complete")
           })
         })
         .catch(async (e) => {
@@ -789,6 +868,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             name: e instanceof Error ? e.name : undefined,
             stack: e instanceof Error ? e.stack : undefined,
           })
+          if (stale()) return
           if (fatal) {
             await exit(e)
           } else {
@@ -825,7 +905,25 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           const list = await sdk.client.session
             .list({ start, roots: true })
             .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
-          setStore("session", reconcile(list))
+          applySessionList(list)
+        },
+        apply(next: Session) {
+          const match = Binary.search(store.session, next.id, (s) => s.id)
+          if (match.found) {
+            const current = store.session[match.index]
+            setStore("session", match.index, reconcile(mergeSession(next, current)))
+          } else {
+            setStore("session", produce((draft) => draft.splice(match.index, 0, next)))
+          }
+        },
+        async resolveRoot() {
+          await result.session.refresh()
+          const existing = store.session
+            .filter((x) => x.parentID === undefined)
+            .toSorted((a, b) => b.time.updated - a.time.updated)
+            .at(0)
+          if (existing) return { id: existing.id, created: false }
+          return { id: (await sdk.client.session.create({})).data?.id, created: true }
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -838,8 +936,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
-          const [session, messages, todo, diff, actors, task, children] = await Promise.all([
+          const [session, messages, todo, diff, actors, task, children, goalView, recovery] = await Promise.all([
             sdk.client.session.get({ sessionID }, { throwOnError: true }),
             sdk.client.session.messages({ sessionID, limit: 100, agent_id: "*" }),
             sdk.client.session.todo({ sessionID }),
@@ -852,19 +949,23 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             // hosts, ask-tool forks, workflow subagent sessions) — only peer
             // sessions the user should see are returned.
             sdk.client.session.children({ sessionID, visible: true }).catch(() => undefined),
+            sdk.client.session.goal.get({ sessionID }).catch(() => undefined),
+            sdk.client.session.recovery({ sessionID }).catch(() => undefined),
           ])
           setStore(
             produce((draft) => {
               const match = Binary.search(draft.session, sessionID, (s) => s.id)
-              if (match.found) draft.session[match.index] = session.data!
+              if (match.found) draft.session[match.index] = mergeSession(session.data!, draft.session[match.index])
               if (!match.found) draft.session.splice(match.index, 0, session.data!)
               for (const child of children?.data ?? []) {
                 const childMatch = Binary.search(draft.session, child.id, (s) => s.id)
-                if (childMatch.found) draft.session[childMatch.index] = child
+                if (childMatch.found) draft.session[childMatch.index] = mergeSession(child, draft.session[childMatch.index])
                 if (!childMatch.found) draft.session.splice(childMatch.index, 0, child)
               }
               draft.todo[sessionID] = todo.data ?? []
               draft.task[sessionID] = task.data ?? []
+              draft.session_recovery[sessionID] = recovery?.data ?? []
+              if (!draft.session_recovery_active[sessionID]) draft.session_recovery_active[sessionID] = false
               const flat = (messages.data ?? []).map((x) => x.info)
               draft.message[sessionID] = bucketMessages(flat)
               for (const message of messages.data ?? []) {
@@ -884,6 +985,15 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
                 turn_count: row.turnCount ?? 0,
                 last_turn_time: row.lastTurnTime ?? null,
               }))
+              if (goalView?.data) {
+                const previous = draft.session_goal[sessionID]
+                draft.session_goal[sessionID] = {
+                  state: goalView.data.state,
+                  analytics: goalView.data.analytics,
+                  verdicts: previous?.verdicts ?? {},
+                  lastMessageID: previous?.lastMessageID,
+                }
+              }
             }),
           )
           fullSyncedSessions.add(sessionID)

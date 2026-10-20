@@ -1,0 +1,1 @@
+An object file need not be a runnable program.

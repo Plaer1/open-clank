@@ -50,6 +50,7 @@ def web_search_enabled_for_turn(allow_web_search: object, use_web: object = None
 
 
 _COMMON_TOOL_NAMES = {
+    "search_code",
     "api_call",
     "app_api",
     "archive_email",
@@ -86,6 +87,8 @@ _COMMON_TOOL_NAMES = {
     "manage_mcp",
     "manage_memory",
     "manage_notes",
+    "read_copal",
+    "manage_copal",
     "manage_research",
     "manage_session",
     "manage_settings",

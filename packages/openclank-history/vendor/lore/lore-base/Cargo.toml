@@ -1,0 +1,56 @@
+[package]
+name = "lore-base"
+edition = "2024"
+version.workspace = true
+publish = false
+
+[lib]
+name = "lore_base"
+
+[features]
+trace_log = []
+
+[dependencies]
+# allocator
+backtrace = { version = "0.3.75", default-features = false, features = ["std"] }
+libc = { workspace = true }
+parking_lot = { workspace = true }
+zerocopy = { workspace = true }
+
+# directories
+directories = { workspace = true }
+
+# error
+hex = { workspace = true }
+thiserror = { workspace = true }
+lore-error-set = { workspace = true }
+
+# types
+bitflags = { workspace = true }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true, features = ["zerocopy"] }
+
+# log
+chrono = { workspace = true }
+
+# runtime
+lore-io = { workspace = true }
+pin-project = { workspace = true }
+tokio = { workspace = true }
+
+# fs
+[target.'cfg(target_family = "windows")'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_ProjectedFileSystem", "Win32_Storage_FileSystem", "Win32_System_Diagnostics", "Win32_System_Diagnostics_Debug", "Win32_System_IO", "Win32_Security"] }
+
+[dev-dependencies]
+# The non-self-describing format the identifier types must round-trip through.
+bitcode = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+anyhow = { workspace = true }
+cc = "1.2.32"
+vergen = { workspace = true }

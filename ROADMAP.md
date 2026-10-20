@@ -32,6 +32,14 @@ the codebase, you are probably right to stay away.
   before the user request really starts. We need slimmer prompts, better tool
   selection, smaller default tool sets, and clearer guidance for models with
   4k/8k/16k context windows.
+- Local model speculative decoding support. For Odysseus-tuned local models,
+  plan to ship or recommend a small same-tokenizer draft model when the serving
+  backend supports it. Early vLLM testing showed a generic `Qwen3-0.6B` draft
+  beside `Qwen3-8B` can materially reduce wall time, while an unsupported
+  DSpark conversion performed poorly. Treat this as a supported draft-model lane
+  first; keep MTP-specific packaging as future work only when the architecture
+  and runtime support are real. Judge this by time-to-success, tool correctness,
+  grammar, and unchanged target output, not tokens/sec alone.
 - Skill/tool prompt-injection audit. User-editable skills, notes, documents,
   fetched pages, and memories should be treated as untrusted data. Keep testing
   whether models follow malicious instructions from those surfaces.

@@ -1,0 +1,1 @@
+The predicted present is x=9; only inputs 21–23 remain pending until acknowledged.

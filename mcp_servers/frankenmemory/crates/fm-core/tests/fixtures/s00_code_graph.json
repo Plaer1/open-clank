@@ -1,0 +1,20 @@
+{
+  "files": {
+    ".gitignore": "ignored.py\n",
+    "assets/mark.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
+    "broken.py": "def broken(:\n",
+    "caller.py": "from dep import target\ndef caller():\n    target()\n    unknown_target()\n",
+    "dep.py": "def target():\n    return 1\n",
+    "ignored.py": "def never_read():\n    return 1\n",
+    "island.py": "def isolated():\n    return 7\n",
+    "src/dep.rs": "pub fn target() {}\n",
+    "src/lib.rs": "mod dep;\nuse crate::dep::target as action;\nfn rust_caller(){action();}\n"
+  },
+  "relationships": [
+    {"caller_file":"caller.py","caller":"caller","target_file":"dep.py","target":"target","state":"exact"},
+    {"caller_file":"src/lib.rs","caller":"rust_caller","target_file":"src/dep.rs","target":"target","state":"inferred"}
+  ],
+  "unresolved_symbol": "unknown_target",
+  "disconnected_declaration": "isolated",
+  "partition_fillers": 129
+}

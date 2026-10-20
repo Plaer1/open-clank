@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import * as fs from "fs/promises"
 import os from "os"
 import path from "path"
@@ -6,26 +7,33 @@ import { Database } from "../../src/storage"
 import { MemoryFtsTable } from "../../src/memory/fts.sql"
 import { splitSections } from "../../src/memory/authored-ingest"
 import { reconcileMemory } from "../../src/memory/reconcile"
+import {
+  bindMemorySessionClient,
+  closeSharedMcpClient,
+  registerManagedMcpClient,
+  unregisterManagedMcpClient,
+} from "../../src/memory/mcp-client"
 
 type ToolCall = { name: string; arguments: Record<string, unknown> }
 const toolCalls: ToolCall[] = []
-
-mock.module("../../src/memory/mcp-client", () => ({
-  getSharedMcpClient: async () => ({
-    callTool: async (req: ToolCall) => {
-      toolCalls.push(req)
-      return { content: [{ type: "text", text: "{}" }] }
-    },
-  }),
-  closeSharedMcpClient: async () => {},
-}))
+const CLIENT_NAME = "lifetools_authored_ingest_test"
+const fakeClient = {
+  callTool: async (req: ToolCall) => {
+    toolCalls.push(req)
+    return { content: [{ type: "text", text: "{}" }] }
+  },
+} as unknown as Client
 
 beforeEach(() => {
   toolCalls.length = 0
+  registerManagedMcpClient(CLIENT_NAME, fakeClient)
+  bindMemorySessionClient("authored-ingest-test", CLIENT_NAME, "alice", "global")
 })
 
-afterEach(() => {
+afterEach(async () => {
   Database.use((db) => db.delete(MemoryFtsTable).run())
+  await closeSharedMcpClient()
+  unregisterManagedMcpClient(CLIENT_NAME, fakeClient)
 })
 
 const SCOPE = { owner: "alice", workspaceId: "global" }

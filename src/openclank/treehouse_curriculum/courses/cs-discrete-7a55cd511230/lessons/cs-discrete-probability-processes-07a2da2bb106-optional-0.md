@@ -1,0 +1,1 @@
+Use (3/4)(1/4)+(1/4)(1/2)=5/16 and name relevant omitted history/context.

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "interpolation": {
+    "placeholder_syntax": "{name} or {0}",
+    "regex": "\\{([A-Za-z_][A-Za-z0-9_]*|\\d+)\\}",
+    "must_match_english": true,
+    "reorder_allowed": true,
+    "do_not_translate_placeholder_names": true
+  },
+  "plurals": {
+    "runtime": "Intl.PluralRules(locale).select(count)",
+    "api": "window.openClankI18n.plural(count, forms)",
+    "forms": [
+      "zero",
+      "one",
+      "two",
+      "few",
+      "many",
+      "other"
+    ],
+    "required": [
+      "other"
+    ],
+    "note": "S28 supplies forms per locale; English may use one/other only."
+  },
+  "formatting": {
+    "forbidden": [
+      "HTML tags in strings",
+      "Unicode bidi controls in strings"
+    ],
+    "escaping": "Runtime assigns text nodes/attributes; catalogs hold plain text.",
+    "whitespace": "Leading/trailing whitespace of source is preserved around translations."
+  },
+  "integrity": {
+    "key_parity": true,
+    "no_silent_fallback_as_complete": true,
+    "english_fallback_is_explicit": true,
+    "brands_locked": true
+  }
+}

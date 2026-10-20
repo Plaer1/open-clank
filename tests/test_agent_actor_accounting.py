@@ -31,7 +31,7 @@ def _feed(revision, actor=None):
     return payload
 
 
-def _actor(actor_id, *, status="running", outcome=None, parent=None, system=False):
+def _actor(actor_id, *, status="running", outcome=None, parent=None, system=False, requested=None, effective=None):
     actor = {
         "actorID": actor_id,
         "parentActorID": parent,
@@ -47,6 +47,10 @@ def _actor(actor_id, *, status="running", outcome=None, parent=None, system=Fals
     }
     if outcome:
         actor["lastOutcome"] = outcome
+    if requested:
+        actor["requestedModel"] = requested
+    if effective:
+        actor["effectiveModel"] = effective
     return actor
 
 
@@ -60,9 +64,13 @@ def test_zero_missing_monotonic_nested_and_restart(monkeypatch):
     assert zero["state"] == "recording"
     assert zero["total"] == 0
 
-    one = accounting.apply_actor_feed(_feed(2, _actor("explore-1")))
+    one = accounting.apply_actor_feed(_feed(2, _actor("explore-1", requested="standard", effective={"providerID": "openai", "modelID": "gpt-5"})))
     assert one["total"] == 1
     assert one["running"] == 1
+
+    projected = next(item for item in one["actors"] if item["id"] == "explore-1")
+    assert projected["requested_model"] == "standard"
+    assert projected["effective_model"] == {"provider_id": "openai", "model_id": "gpt-5"}
 
     nested = accounting.apply_actor_feed(_feed(3, _actor("explore-2", parent="explore-1")))
     assert nested["total"] == 2

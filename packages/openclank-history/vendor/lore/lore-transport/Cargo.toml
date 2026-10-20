@@ -1,0 +1,41 @@
+[package]
+name = "lore-transport"
+edition = "2024"
+version.workspace = true
+publish = false
+
+[lib]
+name = "lore_transport"
+
+[dependencies]
+lore-base = { workspace = true }
+lore-error-set = { workspace = true }
+lore-proto = { workspace = true }
+lore-credential = { workspace = true }
+
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+prost-types = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+parking_lot = { workspace = true }
+quinn = { workspace = true }
+quinn-proto = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+url = { workspace = true }
+webpki-roots = { workspace = true }
+zerocopy = { workspace = true }
+
+[features]
+trace_log = ["lore-base/trace_log"]

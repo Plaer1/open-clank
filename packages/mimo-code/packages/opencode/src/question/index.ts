@@ -4,6 +4,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { InstanceState } from "@/effect"
 import { SessionID, MessageID } from "@/session/schema"
 import { zod } from "@/util/effect-zod"
+import { Flag } from "@/flag/flag"
 import { Log } from "@/util"
 import { withStatics } from "@/util/schema"
 import { QuestionID } from "./schema"
@@ -149,7 +150,7 @@ export const layer = Layer.effect(
       Effect.fn("Question.state")(function* () {
         const state = {
           pending: new Map<QuestionID, PendingEntry>(),
-          neverAsk: false,
+          neverAsk: Flag.MIMOCODE_NEVER_ASK,
         }
 
         yield* Effect.addFinalizer(() =>

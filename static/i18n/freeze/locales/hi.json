@@ -1,0 +1,19 @@
+{
+  "id": "hi",
+  "name": "हिन्दी",
+  "dir": "ltr",
+  "catalog": "hi",
+  "html_lang": "hi",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 6675,
+    "english_fallback": 2947
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

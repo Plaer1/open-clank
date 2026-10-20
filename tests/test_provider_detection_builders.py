@@ -75,8 +75,10 @@ class TestBuildersLocalAndDockerEndpoints:
     def test_local_v1_models_is_openai_compatible(self):
         assert build_models_url("http://127.0.0.1:1234/v1") == "http://127.0.0.1:1234/v1/models"
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_docker_internal_ollama_api_path_is_native_chat(self):
         assert build_chat_url("http://host.docker.internal:11434/api") == "http://host.docker.internal:11434/api/chat"
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_docker_internal_ollama_api_path_is_native_models(self):
         assert build_models_url("http://host.docker.internal:11434/api") == "http://host.docker.internal:11434/api/tags"

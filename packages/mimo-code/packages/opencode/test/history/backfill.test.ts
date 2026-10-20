@@ -10,6 +10,8 @@ import { Instance } from "../../src/project/instance"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { ManagedProvider } from "../../src/acp/managed-provider"
+import { installManagedSessionBinding } from "../../src/memory/session-scope"
 
 // The test process shares a single in-memory SQLite DB (test/preload sets
 // MIMOCODE_DB=:memory:), so other suites' SessionTable/PartTable rows are visible
@@ -31,6 +33,8 @@ beforeEach(() => {
 afterEach(async () => {
   wipe()
   await Instance.disposeAll()
+  ManagedProvider.resetForTest()
+  delete process.env.OPEN_CLANK_MANAGED
 })
 
 const it = testEffect(Layer.mergeAll(History.defaultLayer, CrossSpawnSpawner.defaultLayer))
@@ -45,6 +49,9 @@ function seed(
     text?: string
     tool?: string
     state?: any
+    filename?: string
+    mime?: string
+    url?: string
   }>,
 ) {
   const now = Date.now()
@@ -94,6 +101,9 @@ function seed(
       if (p.text !== undefined) data.text = p.text
       if (p.tool) data.tool = p.tool
       if (p.state) data.state = p.state
+      if (p.filename) data.filename = p.filename
+      if (p.mime) data.mime = p.mime
+      if (p.url) data.url = p.url
       db.insert(PartTable)
         .values({
           id: p.part_id as any,
@@ -109,6 +119,42 @@ function seed(
 }
 
 describe("History.backfill", () => {
+  it.live("managed backfill replays canonical parts to the host without populating native FTS", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        process.env.OPEN_CLANK_MANAGED = "1"
+        installManagedSessionBinding("ses_managed", {
+          owner: "alice",
+          stableChatID: "chat-managed",
+          engineSessionID: "ses_managed",
+          engineAliases: [],
+          memoryWorkspaceID: "global",
+          authorityWorkspaceID: "authority",
+          copalWorkspace: "copal",
+          physicalCwd: "/work",
+          bindingRevision: 1,
+          mapRevision: 1,
+          mappingRevision: 1,
+          memoryEnabled: true,
+          transition: null,
+        })
+        const calls: Array<{ operation: unknown; events: unknown }> = []
+        ManagedProvider.installHostConnection({
+          async extMethod(method: string, params: Record<string, unknown>) {
+            expect(method).toBe("_openclank/history/v1/mutate")
+            calls.push({ operation: params.operation, events: params.events })
+            return { ok: true, operation: params.operation, accepted: 1, duplicate: 0, enqueued: 1 }
+          },
+        } as any)
+        seed([{ session_id: "ses_managed", message_id: "m", part_id: "p", role: "user", type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" }])
+        yield* backfillAll()
+        expect(calls.map((call) => call.operation)).toEqual(["replay"])
+        expect((calls[0]!.events as Array<{ content: { type: string; filename: string; mime: string; url: string } }>)[0]!.content).toMatchObject({ type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" })
+        expect(Database.use((db) => db.select().from(HistoryFtsTable).all())).toEqual([])
+      }),
+    ),
+  )
+
   it.live("indexes existing text and tool parts", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

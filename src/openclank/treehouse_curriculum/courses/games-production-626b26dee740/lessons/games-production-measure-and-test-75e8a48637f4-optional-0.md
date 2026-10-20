@@ -1,0 +1,1 @@
+The cases have observable pass/fail conditions and identify the tested build/environment; performance and usability claims are not conflated.

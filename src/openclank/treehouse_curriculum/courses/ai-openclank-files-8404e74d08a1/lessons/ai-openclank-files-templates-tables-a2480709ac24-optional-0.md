@@ -1,0 +1,1 @@
+Create a supported native template in a writable scratch location. Change one field or formula input, Save/reopen and inspect it. Record type, changed field and observed result; missing template/dependency or a formula error remains pending work.

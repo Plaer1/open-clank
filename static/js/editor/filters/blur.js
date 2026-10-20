@@ -2,7 +2,7 @@
  * Pure blur renderers shared by the editor's live-preview popups.
  *
  * Each export matches the `renderer(snap, params, dst)` signature
- * expected by `_applyLiveBlur` in galleryEditor.js — `snap` is the
+ * expected by `_applyLiveBlur` in imps.js — `snap` is the
  * pre-blur snapshot canvas, `params` is the slider values object, and
  * `dst` is the 2D context to draw the final result into. No module
  * state.

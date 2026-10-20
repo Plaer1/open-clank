@@ -1,0 +1,1 @@
+Do not confuse a single output shared by two inputs with two outputs for one input.

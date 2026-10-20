@@ -3,6 +3,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import fs from "fs/promises"
 import os from "os"
 import path from "path"
+import crypto from "node:crypto"
 import { Shell } from "../../src/shell/shell"
 import { BashTool, sanitizeShellEnvironment } from "../../src/tool/bash"
 import { Instance } from "../../src/project/instance"
@@ -15,6 +16,15 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Plugin } from "../../src/plugin"
+import { minimalShellEnvironment, resolveShellInvocation } from "../../src/tool/shell-containment"
+import * as BashInteractive from "../../src/tool/bash-interactive"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import {
+  bindMemorySessionClient,
+  closeSharedMcpClient,
+  registerManagedMcpClient,
+  unregisterManagedMcpClient,
+} from "../../src/memory/mcp-client"
 
 const runtime = ManagedRuntime.make(
   Layer.mergeAll(
@@ -81,7 +91,527 @@ test("shell subprocess environment strips secret-shaped names", () => {
   })).toEqual({ PATH: "/bin" })
 })
 
+test("default and auto fall back to the OS boundary when bubblewrap is unavailable", async () => {
+  await using tmp = await tmpdir()
+  const previousPath = process.env.PATH
+  const previousMode = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.PATH = ""
+  try {
+    for (const mode of [undefined, "auto"] as const) {
+      if (mode === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+      else process.env.OPEN_CLANK_SHELL_SANDBOX = mode
+      const shell = process.platform === "win32" ? process.env.COMSPEC ?? "cmd.exe" : "/bin/sh"
+      const invocation = resolveShellInvocation({
+        shell,
+        command: "printf ok",
+        cwd: tmp.path,
+        workspace: tmp.path,
+      })
+      expect(invocation.containment).toBe("off")
+      expect(invocation.executable).toBe(shell)
+    }
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousMode === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousMode
+  }
+})
+
+test("required containment still fails closed when bubblewrap is unavailable", async () => {
+  await using tmp = await tmpdir()
+  const previousPath = process.env.PATH
+  const previousMode = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.PATH = ""
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  try {
+    const shell = process.platform === "win32" ? process.env.COMSPEC ?? "cmd.exe" : "/bin/sh"
+    expect(() =>
+      resolveShellInvocation({
+        shell,
+        command: "printf ok",
+        cwd: tmp.path,
+        workspace: tmp.path,
+      }),
+    ).toThrow("OPEN_CLANK_SHELL_SANDBOX=required")
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousMode === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousMode
+  }
+})
+
+test("network-disabled execution remains fail-closed without bubblewrap", async () => {
+  await using tmp = await tmpdir()
+  const previousPath = process.env.PATH
+  const previousMode = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.PATH = ""
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "auto"
+  try {
+    const shell = process.platform === "win32" ? process.env.COMSPEC ?? "cmd.exe" : "/bin/sh"
+    expect(() =>
+      resolveShellInvocation({
+        shell,
+        command: "printf ok",
+        cwd: tmp.path,
+        workspace: tmp.path,
+        network: "disabled",
+      }),
+    ).toThrow("network-disabled")
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousMode === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousMode
+  }
+})
+
+test("explicit off always selects OS-boundary execution", async () => {
+  await using tmp = await tmpdir()
+  const previousPath = process.env.PATH
+  const previousMode = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.PATH = ""
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "off"
+  try {
+    const shell = process.platform === "win32" ? process.env.COMSPEC ?? "cmd.exe" : "/bin/sh"
+    const invocation = resolveShellInvocation({
+      shell,
+      command: "printf ok",
+      cwd: tmp.path,
+      workspace: tmp.path,
+    })
+    expect(invocation.containment).toBe("off")
+    expect(invocation.executable).toBe(shell)
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH
+    else process.env.PATH = previousPath
+    if (previousMode === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousMode
+  }
+})
+
+test("workspace zsh startup files cannot run before the requested command", async () => {
+  if (process.platform === "win32") return
+  const zsh = Bun.which("zsh")
+  if (!zsh) return
+  await using workspace = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(path.join(dir, ".zshenv"), "print -r -- startup-ran > startup-canary\n")
+    },
+  })
+  const previous = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "off"
+  try {
+    const invocation = resolveShellInvocation({
+      shell: zsh,
+      command: "print -r -- command-ran",
+      cwd: workspace.path,
+      workspace: workspace.path,
+    })
+    const env = minimalShellEnvironment(
+      { ...process.env, ZDOTDIR: workspace.path },
+      workspace.path,
+    )
+    expect(env.ZDOTDIR).toBeUndefined()
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: workspace.path,
+      env,
+    })
+    expect(invocation.args.slice(0, 2)).toEqual(["-f", "-c"])
+    expect(result.stdout.toString().trim()).toBe("command-ran")
+    expect(await Bun.file(path.join(workspace.path, "startup-canary")).exists()).toBeFalse()
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previous
+  }
+})
+
+test("bubblewrap keeps shell writes inside the workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using tmp = await tmpdir()
+  const outside = path.join(os.homedir(), `open-clank-mimo-shell-escape-${crypto.randomUUID()}`)
+  const previous = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: `printf ok > inside; printf nope > ${quote(outside)}`,
+      cwd: tmp.path,
+      workspace: tmp.path,
+    })
+    const runIndex = invocation.args.indexOf("/run")
+    expect(invocation.args.slice(runIndex - 1, runIndex + 1)).toEqual(["--tmpfs", "/run"])
+    Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: tmp.path,
+      env: minimalShellEnvironment(process.env, tmp.path),
+    })
+    expect(invocation.containment).toBe("bwrap")
+    expect(await Bun.file(path.join(tmp.path, "inside")).text()).toBe("ok")
+    expect(await Bun.file(outside).exists()).toBe(false)
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previous
+    await fs.rm(outside, { force: true }).catch(() => {})
+  }
+})
+
+test("bubblewrap can execute a runtime installed outside the workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using tmp = await tmpdir()
+  const previous = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: `${quote(process.execPath)} --version`,
+      cwd: tmp.path,
+      workspace: tmp.path,
+    })
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: tmp.path,
+      env: minimalShellEnvironment(process.env, tmp.path),
+    })
+    expect(invocation.containment).toBe("bwrap")
+    expect(result.exitCode).toBe(0)
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previous
+  }
+})
+
+test("bubblewrap hides Open Clank control data inside the workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using tmp = await tmpdir()
+  const control = path.join(tmp.path, "data")
+  const appDb = path.join(control, "app.db")
+  await fs.mkdir(control, { recursive: true })
+  await fs.writeFile(appDb, "original")
+  const previousSandbox = process.env.OPEN_CLANK_SHELL_SANDBOX
+  const previousControl = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  process.env.OPEN_CLANK_CONTROL_DATA_DIR = control
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: "test ! -e data/app.db",
+      cwd: tmp.path,
+      workspace: tmp.path,
+    })
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: tmp.path,
+      env: minimalShellEnvironment(process.env, tmp.path),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(await Bun.file(appDb).text()).toBe("original")
+  } finally {
+    if (previousSandbox === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousSandbox
+    if (previousControl === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previousControl
+  }
+})
+
+test("bubblewrap hides Open Clank control data outside the workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using workspace = await tmpdir()
+  await using control = await tmpdir()
+  const appDb = path.join(control.path, "app.db")
+  const runtimeCache = path.join(control.path, "mimocode", "cache")
+  const runtimeTool = path.join(runtimeCache, "bin", "tool")
+  await fs.writeFile(appDb, "secret")
+  await fs.mkdir(path.dirname(runtimeTool), { recursive: true })
+  await fs.writeFile(runtimeTool, "runtime")
+  const previousSandbox = process.env.OPEN_CLANK_SHELL_SANDBOX
+  const previousControl = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+  const previousHome = process.env.MIMOCODE_HOME
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  process.env.OPEN_CLANK_CONTROL_DATA_DIR = control.path
+  process.env.MIMOCODE_HOME = path.join(control.path, "mimocode")
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: `test ! -e ${quote(appDb)} && test "$(cat ${quote(runtimeTool)})" = runtime`,
+      cwd: workspace.path,
+      workspace: workspace.path,
+    })
+    const maskIndex = invocation.args.indexOf(control.path)
+    expect(invocation.args.slice(maskIndex - 1, maskIndex + 1)).toEqual(["--tmpfs", control.path])
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: workspace.path,
+      env: minimalShellEnvironment(process.env, workspace.path),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(await Bun.file(appDb).text()).toBe("secret")
+  } finally {
+    if (previousSandbox === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousSandbox
+    if (previousControl === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previousControl
+    if (previousHome === undefined) delete process.env.MIMOCODE_HOME
+    else process.env.MIMOCODE_HOME = previousHome
+  }
+})
+
+test("bubblewrap restores a symlinked MiMo cache at its configured path", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using workspace = await tmpdir()
+  await using control = await tmpdir()
+  await using external = await tmpdir()
+  const runtimeHome = path.join(control.path, "mimocode")
+  const runtimeCache = path.join(runtimeHome, "cache")
+  const runtimeTool = path.join(external.path, "bin", "tool")
+  const siblingSecret = path.join(control.path, "secret")
+  await fs.mkdir(runtimeHome, { recursive: true })
+  await fs.mkdir(path.dirname(runtimeTool), { recursive: true })
+  await fs.writeFile(runtimeTool, "runtime")
+  await fs.writeFile(siblingSecret, "secret")
+  await fs.symlink(external.path, runtimeCache, "dir")
+  const previousSandbox = process.env.OPEN_CLANK_SHELL_SANDBOX
+  const previousControl = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+  const previousHome = process.env.MIMOCODE_HOME
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  process.env.OPEN_CLANK_CONTROL_DATA_DIR = control.path
+  process.env.MIMOCODE_HOME = runtimeHome
+  try {
+    const configuredTool = path.join(runtimeCache, "bin", "tool")
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: `test ! -e ${quote(siblingSecret)} && test "$(cat ${quote(configuredTool)})" = runtime`,
+      cwd: workspace.path,
+      workspace: workspace.path,
+    })
+    expect(invocation.args).toContain(runtimeTool.replace(/\/bin\/tool$/, ""))
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: workspace.path,
+      env: minimalShellEnvironment(process.env, workspace.path),
+    })
+    expect(result.exitCode).toBe(0)
+  } finally {
+    if (previousSandbox === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousSandbox
+    if (previousControl === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previousControl
+    if (previousHome === undefined) delete process.env.MIMOCODE_HOME
+    else process.env.MIMOCODE_HOME = previousHome
+  }
+})
+
+test("bubblewrap masks protected siblings while preserving a nested workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using parent = await tmpdir()
+  const workspace = path.join(parent.path, "workspace")
+  await fs.mkdir(workspace)
+  const siblingSecret = path.join(parent.path, "secret")
+  await fs.writeFile(siblingSecret, "secret")
+  const previousSandbox = process.env.OPEN_CLANK_SHELL_SANDBOX
+  const previousControl = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  process.env.OPEN_CLANK_CONTROL_DATA_DIR = parent.path
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: `test ! -e ${quote(siblingSecret)} && printf ok > result`,
+      cwd: workspace,
+      workspace,
+    })
+    expect(
+      invocation.args.some(
+        (argument, index) => argument === parent.path && invocation.args[index - 1] === "--tmpfs",
+      ),
+    ).toBe(true)
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: workspace,
+      env: minimalShellEnvironment(process.env, workspace),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(await Bun.file(path.join(workspace, "result")).text()).toBe("ok")
+  } finally {
+    if (previousSandbox === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousSandbox
+    if (previousControl === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previousControl
+  }
+})
+
+test("bubblewrap hides symlinked Open Clank control data inside the workspace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using workspace = await tmpdir()
+  await using control = await tmpdir()
+  const appDb = path.join(control.path, "app.db")
+  await fs.writeFile(appDb, "original")
+  const link = path.join(workspace.path, "data")
+  await fs.symlink(control.path, link, "dir")
+  const previousSandbox = process.env.OPEN_CLANK_SHELL_SANDBOX
+  const previousControl = process.env.OPEN_CLANK_CONTROL_DATA_DIR
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  process.env.OPEN_CLANK_CONTROL_DATA_DIR = link
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: "test ! -e data/app.db",
+      cwd: workspace.path,
+      workspace: workspace.path,
+    })
+    const maskIndex = invocation.args.indexOf(control.path)
+    expect(invocation.args.slice(maskIndex - 1, maskIndex + 1)).toEqual(["--tmpfs", control.path])
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: workspace.path,
+      env: minimalShellEnvironment(process.env, workspace.path),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(await Bun.file(appDb).text()).toBe("original")
+  } finally {
+    if (previousSandbox === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previousSandbox
+    if (previousControl === undefined) delete process.env.OPEN_CLANK_CONTROL_DATA_DIR
+    else process.env.OPEN_CLANK_CONTROL_DATA_DIR = previousControl
+  }
+})
+
+test("bubblewrap mounts an approved external workdir", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using workspace = await tmpdir()
+  await using external = await tmpdir()
+  const previous = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  try {
+    const invocation = resolveShellInvocation({
+      shell: Bun.which("bash") ?? "/bin/sh",
+      command: "printf ok > external.txt",
+      cwd: external.path,
+      workspace: workspace.path,
+      writableRoots: [external.path],
+    })
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: external.path,
+      env: minimalShellEnvironment(process.env, external.path),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(invocation.containment).toBe("bwrap")
+    expect(await Bun.file(path.join(external.path, "external.txt")).text()).toBe("ok")
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previous
+  }
+})
+
+test("network-disabled shell requests a private network namespace", async () => {
+  if (process.platform === "win32" || !Bun.which("bwrap")) return
+  await using tmp = await tmpdir()
+  const previous = process.env.OPEN_CLANK_SHELL_SANDBOX
+  process.env.OPEN_CLANK_SHELL_SANDBOX = "required"
+  try {
+    let invocation
+    try {
+      invocation = resolveShellInvocation({
+        shell: Bun.which("bash") ?? "/bin/sh",
+        command: "cat /proc/net/dev",
+        cwd: tmp.path,
+        workspace: tmp.path,
+        network: "disabled",
+      })
+    } catch (error) {
+      expect(String(error)).toContain("network-disabled shell containment is unavailable")
+      return
+    }
+    expect(invocation.containment).toBe("bwrap")
+    expect(invocation.network).toBe("disabled")
+    expect(invocation.args).toContain("--unshare-net")
+    const result = Bun.spawnSync([invocation.executable, ...invocation.args], {
+      cwd: tmp.path,
+      env: minimalShellEnvironment(process.env, tmp.path),
+    })
+    expect(result.exitCode).toBe(0)
+    const interfaces = result.stdout
+      .toString()
+      .split("\n")
+      .filter((line) => line.includes(":"))
+      .map((line) => line.split(":", 1)[0]!.trim())
+    expect(interfaces).toEqual(["lo"])
+  } finally {
+    if (previous === undefined) delete process.env.OPEN_CLANK_SHELL_SANDBOX
+    else process.env.OPEN_CLANK_SHELL_SANDBOX = previous
+  }
+})
+
+test("interactive shell timeout clears its pending request", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      await expect(
+        BashInteractive.request({
+          sessionID: "ses-timeout",
+          callID: "call-timeout",
+          command: "printf ok",
+          cwd: tmp.path,
+          workspace: tmp.path,
+          writableRoots: [tmp.path],
+          shell: Shell.acceptable(),
+          timeout: 20,
+          description: "timeout fixture",
+        }),
+      ).rejects.toThrow("Interactive command timed out")
+      expect(await BashInteractive.list()).toEqual([])
+    },
+  })
+})
+
+test("interactive reply is bound to its session and tool call", async () => {
+  await using tmp = await tmpdir()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const result = BashInteractive.request({
+        sessionID: "ses-owner",
+        callID: "call-owner",
+        command: "printf ok",
+        cwd: tmp.path,
+        workspace: tmp.path,
+        writableRoots: [tmp.path],
+        shell: Shell.acceptable(),
+        timeout: 5_000,
+        description: "binding fixture",
+      })
+      let pending = await BashInteractive.list()
+      for (let attempt = 0; pending.length === 0 && attempt < 20; attempt++) {
+        await Bun.sleep(5)
+        pending = await BashInteractive.list()
+      }
+      expect(pending).toHaveLength(1)
+      const id = pending[0]!.id
+      await expect(
+        BashInteractive.reply({
+          id,
+          sessionID: "ses-other",
+          callID: "call-owner",
+          output: "forged",
+          exitCode: 0,
+        }),
+      ).rejects.toThrow("does not match")
+      expect(await BashInteractive.list()).toHaveLength(1)
+      await BashInteractive.reply({
+        id,
+        sessionID: "ses-owner",
+        callID: "call-owner",
+        output: "ok",
+        exitCode: 0,
+      })
+      expect(await result).toEqual({ output: "ok", exitCode: 0 })
+    },
+  })
+})
+
 const fill = (mode: "lines" | "bytes", n: number) => {
+  // Keep the containment test self-contained on Unix. Running this package's
+  // Bun binary would load bunfig.toml, whose preloads live in the monorepo's
+  // parent node_modules — intentionally outside this test workspace.
+  if (process.platform !== "win32") {
+    return mode === "lines"
+      ? `seq 1 ${n}`
+      : `head -c ${n} /dev/zero | tr '\\0' a`
+  }
   const code =
     mode === "lines"
       ? "console.log(Array.from({length:Number(Bun.argv[1])},(_,i)=>i+1).join(String.fromCharCode(10)))"
@@ -198,6 +728,51 @@ describe("tool.bash", () => {
       },
     })
   })
+
+  test("managed active project policy blocks shell before execution", async () => {
+    await using tmp = await tmpdir()
+    const previousPolicy = process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE
+    const client = {
+      callTool: async () => ({
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            enforced: true,
+            allowed: false,
+            reason: "active project policy blocks MiMo shell execution",
+          }),
+        }],
+      }),
+    } as unknown as Client
+    process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE = "required"
+    registerManagedMcpClient("lifetools_policy_test", client)
+    bindMemorySessionClient(ctx.sessionID, "lifetools_policy_test", "alice", "global")
+    try {
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const bash = await initBash()
+          await expect(
+            Effect.runPromise(
+              bash.execute(
+                {
+                  command: "printf nope > policy-canary",
+                  description: "Policy canary",
+                },
+                ctx,
+              ),
+            ),
+          ).rejects.toThrow("active project policy blocks MiMo shell execution")
+          expect(await Bun.file(path.join(tmp.path, "policy-canary")).exists()).toBeFalse()
+        },
+      })
+    } finally {
+      await closeSharedMcpClient()
+      unregisterManagedMcpClient("lifetools_policy_test")
+      if (previousPolicy === undefined) delete process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE
+      else process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE = previousPolicy
+    }
+  })
 })
 
 describe("tool.bash permissions", () => {
@@ -285,7 +860,10 @@ describe("tool.bash permissions", () => {
         const err = new Error("stop after permission")
         const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
         const file = process.platform === "win32" ? `${process.env.WINDIR!.replaceAll("\\", "/")}/*` : "/etc/*"
-        const want = process.platform === "win32" ? glob(path.join(process.env.WINDIR!, "*")) : "/etc/*"
+        const want = glob(path.join(
+          AppFileSystem.resolve(process.platform === "win32" ? process.env.WINDIR! : "/etc"),
+          "*",
+        ))
         await expect(
           Effect.runPromise(
             bash.execute(
@@ -304,10 +882,11 @@ describe("tool.bash permissions", () => {
     })
   })
 
-  each("asks for bash_delete only (no bash prompt) when running rm inside the project", async () => {
+  each("asks for bash_destructive only (no bash prompt) when running rm inside the project", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        await Bun.write(path.join(dir, "victim.txt"), "x")
+        await fs.mkdir(path.join(dir, "nested"))
+        await Bun.write(path.join(dir, "nested", "victim.txt"), "x")
       },
     })
     await Instance.provide({
@@ -319,23 +898,25 @@ describe("tool.bash permissions", () => {
           bash.execute(
             {
               command: "rm victim.txt",
+              workdir: "nested",
               description: "Remove victim.txt",
             },
             capture(requests),
           ),
         )
-        const deleteReq = requests.find((r) => r.permission === "bash_delete")
-        expect(deleteReq).toBeDefined()
-        expect(deleteReq!.patterns).toContain("rm victim.txt")
-        expect(deleteReq!.metadata.command).toBe("rm victim.txt")
-        // The delete UI shows the full command → a separate `bash` ask would
+        const destructiveReq = requests.find((r) => r.permission === "bash_destructive")
+        expect(destructiveReq).toBeDefined()
+        expect(destructiveReq!.patterns).toContain("rm victim.txt")
+        expect(destructiveReq!.metadata.command).toBe("rm victim.txt")
+        expect(destructiveReq!.metadata.workdir).toBe(path.join(tmp.path, "nested"))
+        // The confirmation UI shows the full command → a separate `bash` ask would
         // just be a second confirmation of the same thing.
         expect(requests.find((r) => r.permission === "bash")).toBeUndefined()
       },
     })
   })
 
-  each("asks for bash_delete on destructive git subcommands", async () => {
+  each("asks for bash_destructive on destructive git subcommands", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -354,15 +935,99 @@ describe("tool.bash permissions", () => {
             ),
           ),
         ).rejects.toThrow(err.message)
-        const deleteReq = requests.find((r) => r.permission === "bash_delete")
-        expect(deleteReq).toBeDefined()
-        expect(deleteReq!.patterns).toContain("git reset --hard HEAD")
+        const destructiveReq = requests.find((r) => r.permission === "bash_destructive")
+        expect(destructiveReq).toBeDefined()
+        expect(destructiveReq!.patterns).toContain("git reset --hard HEAD")
         expect(requests.find((r) => r.permission === "bash")).toBeUndefined()
       },
     })
   })
 
-  each("does not ask for bash_delete on non-destructive commands", async () => {
+  each("cannot bypass bash_destructive with quoting or indirect shell execution", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const bash = await initBash()
+        const commands = [
+          "r''m -rf target",
+          String.raw`r\m -rf target`,
+          "git re''set --hard",
+          "command r''m -rf target",
+          "$(printf rm) -rf target",
+          "bash -c \"r''m -rf target\"",
+          "bash cleanup.sh",
+          "sh cleanup.sh",
+          "printf 'echo unsafe' | bash -v",
+          "python -c 'import os; os.unlink(\"target\")'",
+          "printf 'print(1)' | python -v",
+          "python cleanup.py",
+          "python3 cleanup.py",
+          "python3.12 cleanup.py",
+          "node cleanup.js",
+          "nodejs cleanup.js",
+          "node20 cleanup.js",
+          "bun cleanup.js",
+          "deno cleanup.js",
+          "ruby3.3 cleanup.rb",
+          "php8.3 cleanup.php",
+          "perl5.36 cleanup.pl",
+          "bash5 cleanup.sh",
+          "busybox sh cleanup.sh",
+          "busybox rm target",
+          "nice rm -rf target",
+          "ionice rm -rf target",
+          "chrt 1 rm -rf target",
+          "stdbuf -oL rm -rf target",
+          "taskset -c 0 rm -rf target",
+          "chmod -R 000 .",
+          "crontab schedule.txt",
+          "passwd alice",
+          "curl https://example.test/upload",
+          "npm uninstall package-name",
+          "systemctl disable example.service",
+          "cp source existing-target",
+          "mv source existing-target",
+          "install source existing-target",
+          "ln -sf source existing-target",
+          "sed -i 's/a/b/' file",
+          "tar -xf archive.tar",
+          "printf value > existing-target",
+          "docker run --rm image",
+          "podman exec container command",
+          "./cleanup",
+          "cleanup.sh",
+          "find . -delete",
+          "truncate -s 0 target",
+          "dd if=/dev/zero of=target",
+          "git branch -D old",
+          "git stash clear",
+          "git checkout -- tracked.txt",
+          "git -C repo restore tracked.txt",
+          "git rebase main",
+          "git cherry-pick deadbeef",
+          "git revert deadbeef",
+          "git switch --force main",
+          "git commit --amend --no-edit",
+        ]
+        for (const command of commands) {
+          const err = new Error("stop after permission")
+          const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+          await expect(
+            Effect.runPromise(
+              bash.execute(
+                { command, description: "Exercise destructive classifier" },
+                capture(requests, err),
+              ),
+            ),
+          ).rejects.toThrow(err.message)
+          expect(requests.find((request) => request.permission === "bash_destructive")).toBeDefined()
+        }
+      },
+    })
+  })
+
+  each("does not ask for bash_destructive on non-destructive commands", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -378,7 +1043,19 @@ describe("tool.bash permissions", () => {
             capture(requests),
           ),
         )
-        expect(requests.find((r) => r.permission === "bash_delete")).toBeUndefined()
+        expect(requests.find((r) => r.permission === "bash_destructive")).toBeUndefined()
+
+        const quoted: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+        await Effect.runPromise(
+          bash.execute(
+            {
+              command: "printf '%s\\n' 'rm -rf target'",
+              description: "Print quoted text",
+            },
+            capture(quoted),
+          ),
+        )
+        expect(quoted.find((r) => r.permission === "bash_destructive")).toBeUndefined()
       },
     })
   })
@@ -846,9 +1523,60 @@ describe("tool.bash permissions", () => {
         ).rejects.toThrow(err.message)
         const extDirReq = requests.find((r) => r.permission === "external_directory")
         expect(extDirReq).toBeDefined()
-        expect(extDirReq!.patterns).toContain(glob(path.join(os.tmpdir(), "*")))
+        expect(extDirReq!.patterns).toContain(glob(path.join(AppFileSystem.resolve(os.tmpdir()), "*")))
       },
     })
+  })
+
+  test("canonicalizes Unix temporary aliases without broadening directory authority", async () => {
+    if (process.platform === "win32") return
+    const literalRoot = await fs.mkdtemp(path.join("/tmp", "mimocode-external-root-"))
+    const siblingRoot = await fs.mkdtemp(path.join("/tmp", "mimocode-external-sibling-"))
+    const alias = path.join(os.tmpdir(), `mimocode-external-alias-${crypto.randomUUID()}`)
+    await fs.symlink(literalRoot, alias, "dir")
+    try {
+      const canonicalRoot = AppFileSystem.resolve(literalRoot)
+      if (process.platform === "darwin") {
+        expect(AppFileSystem.resolve("/tmp")).toBe(AppFileSystem.resolve("/private/tmp"))
+        expect(canonicalRoot.startsWith("/private/tmp/")).toBe(true)
+      } else if (process.platform === "linux") {
+        expect(AppFileSystem.resolve("/tmp")).toBe(path.resolve("/tmp"))
+      }
+
+      await using workspace = await tmpdir({ git: true })
+      await Instance.provide({
+        directory: workspace.path,
+        fn: async () => {
+          const bash = await initBash()
+          const permissionPattern = async (workdir: string) => {
+            const err = new Error("stop after permission")
+            const requests: Array<Omit<Permission.Request, "id" | "sessionID" | "tool">> = []
+            await expect(
+              Effect.runPromise(
+                bash.execute(
+                  { command: "echo ok", workdir, description: "Echo from canonical temp dir" },
+                  capture(requests, err),
+                ),
+              ),
+            ).rejects.toThrow(err.message)
+            const request = requests.find((item) => item.permission === "external_directory")
+            expect(request).toBeDefined()
+            return request!.patterns[0]
+          }
+
+          const equivalent = await Promise.all(
+            [literalRoot, canonicalRoot, alias].map(permissionPattern),
+          )
+          expect(new Set(equivalent).size).toBe(1)
+          expect(equivalent[0]).toBe(glob(path.join(canonicalRoot, "*")))
+          expect(await permissionPattern(siblingRoot)).not.toBe(equivalent[0])
+        },
+      })
+    } finally {
+      await fs.rm(alias, { force: true })
+      await fs.rm(literalRoot, { recursive: true, force: true })
+      await fs.rm(siblingRoot, { recursive: true, force: true })
+    }
   })
 
   if (process.platform === "win32") {
@@ -1059,7 +1787,7 @@ describe("tool.bash permissions", () => {
     })
   })
 
-  each("matches redirects in permission pattern", async () => {
+  each("matches redirects in destructive permission pattern", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
@@ -1075,9 +1803,9 @@ describe("tool.bash permissions", () => {
             ),
           ),
         ).rejects.toThrow(err.message)
-        const bashReq = requests.find((r) => r.permission === "bash")
-        expect(bashReq).toBeDefined()
-        expect(bashReq!.patterns).toContain("echo test > output.txt")
+        const destructiveReq = requests.find((r) => r.permission === "bash_destructive")
+        expect(destructiveReq).toBeDefined()
+        expect(destructiveReq!.patterns).toContain("echo test > output.txt")
       },
     })
   })

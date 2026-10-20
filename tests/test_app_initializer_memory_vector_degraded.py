@@ -1,15 +1,4 @@
-"""Regression: a present-but-unhealthy MemoryVectorStore must survive initialization.
-
-When MemoryVectorStore._initialize() fails (ChromaDB unavailable / embeddings not
-installed) it swallows the exception and leaves `.healthy == False` — the object
-exists but is unhealthy. app_initializer.initialize_managers() previously reset that
-object to ``None`` in the ``else`` branch, so service_health.chromadb_health() saw
-``memory_vector is None`` and reported the vector memory as DISABLED ("not
-configured") instead of DEGRADED/DOWN ("initialization failed") — losing the
-diagnostic distinction the /api/diagnostics/services probe is built to surface.
-
-This test fails before the fix (memory_vector is None) and passes after it.
-"""
+"""Frankenmemory is the only live memory/RAG authority."""
 from unittest.mock import MagicMock
 
 import src.app_initializer as app_init
@@ -43,37 +32,53 @@ def _neutralize_collaborators(monkeypatch):
     monkeypatch.setattr(app_init, "create_directories", lambda: None)
 
 
-def test_failed_memory_vector_init_is_kept_not_discarded(monkeypatch, tmp_path):
-    # The vector path is gated off by default (frankenmemory replaces Chroma);
-    # enable it so the degraded-object handling under test is reachable.
+def test_memory_vector_environment_toggle_cannot_instantiate_chroma(monkeypatch, tmp_path):
     monkeypatch.setenv("MEMORY_VECTOR_ENABLED", "1")
-    # Keep the frankenmemory branch out of this test: it writes the repo's
-    # real frankenmemory.db and exports FM_DB_ID into os.environ, which
-    # poisons the fm-mcp handshake for every later transport test.
     monkeypatch.setenv("MEMORY_PROVIDER", "native")
     monkeypatch.delenv("FM_DB_ID", raising=False)
     _neutralize_collaborators(monkeypatch)
-    # initialize_managers does `from src.memory_vector import MemoryVectorStore`
-    # at call time, so patch it on the source module.
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy memory vector must not be constructed")
+
     monkeypatch.setattr(
         memory_vector_mod, "MemoryVectorStore",
-        lambda *a, **k: _UnhealthyVectorStore(),
+        forbidden,
     )
 
     result = app_init.initialize_managers(str(tmp_path), rag_manager=None)
 
-    mv = result["memory_vector"]
-    assert mv is not None, "unhealthy MemoryVectorStore was discarded (reported as DISABLED, not DEGRADED/DOWN)"
-    assert mv.healthy is False
+    assert result["memory_vector"] is None
 
 
-def test_chromadb_health_reports_down_for_unhealthy_vector_store():
-    # Pins the downstream taxonomy the fix feeds: a present-but-unhealthy vector
-    # store (rag absent) is DOWN, not DISABLED; with a healthy rag it is DEGRADED;
-    # only when both are absent is it DISABLED.
-    store = _UnhealthyVectorStore()
+def test_primary_provider_never_inherits_child_broker_environment(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("MEMORY_PROVIDER", "frankenmemory")
+    monkeypatch.setenv(
+        "OPEN_CLANK_MEMORY_BROKER_URL",
+        "http://127.0.0.1:7000/api/internal/frankenmemory/tool",
+    )
+    monkeypatch.setenv("OPEN_CLANK_MEMORY_BROKER_TOKEN", "child-only-token")
+    monkeypatch.delenv("MEMORY_VECTOR_ENABLED", raising=False)
+    _neutralize_collaborators(monkeypatch)
+    monkeypatch.setattr(
+        app_init,
+        "prepare_frankenmemory_database",
+        lambda: "db-test",
+    )
+    constructor = MagicMock(return_value=MagicMock(provider_id="frankenmemory"))
+    monkeypatch.setattr(app_init, "FrankenmemoryProvider", constructor)
+
+    app_init.initialize_managers(str(tmp_path), rag_manager=None)
+
+    assert constructor.call_args.kwargs["broker_url"] == ""
+    assert constructor.call_args.kwargs["broker_token"] == ""
+
+
+def test_frankenmemory_health_ignores_retired_vector_state():
     healthy_rag = MagicMock(healthy=True)
 
-    assert sh.chromadb_health(None, None)["status"] == sh.DISABLED
-    assert sh.chromadb_health(None, store)["status"] == sh.DOWN
-    assert sh.chromadb_health(healthy_rag, store)["status"] == sh.DEGRADED
+    assert sh.frankenmemory_rag_health(None)["status"] == sh.DISABLED
+    assert sh.frankenmemory_rag_health(healthy_rag)["status"] == sh.OK

@@ -1,0 +1,1 @@
+Original is bijective. Replacement f(2)=b merges inputs1,2 and misses c: neither injective nor surjective. Enlarged codomain with original pairs retains injection but misses d, so is not surjective.

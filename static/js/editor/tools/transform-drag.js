@@ -8,7 +8,7 @@
  * call `reapplyTransform()` to redraw. This module owns the drag
  * branch.
  *
- * The dispatcher in galleryEditor.js calls `tryBegin/tryContinue/
+ * The dispatcher in imps.js calls `tryBegin/tryContinue/
  * tryEnd` which return `true` when the event was for the transform
  * tool and was handled (so the dispatcher can short-circuit).
  *

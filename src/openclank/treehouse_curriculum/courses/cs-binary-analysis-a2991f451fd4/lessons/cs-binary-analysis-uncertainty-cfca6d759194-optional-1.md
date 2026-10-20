@@ -1,0 +1,1 @@
+Unusual structure is not itself proof of intent.

@@ -49,6 +49,163 @@ export function normalizeWindowSizeRecord(value, viewport = {}) {
   };
 }
 
+// Desktop applet geometry shares the measured navigation boundary. Mobile
+// navigation is an overlay drawer, so sheets retain the full viewport.
+export function windowViewportBounds() {
+  const width = window.innerWidth, height = window.innerHeight;
+  let left = 0, right = width;
+  const desktop = width > 768;
+  if (desktop) {
+    for (const nav of [document.getElementById('sidebar'), document.getElementById('icon-rail')]) {
+      if (!nav || nav.classList.contains('hidden') || nav.classList.contains('rail-hidden')) continue;
+      const style = getComputedStyle(nav), rect = nav.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0) continue;
+      if (nav.classList.contains('right-side')) right = Math.min(right, rect.left);
+      else left = Math.max(left, rect.right);
+    }
+    left = Math.max(0, Math.min(left, width - 9));
+    right = Math.max(left + 9, Math.min(width, right));
+  }
+  const margin = desktop ? Math.min(4, (right - left - 1) / 2, (height - 1) / 2) : 0;
+  left += margin; right -= margin;
+  const top = margin, bottom = height - margin;
+  return { left, top, right, bottom, width:right - left, height:bottom - top };
+}
+
+// The accessibility enhancer also sets aria-modal on ordinary legacy content.
+// Lifecycle blocking belongs to the outer root/context; real confirmations and
+// native dialogs remain excluded even after that generic enhancement.
+export function isBlockingAppletFrame(content) {
+  if (!content) return true;
+  if (content.closest('dialog, .styled-confirm-box, .styled-prompt-box, .copal-modal-overlay, [role="alertdialog"]')) return true;
+  const modal = content.closest('.modal, .research-overlay, .notes-pane');
+  if (!modal) return true;
+  if (modal.__openClankWindow?.inputContext?.blockingModal || modal.__copalWindow?.inputContext?.blockingModal) return true;
+  for (let node = content; node; node = node.parentElement) {
+    if (node.getAttribute('aria-modal') !== 'true') continue;
+    // a11y.js marks only modal-content/Notes, never an outer .modal root.
+    if (node === content && node.dataset.a11yDialog === '1' && !node.matches('.modal')) continue;
+    return true;
+  }
+  return false;
+}
+
+export function markAppletFrame(modal, content) {
+  if (!modal || !content || (!modal.matches('.modal, .research-overlay, .notes-pane') && !content.matches('.notes-pane')) || modal.id === 'chat-workspace'
+      || content.closest('.settings-theme-surface-content')
+      || isBlockingAppletFrame(content)) return false;
+  content.classList.add('oc-applet-frame');
+  return true;
+}
+
+// One bounded observer publishes centering properties and notifies the existing
+// geometry owners. Observers follow nav mount/unmount; no polling is required.
+const workspaceListeners = new Set();
+let workspaceObserverStarted = false, workspaceFrame = 0, workspaceSignature = '';
+export function observeWindowWorkspace(listener) {
+  workspaceListeners.add(listener);
+  startWorkspaceObserver();
+  return () => workspaceListeners.delete(listener);
+}
+function startWorkspaceObserver() {
+  if (workspaceObserverStarted || typeof document === 'undefined') return;
+  if (!document.body) {
+    document.addEventListener('DOMContentLoaded', startWorkspaceObserver, { once:true });
+    return;
+  }
+  workspaceObserverStarted = true;
+  let watched = [];
+  const schedule = () => {
+    if (workspaceFrame) return;
+    workspaceFrame = requestAnimationFrame(() => {
+      workspaceFrame = 0;
+      const bounds = windowViewportBounds();
+      const signature = JSON.stringify(bounds);
+      if (signature === workspaceSignature) return;
+      workspaceSignature = signature;
+      for (const key of ['left', 'top', 'width', 'height']) document.documentElement.style.setProperty('--oc-workspace-' + key, bounds[key] + 'px');
+      document.documentElement.style.setProperty('--oc-workspace-right', (window.innerWidth - bounds.right) + 'px');
+      for (const callback of workspaceListeners) { try { callback(bounds); } catch (error) { console.warn('Applet workspace update failed', error); } }
+    });
+  };
+  const navObserver = new MutationObserver(schedule);
+  const sizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+  const sync = () => {
+    const next = [document.getElementById('sidebar'), document.getElementById('icon-rail')].filter(Boolean);
+    if (next.length === watched.length && next.every((nav, index) => nav === watched[index])) return;
+    navObserver.disconnect(); sizeObserver?.disconnect(); watched = next;
+    for (const nav of watched) {
+      navObserver.observe(nav, { attributes:true, attributeFilter:['class', 'style'] });
+      sizeObserver?.observe(nav);
+    }
+    schedule();
+  };
+  new MutationObserver(sync).observe(document.body, { childList:true, subtree:true });
+  new MutationObserver(schedule).observe(document.documentElement, { attributes:true, attributeFilter:['class'] });
+  new MutationObserver(schedule).observe(document.body, { attributes:true, attributeFilter:['class'] });
+  document.addEventListener('transitionend', event => { if (watched.includes(event.target)) schedule(); });
+  window.addEventListener('resize', schedule);
+  window.visualViewport?.addEventListener('resize', schedule);
+  sync(); schedule();
+}
+if (typeof document !== 'undefined') startWorkspaceObserver();
+
+export function visibleWindowBounds(target) {
+  const viewport = windowViewportBounds();
+  const content = target?.closest?.('.modal-content,dialog[open],.notes-pane')
+    || target?.closest?.('.modal')?.querySelector(':scope > .modal-content');
+  if (!content) return viewport;
+  const rect = content.getBoundingClientRect();
+  const left = Math.max(viewport.left, rect.left), top = Math.max(viewport.top, rect.top);
+  const right = Math.min(viewport.right, rect.right), bottom = Math.min(viewport.bottom, rect.bottom);
+  return right > left && bottom > top ? { left, top, right, bottom, width:right - left, height:bottom - top } : viewport;
+}
+
+export function clampFloatingWindow(content, options = {}) {
+  if (!content?.isConnected || content.closest('.hidden,[hidden],.modal-minimized,.modal-closing')
+      || !content.getClientRects().length || options.isLocked?.()) return;
+  const modal = content.closest('.modal') || content;
+  if (modal.classList.contains('modal-left-docked') || modal.classList.contains('modal-right-docked')
+      || content.dataset._tileZone || options.fsClass && modal.classList.contains(options.fsClass)) return;
+  // Restore replays the entrance scale. Like the drag helper, cancel the
+  // window's own finite animation BEFORE measuring/pinning its final box.
+  // A smaller animated rect is not the width/height that remains afterward.
+  try {
+    content.getAnimations().filter(animation => animation.playState !== 'finished'
+      && animation.effect?.getTiming().iterations !== Infinity).forEach(animation => animation.cancel());
+  } catch (_) {}
+  // A restored pixel minimum (e.g. min-height:780px) wins over a smaller
+  // height/max-height. Keep that minimum, but cap it responsively so it cannot
+  // force the box past a narrower/shorter viewport, including mobile sheets.
+  const computed = getComputedStyle(content);
+  for (const [property, value, unit] of [['min-width', computed.minWidth, 'vw'], ['min-height', computed.minHeight, 'dvh']]) {
+    if (/^\d+(?:\.\d+)?px$/.test(value) && parseFloat(value) > 0
+        && !content.style.getPropertyValue(property).startsWith('min(')) {
+      content.style.setProperty(property, `min(${value}, var(--oc-workspace-${property === 'min-width' ? 'width' : 'height'}, 100${unit}))`, content.style.getPropertyPriority(property));
+    }
+  }
+  for (const [property, axis] of [['min-width', 'width'], ['min-height', 'height']]) {
+    const legacy = /^min\((\d+(?:\.\d+)?px),\s*100(?:vw|dvh)\)$/.exec(content.style.getPropertyValue(property));
+    if (legacy) content.style.setProperty(property, `min(${legacy[1]}, var(--oc-workspace-${axis}))`, content.style.getPropertyPriority(property));
+  }
+  const bounds = windowViewportBounds(), rect = content.getBoundingClientRect();
+  const size = normalizeWindowSizeRecord({ width:rect.width, height:rect.height }, {
+    width:bounds.width, height:bounds.height, minWidth:options.minWidth, minHeight:options.minHeight,
+  });
+  if (!size) return;
+  const fixed = getComputedStyle(content).position === 'fixed';
+  const outside = rect.left < bounds.left || rect.top < bounds.top || rect.right > bounds.right || rect.bottom > bounds.bottom;
+  if (Math.round(rect.width) !== size.width || Math.round(rect.height) !== size.height) {
+    content.style.width = size.width + 'px'; content.style.height = size.height + 'px';
+    content.style.maxWidth = 'none'; content.style.maxHeight = 'none';
+  }
+  if (fixed || outside) {
+    content.style.position = 'fixed'; content.style.margin = '0'; content.style.transform = 'none';
+    content.style.left = Math.max(bounds.left, Math.min(rect.left, bounds.right - size.width)) + 'px';
+    content.style.top = Math.max(bounds.top, Math.min(rect.top, bounds.bottom - size.height)) + 'px';
+  }
+}
+
 export function makeWindowResizable(content, options = {}) {
   if (!content) return;
   const modal = options.modal || null;
@@ -115,6 +272,7 @@ export function makeWindowResizable(content, options = {}) {
     // so killing it for this instance is harmless (it replays on next open).
     content.style.animation = 'none';
     content.classList.add('window-resizing');
+    clampFloatingWindow(content, { minWidth:minW, minHeight:minH });
     const r = content.getBoundingClientRect();
     startRect = { left: r.left, top: r.top, width: r.width, height: r.height };
     startX = cx; startY = cy;
@@ -138,24 +296,26 @@ export function makeWindowResizable(content, options = {}) {
     if (!resizing) return;
     const dx = cx - startX, dy = cy - startY;
     let { left, top, width, height } = startRect;
-    const vw = window.innerWidth, vh = window.innerHeight;
+    const bounds = windowViewportBounds(), vw = bounds.right, vh = bounds.bottom;
+    const minimumW = Math.min(minW, bounds.width), minimumH = Math.min(minH, bounds.height);
     if (active.r) width = startRect.width + dx;
     if (active.b) height = startRect.height + dy;
     if (active.l) { width = startRect.width - dx; left = startRect.left + dx; }
     if (active.t) { height = startRect.height - dy; top = startRect.top + dy; }
     // Min-size clamps — keep the opposite edge anchored when pulling from
     // the left/top so the window doesn't jump.
-    if (width < minW) { if (active.l) left = startRect.left + (startRect.width - minW); width = minW; }
-    if (height < minH) { if (active.t) top = startRect.top + (startRect.height - minH); height = minH; }
+    if (width < minimumW) { if (active.l) left = startRect.left + (startRect.width - minimumW); width = minimumW; }
+    if (height < minimumH) { if (active.t) top = startRect.top + (startRect.height - minimumH); height = minimumH; }
     // Keep the window on-screen and never larger than the viewport.
-    if (active.l && left < 0) { width += left; left = 0; }
-    if (active.t && top < 0) { height += top; top = 0; }
-    if (left + width > vw) width = Math.max(minW, vw - left);
-    if (top + height > vh) height = Math.max(minH, vh - top);
+    if (active.l && left < bounds.left) { width += left - bounds.left; left = bounds.left; }
+    if (active.t && top < bounds.top) { height += top - bounds.top; top = bounds.top; }
+    if (left + width > vw) width = Math.max(minimumW, vw - left);
+    if (top + height > vh) height = Math.max(minimumH, vh - top);
     content.style.left = left + 'px';
     content.style.top = top + 'px';
     content.style.width = width + 'px';
     content.style.height = height + 'px';
+    clampFloatingWindow(content, { minWidth:minW, minHeight:minH });
   }
 
   function end() {
@@ -165,12 +325,13 @@ export function makeWindowResizable(content, options = {}) {
     document.body.classList.remove('window-resizing-active');
     document.body.style.cursor = '';
     clearHoverCursor();
+    clampFloatingWindow(content, { minWidth:minW, minHeight:minH });
     const r = content.getBoundingClientRect();
     if (storageKey) {
       try {
         const record = normalizeWindowSizeRecord(
           { width:r.width, height:r.height },
-          { width:window.innerWidth, height:window.innerHeight, minWidth:minW, minHeight:minH },
+          { width:windowViewportBounds().width, height:windowViewportBounds().height, minWidth:minW, minHeight:minH },
         );
         if (record) localStorage.setItem(storageKey, JSON.stringify(record));
       } catch (_) {}
@@ -240,35 +401,11 @@ export function makeWindowResizable(content, options = {}) {
   // frame lets that settle so we can re-check _skip() and NOT stretch a
   // docked/fullscreen window to a stale windowed size. The open animation masks
   // the one-frame delay, so there is no visible jump.
-  function normalizedCurrentSize(value = null) {
-    const rect = value || content.getBoundingClientRect();
-    return normalizeWindowSizeRecord(
-      { width:rect.width, height:rect.height },
-      { width:window.innerWidth, height:window.innerHeight, minWidth:minW, minHeight:minH },
-    );
-  }
-
   function clampToViewport() {
-    if (_skip() || !content.isConnected) return;
-    const rect = content.getBoundingClientRect();
-    const size = normalizedCurrentSize(rect);
-    if (!size) return;
-    const fixed = getComputedStyle(content).position === 'fixed';
-    const outside = rect.left < 0 || rect.top < 0
-      || rect.right > window.innerWidth || rect.bottom > window.innerHeight;
-    if (Math.round(rect.width) !== size.width || Math.round(rect.height) !== size.height) {
-      content.style.width = size.width + 'px';
-      content.style.height = size.height + 'px';
-      content.style.maxWidth = 'none';
-      content.style.maxHeight = 'none';
-    }
-    if (fixed || outside) {
-      content.style.position = 'fixed';
-      content.style.margin = '0';
-      content.style.transform = 'none';
-      content.style.left = Math.max(0, Math.min(rect.left, window.innerWidth - size.width)) + 'px';
-      content.style.top = Math.max(0, Math.min(rect.top, window.innerHeight - size.height)) + 'px';
-    }
+    // mobileSkip disables resize gestures, not the fit check after restoring
+    // a desktop window or reducing the viewport. Locked layouts own their box.
+    if (isLocked() || !content.isConnected) return;
+    clampFloatingWindow(content, { minWidth:minW, minHeight:minH });
   }
 
   let clampFrame = 0;
@@ -277,16 +414,21 @@ export function makeWindowResizable(content, options = {}) {
     clampFrame = requestAnimationFrame(clampToViewport);
   };
   window.addEventListener('resize', scheduleClamp);
+  const stopWorkspaceWatch = observeWindowWorkspace(() => {
+    if (!content.isConnected) { stopWorkspaceWatch(); return; }
+    scheduleClamp();
+  });
+  window.addEventListener('odysseus:modal-opened', event => { if (event.detail?.modal === modal) scheduleClamp(); });
   window.visualViewport?.addEventListener('resize', scheduleClamp);
 
   requestAnimationFrame(() => {
-    if (_skip() || !content.isConnected) return;
-    if (storageKey) {
+    if (isLocked() || !content.isConnected) return;
+    if (storageKey && !_skip()) {
       try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
         const record = normalizeWindowSizeRecord(saved, {
-          width:window.innerWidth,
-          height:window.innerHeight,
+          width:windowViewportBounds().width,
+          height:windowViewportBounds().height,
           minWidth:minW,
           minHeight:minH,
         });
@@ -299,6 +441,6 @@ export function makeWindowResizable(content, options = {}) {
         }
       } catch (_) {}
     }
-    requestAnimationFrame(clampToViewport);
+    scheduleClamp();
   });
 }

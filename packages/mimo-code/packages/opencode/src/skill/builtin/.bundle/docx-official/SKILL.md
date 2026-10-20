@@ -22,6 +22,16 @@ If the task mixes several of these, do them in this order: **read → plan → e
 
 ## One-time environment setup
 
+> **Bundled runtime:** when the `MIMO_PYTHON` environment variable is set, skip `uv`/`python3` and pip installs entirely — run every command below with `uv run` replaced by `"$MIMO_PYTHON"` (e.g. `"$MIMO_PYTHON" scripts/extract_text.py input.docx`). This skill's Python dependencies are preinstalled in that interpreter; pip console scripts are unavailable, so always go through `"$MIMO_PYTHON" -m <module>`. A bundled LibreOffice is exposed as `MIMO_SOFFICE` and picked up automatically by the scripts here.
+
+All scripts include [PEP 723](https://peps.python.org/pep-0723/) inline metadata, so `uv run` resolves dependencies automatically — no manual install step needed. Just run:
+
+```bash
+uv run scripts/extract_text.py input.docx
+```
+
+If you don't use `uv`, install dependencies once:
+
 ```bash
 python3 -m pip install --upgrade python-docx lxml
 # Optional but recommended:
@@ -30,31 +40,33 @@ python3 -m pip install --upgrade python-docx lxml
 #   Poppler   (for pdf → image, QA loop):   brew install poppler
 ```
 
+Alternatively, if this skill lives in a persistent workspace you can `uv init` a project, `uv add python-docx lxml`, and run scripts with `uv run scripts/...` from the project root — this gives you a lockfile and reproducible environment.
+
 All scripts here use the standard library plus `python-docx`. No proprietary dependencies.
 
 ## Common commands
 
 ```bash
 # 1. Extract plain text (best for "what does this file say?" questions)
-python scripts/extract_text.py input.docx > input.txt
+uv run scripts/extract_text.py input.docx > input.txt
 
 # 2. Explode a .docx into readable XML for structural surgery
-python scripts/explode.py input.docx exploded/
+uv run scripts/explode.py input.docx exploded/
 
 # 3. Assemble an exploded directory into a fresh .docx
-python scripts/assemble.py exploded/ output.docx
+uv run scripts/assemble.py exploded/ output.docx
 
 # 4. Render a .docx as PDF (used for visual QA)
-python scripts/render_pdf.py output.docx           # writes output.pdf next to it
+uv run scripts/render_pdf.py output.docx           # writes output.pdf next to it
 
 # 5. Well-formedness check (ZIP integrity + parseable XML + python-docx open)
-python scripts/audit.py output.docx
+uv run scripts/audit.py output.docx
 
 # 6. Accept every tracked change without needing Word/LibreOffice
-python scripts/resolve_revisions.py reviewed.docx clean.docx
+uv run scripts/resolve_revisions.py reviewed.docx clean.docx
 
 # 7. Add a comment to an exploded directory
-python scripts/annotate.py exploded/ "Please check" --author "Reviewer" --anchor "text"
+uv run scripts/annotate.py exploded/ "Please check" --author "Reviewer" --anchor "text"
 ```
 
 Every script is a small, self-contained Python file. Read the top of the file for full CLI options.
@@ -100,11 +112,11 @@ Ask the user which one to use. If you cannot ask, default to the region implied 
 
 1. **Open cleanly** — no repair prompt.
    ```bash
-   python -c "import docx; docx.Document('output.docx')"   # loads without exceptions
+   uv run python -c "import docx; docx.Document('output.docx')"   # loads without exceptions
    ```
 2. **Text integrity** — no placeholder residue.
    ```bash
-   python scripts/extract_text.py output.docx | grep -Ei "TODO|TBD|\{\{|lorem|xxxx"
+   uv run scripts/extract_text.py output.docx | grep -Ei "TODO|TBD|\{\{|lorem|xxxx"
    ```
    Grep must return nothing.
 3. **Visual sanity** — render a PDF, open the first and last pages, scan for:
@@ -113,11 +125,11 @@ Ask the user which one to use. If you cannot ask, default to the region implied 
    - Images pushed to their own page because they exceeded content width.
    - Missing page numbers, wrong header/footer content.
    ```bash
-   python scripts/render_pdf.py output.docx
+   uv run scripts/render_pdf.py output.docx
    ```
 4. **Style hygiene** — every heading uses a real style, not just bold+large text:
    ```bash
-   python -c "
+   uv run python -c "
    import docx; d = docx.Document('output.docx')
    for p in d.paragraphs:
        if p.text and p.style.name == 'Normal' and p.runs and p.runs[0].bold:

@@ -1,0 +1,1 @@
+The stocks are 11,12,12; the answer states the update order and one omitted behavior such as players delaying spending.

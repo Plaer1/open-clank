@@ -17,14 +17,69 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-# Stub `core.database` / `core.auth` before the route modules import them.
-# (Same trick as test_null_owner_gates.py — the real modules instantiate
-# SQLAlchemy declarative classes at import-time which blow up under the
-# conftest's `sqlalchemy.*` MagicMock stubs.)
+# Full symbol set the route/task modules import from `core.auth`. The real
+# module is preferred above (and is what the test venv loads); this fallback
+# exists only for dependency-free environments. Supplying every name — not
+# just AuthManager — is what keeps the import landmine from coming back.
+import enum as _enum
+
+
+class _FallbackSetAdminResult(_enum.Enum):
+    OK = "ok"
+    USER_NOT_FOUND = "user_not_found"
+    NOT_AUTHORIZED = "not_authorized"
+    LAST_ADMIN = "last_admin"
+
+
+_CORE_AUTH_FALLBACK = {
+    "AuthManager": MagicMock(),
+    "SetAdminResult": _FallbackSetAdminResult,
+    "TOKEN_TTL": 60 * 60 * 24 * 7,
+    "RESERVED_USERNAMES": frozenset({"internal-tool", "api", "demo", "system"}),
+    "is_reserved_username": lambda username: str(username or "").strip().lower()
+    in frozenset({"internal-tool", "api", "demo", "system", "shared", "local"}),
+    "normalize_known_username": lambda users, username: (
+        str(username or "").strip().lower()
+        if str(username or "").strip().lower() in (users or {})
+        else None
+    ),
+    "ADMIN_PRIVILEGES": {
+        "can_use_agent": True,
+        "can_use_browser": True,
+        "can_use_bash": True,
+        "can_use_documents": True,
+        "can_use_research": True,
+        "can_generate_images": True,
+        "can_manage_memory": True,
+        "max_messages_per_day": 0,
+        "allowed_models": [],
+        "allowed_models_restricted": False,
+        "block_all_models": False,
+    },
+}
+
+# Stub `core.database` / `core.auth` before the route modules import them
+# *only when the real modules cannot load*. Route modules import real symbols
+# (SetAdminResult, TOKEN_TTL, is_reserved_username, RESERVED_USERNAMES), so an
+# incomplete MagicMock stub breaks every handler that touches them.
+def _try_real_module(name: str):
+    """Import the real module when its package path resolves.
+
+    Returns the real module or None. Real SQLAlchemy is available under the
+    test venv; conftest pre-imports it, so core.auth loads cleanly and the
+    route/task symbols exist.
+    """
+    import importlib
+    try:
+        return importlib.import_module(name)
+    except Exception:
+        return None
+
+
 def _ensure_stub(name: str, **attrs):
     """Create or augment a stub module with the given attributes.
-    Augments existing entries because earlier-run tests may have already
-    stubbed the same module with a different attribute set.
+    Prefers the real module when importable so route-level imports keep
+    working. Falls back to a stub for dependency-free environments.
 
     Also stubs the parent package and wires the child onto it as an
     attribute. Without stubbing the parent we'd either (a) run the real
@@ -32,6 +87,16 @@ def _ensure_stub(name: str, **attrs):
     modules and explodes under the conftest mocks, or (b) leave the
     stub orphaned so `import core.auth; core.auth.AuthManager` raises
     `AttributeError`."""
+    existing = sys.modules.get(name)
+    if existing is not None and getattr(existing, "__file__", None):
+        # Real (or previously real) module already loaded — keep it.
+        return existing
+
+    real = _try_real_module(name)
+    if real is not None and getattr(real, "__file__", None):
+        sys.modules[name] = real
+        return real
+
     # Stub the parent package first if not already loaded. We point
     # `__path__` at the real on-disk directory so submodules NOT
     # stubbed here can still resolve via normal import machinery —
@@ -76,7 +141,7 @@ def _auth_regressions_stubs(monkeypatch):
         GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
         McpServer=MagicMock(),
     )
-    auth = _ensure_stub("core.auth", AuthManager=MagicMock())
+    auth = _ensure_stub("core.auth", **_CORE_AUTH_FALLBACK)
     ep = _ensure_stub("src.endpoint_resolver",
         resolve_endpoint=MagicMock(return_value=("", "", {})),
         normalize_base=MagicMock(),
@@ -299,14 +364,6 @@ def test_pop_notifications_owner_filtered():
     # Build a minimal scheduler instance that we can hit directly.
     # Reuse the real class so the test catches future regressions of
     # the filter logic.
-    import sys, types
-    from unittest.mock import MagicMock as _MM
-    # `task_scheduler` pulls in lots of helpers — stub the ones it uses.
-    for s in ["src.builtin_actions", "src.ai_interaction", "src.endpoint_resolver",
-              "src.agent_loop", "src.session_manager"]:
-        if s not in sys.modules:
-            mod = types.ModuleType(s)
-            sys.modules[s] = mod
     from src.task_scheduler import TaskScheduler
     sch = TaskScheduler.__new__(TaskScheduler)  # bypass __init__ network etc.
     sch._pending_notifications = []
@@ -314,10 +371,20 @@ def test_pop_notifications_owner_filtered():
     sch.add_notification("t2", "error",   "id2", owner="bob")
     sch.add_notification("t3", "success", "id3", owner=None)
     sch.add_notification("t4", "success", "id4", owner="alice")
+    sch.add_notification(
+        "Shared model removed",
+        "success",
+        "model-share:s1",
+        owner="alice",
+        kind="model_share",
+    )
     alice = sch.pop_notifications(owner="alice")
     alice_names = {n["task_name"] for n in alice}
     # alice gets only her own rows; bob's row and legacy null-owner rows stay.
-    assert alice_names == {"t1", "t4"}
+    assert alice_names == {"t1", "t4", "Shared model removed"}
+    assert next(
+        n for n in alice if n["task_name"] == "Shared model removed"
+    )["kind"] == "model_share"
     # bob's row and the legacy ownerless row are still queued.
     remaining = sch._pending_notifications
     assert {n["task_name"] for n in remaining} == {"t2", "t3"}

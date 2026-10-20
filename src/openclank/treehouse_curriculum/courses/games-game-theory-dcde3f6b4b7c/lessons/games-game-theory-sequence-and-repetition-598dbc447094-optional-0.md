@@ -1,0 +1,1 @@
+The incumbent shares, so the entrant enters; the proposed payoff change makes fighting individually preferable or equally good at that decision.

@@ -1,0 +1,1 @@
+A stationary point that violates constraints is not a feasible optimum.

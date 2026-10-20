@@ -1,7 +1,9 @@
+import { uiIcon, setUiIconText } from './uiIcons.js';
 // static/js/settings.js — Settings panel module (ES6)
 // User-facing preferences: AI models, search, appearance
 
 import uiModule from './ui.js';
+import { resetMyAchievements, mountAchievementNotificationSettings } from './achievementClient.js';
 import searchModule from './search.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { clearDockSide } from './modalSnap.js';
@@ -10,14 +12,50 @@ import { providerLogo } from './providers.js';
 import { catalogEntries } from './modelCatalog.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
-import mimoProviders from './mimoProviders.js';
+import providerControl from './providerControl.js';
+import { getWorkspaceId } from './workspace.js';
+import { mountGeneralHexLibrary } from './generalHexLibrary.js';
+import { mountLoggingSettings } from './loggingSettings.js';
+import { mountNativeAgentSettings, agentSettingsCatalogEntries } from './nativeAgentSettings.js';
+import { mountNativeSettingsReference, nativeReferenceCatalogEntries, nativeReferenceSearchTerms, focusNativeSettingsReference } from './nativeSettingsReferenceUI.js';
+import { refreshReadyNativeCommands } from './nativeCatalogRefresh.js';
+import { mountCodeIndexSettings } from './codeIndexSettings.js';
+import { mountRenderingSettings } from './graphics/renderingSettings.js';
+
+function refreshReadyNativeCatalog() {
+  return refreshReadyNativeCommands({reloadSkills:false,changedEvent:'odysseus:mcp-changed',fetcher:checkedFetch});
+}
 
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
 let _copalModule = null;
+let _copalAppearanceRefresh = null;
+let _closeTimer = null;
+let _closeEpoch = 0;
+let _closeAnimationTarget = null;
+let _closeAnimationHandler = null;
+
+function cancelPendingSettingsClose() {
+  ++_closeEpoch;
+  if (_closeTimer !== null) { clearTimeout(_closeTimer); _closeTimer = null; }
+  if (_closeAnimationTarget && _closeAnimationHandler) {
+    _closeAnimationTarget.removeEventListener('animationend', _closeAnimationHandler);
+  }
+  _closeAnimationTarget = _closeAnimationHandler = null;
+  return _closeEpoch;
+}
 
 function el(id) { return document.getElementById(id); }
+function focusSettingsControl(control) {
+  if (!control) return;
+  for (let parent = control.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === 'DETAILS') parent.open = true;
+  }
+  control.scrollIntoView({block:'center'});
+  if (!control.disabled) control.focus();
+  else control.closest('.settings-row')?.querySelector('[data-native-inherit]:not(:disabled)')?.focus();
+}
 function esc(s) { return uiModule.esc(s); }
 async function checkedFetch(input, init) {
   const response = await window.fetch(input, init);
@@ -34,29 +72,136 @@ function safeRasterDataUrl(raw) {
 
 /* ── Tab switching ── */
 const SETTINGS_OWNERSHIP = Object.freeze({
-  services: { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
-  'added-models': { scope: 'global-admin', api: '/api/model-endpoints', consumer: 'Odysseus model catalog' },
+  services: { scope: 'per-user', api: '/api/v1/providers', consumer: 'adding API and local models' },
+  'added-models': { scope: 'per-user', api: '/api/v1/providers', consumer: 'your connected models and advanced provider settings' },
   // The Persona card inside this panel is per-user too, served by
   // /api/presets/default-persona (chat default, assistant, reminder voice,
   // background work — one synced record, ruling R13).
   ai: { scope: 'per-user', api: '/api/auth/settings', consumer: 'new sessions and auxiliary model dispatch' },
-  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Odysseus search and research policy' },
-  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Odysseus services and approved MiMo MCP projection' },
+  search: { scope: 'global-admin', api: '/api/auth/settings', consumer: 'Open Clank search and research policy' },
+  integrations: { scope: 'per-user', api: '/api/auth/integrations', consumer: 'Open Clank services and approved agent integrations' },
   email: { scope: 'per-user', api: '/api/email', consumer: 'mail tools and composition' },
   reminders: { scope: 'per-user', api: '/api/auth/settings', consumer: 'reminder delivery' },
+  logging: { scope: 'per-user', api: '/api/logging/v1/policy', consumer: 'Open Clank capture, storage and display preferences' },
+  hexes: { scope: 'per-user', api: '/api/hexes', consumer: 'saved General defaults and the current Workspace contract' },
+  history: { scope: 'shared-policy', api: '/api/history/settings', consumer: 'Lore history usage and retention budgets' },
   appearance: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
   shortcuts: { scope: 'browser-local', api: 'localStorage', consumer: 'this browser' },
+  help: { scope: 'shared-content', api: '/api/copal/official/docs', consumer: 'Open Clank handbook and documentation' },
+  advanced: { scope: 'per-user', api: '/api/copal/treehouse/achievements/reset', consumer: 'your achievement progress and unlocks' },
   account: { scope: 'per-user', api: '/api/auth', consumer: 'current account lifecycle' },
-  tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Odysseus and MiMo effective tool policy' },
+  tools: { scope: 'global-admin', api: '/api/settings', consumer: 'Open Clank effective tool policy' },
+  'file-access': { scope: 'shared-policy', api: '/api/file-policy/state + /api/file-policy/locations + /api/file-policy/people', consumer: 'Locations, People access, and separate agent approvals' },
   users: { scope: 'global-admin', api: '/api/auth/users', consumer: 'account and capability policy' },
   system: { scope: 'global-admin', api: '/api/admin', consumer: 'server lifecycle and diagnostics' },
 });
-const ADMIN_MODULE_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system']);
+const MODEL_MANAGEMENT_TABS = new Set(['services', 'added-models']);
+const ADMIN_MODULE_TABS = new Set(['integrations', 'tools', 'users', 'system']);
 const ADMIN_ONLY_TABS = new Set(
   Object.entries(SETTINGS_OWNERSHIP)
     .filter(([, item]) => item.scope === 'global-admin' || item.admin)
     .map(([name]) => name),
 );
+
+/** Every settings panel id, including History and File Access. */
+export const SETTINGS_PANEL_IDS = Object.freeze(Object.keys(SETTINGS_OWNERSHIP));
+
+// Aliases so the finder and direct navigation accept either the panel id or a
+// human name ("permissions" -> file-access, "theme" -> appearance).
+const PANEL_ALIASES = Object.freeze({
+  permissions: 'file-access',
+  'file access': 'file-access',
+  fileaccess: 'file-access',
+  filesystem: 'file-access',
+  locations: 'file-access',
+  logs: 'logging',
+  'advanced logging': 'logging',
+  hex: 'hexes',
+  'general hexes': 'hexes',
+  lore: 'history',
+  retention: 'history',
+  'history usage': 'history',
+  docs: 'help',
+  documentation: 'help',
+  handbook: 'help',
+  theme: 'appearance',
+  themes: 'appearance',
+  models: 'services',
+  providers: 'services',
+  'added models': 'added-models',
+  persona: 'ai',
+  agent: 'ai',
+  agents: 'ai',
+  'native settings': 'ai',
+  'ai defaults': 'ai',
+  mail: 'email',
+  accounts: 'account',
+  users: 'users',
+  admin: 'system',
+  system: 'system',
+});
+
+export function normalizeSettingsPanel(name) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return null;
+  if (SETTINGS_OWNERSHIP[key]) return key;
+  return PANEL_ALIASES[key] || null;
+}
+
+// Lazy activation runs once per panel per page load so finder, deep-link and
+// nav clicks cannot double-init a panel's data hooks.
+const _activatedPanels = new Set();
+function activatePanel(tab) {
+  if (!tab) return;
+  modalEl?.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
+  modalEl?.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
+  document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
+  syncAppearanceOpacity(tab === 'appearance');
+  if (tab === 'appearance') mountRenderingSettings(modalEl?.querySelector('[data-graphical-rendering-settings]'));
+  if (tab === 'system') mountCodeIndexSettings(modalEl?.querySelector('[data-code-index-settings]'));
+  if (tab === 'logging') {
+    const root = modalEl?.querySelector('[data-logging-settings]');
+    if (root?.dataset.loggingMounted) root.dispatchEvent(new Event('logging-settings-refresh'));
+    else mountLoggingSettings(root);
+  }
+  if (tab === 'hexes') {
+    const root = modalEl?.querySelector('[data-general-hex-library]');
+    if (root?.dataset.hexMounted) root.dispatchEvent(new Event('hex-refresh'));
+    else mountGeneralHexLibrary(root);
+  }
+  if (tab === 'file-access') void loadFileAccessSettings();
+  if (tab === 'advanced') {
+    const achievementSettings = modalEl?.querySelector('[data-achievement-notification-settings]');
+    mountAchievementNotificationSettings(achievementSettings);
+    if (achievementSettings && !achievementSettings.parentElement.querySelector('[data-achievement-collection-link]')) {
+      const gallery = document.createElement('button'); gallery.type = 'button'; gallery.className = 'copal-btn'; gallery.dataset.achievementCollectionLink = ''; gallery.textContent = 'Open achievement collection';
+      gallery.onclick = async () => { const { openAppDestination } = await import('./copal/markdownRenderer.js'); const opened = await openAppDestination('clank://achievements', null, { sourceKind:'settings' }); if (opened?.ok !== false) close(); };
+      achievementSettings.after(gallery);
+    }
+    const button = el('settings-reset-achievements');
+    if (button && !button.dataset.bound) {
+      button.dataset.bound = '1';
+      button.onclick = async () => {
+        if (!await uiModule.styledConfirm('Reset your account-wide achievement progress and unlocks? This clears achievement receipts and pending unlock notifications. Your courses, source activity history, and other accounts are preserved. Achievements can be earned again through new activity.', { title: 'Reset achievements', confirmText: 'Reset achievements', danger: true })) return;
+        button.disabled = true;
+        const status = el('settings-achievement-reset-status');
+        try {
+          await resetMyAchievements();
+          if (status) status.textContent = 'Your achievement progress and unlocks have been reset.';
+          uiModule.showToast('Achievements reset');
+        } catch (error) { if (status) status.textContent = error.message; }
+        finally { button.disabled = false; }
+      };
+    }
+  }
+  if (_activatedPanels.has(tab)) return;
+  _activatedPanels.add(tab);
+  if (tab === 'appearance') syncCopalNotesSettings();
+  if (tab === 'ai') activateAiSettings();
+  if (MODEL_MANAGEMENT_TABS.has(tab)) {
+    providerControl.load({ view: tab });
+  }
+}
 
 function applyControlOwnership(root) {
   const controls = root.matches?.('button, input, select, textarea')
@@ -85,10 +230,28 @@ function applyOwnershipManifest() {
     if (panel && !panel.querySelector(':scope > .settings-scope-label')) {
       const label = document.createElement('div');
       label.className = 'settings-scope-label';
-      label.textContent = `${owner.scope} · ${owner.consumer}`;
+      label.textContent = tab === 'file-access' ? 'Files and agent permissions' : `${owner.scope} · ${owner.consumer}`;
+      if (tab === 'file-access') label.style.textTransform = 'none';
       panel.prepend(label);
     }
     if (panel) applyControlOwnership(panel);
+  }
+}
+
+function initHelpLinks() {
+  for (const [id, presentation] of [['settings-help-wiki', 'wiki'], ['settings-help-copal', 'copal']]) {
+    el(id)?.addEventListener('click', async () => {
+      const status = el('settings-help-status');
+      if (status) status.textContent = 'Opening handbook…';
+      try {
+        const opened = await window.openClankHandbook?.({ presentation });
+        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+        if (status) status.textContent = '';
+        close();
+      } catch (error) {
+        if (status) status.textContent = error.message || 'Could not open the handbook.';
+      }
+    });
   }
 }
 
@@ -102,18 +265,50 @@ function initTabs() {
         window.adminModule.open(tab);
         return;
       }
-      modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-      modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
-      // Mark when the Appearance tab is open so the modal can go
-      // semi-transparent — lets the user see the rest of the UI react as
-      // they flip toggles instead of having to close + reopen the modal.
-      document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
-      syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'appearance') syncCopalNotesSettings();
-      if (tab === 'ai') { refreshAiModelEndpoints(); loadDefaultPersonaPanel(); }
-      if (tab === 'added-models' && window._isAdmin) mimoProviders.load();
-      if (tab === 'added-models' && window._isAdmin) loadPermissionGrants();
+      // One activation path shared with open()/finder/deep-link.
+      activatePanel(tab);
     });
+  });
+}
+
+/* ── Settings finder ── */
+function initSettingsFinder() {
+  const input = el('settings-finder');
+  if (!input) return;
+  const applyFilter = () => {
+    const q = input.value.trim().toLowerCase();
+    const items = modalEl.querySelectorAll('[data-settings-tab]');
+    items.forEach((btn) => {
+      const tab = btn.dataset.settingsTab;
+      const label = (btn.textContent || '').toLowerCase();
+      const owner = SETTINGS_OWNERSHIP[tab] || {};
+      const panel = modalEl.querySelector('[data-settings-panel="' + CSS.escape(tab) + '"]');
+      const keys = panel ? [...panel.querySelectorAll('[data-native-setting], [data-ui-key]')].map(node => node.dataset.nativeSetting || node.dataset.uiKey).join(' ') : '';
+      const aliases = Object.entries(PANEL_ALIASES).filter(([, target]) => target === tab).map(([alias]) => alias).join(' ');
+      const reference = tab === 'ai' ? nativeReferenceSearchTerms() : '';
+      const hay = `${tab} ${label} ${owner.consumer || ''} ${owner.scope || ''} ${aliases} ${panel?.textContent || ''} ${keys} ${reference}`.toLowerCase();
+      const match = !q || hay.includes(q);
+      btn.classList.toggle('settings-finder-hidden', !match);
+    });
+    // Hide divider/label chrome while filtering so the list stays readable.
+    modalEl.querySelectorAll('.settings-sidebar-divider, .settings-sidebar-label').forEach((node) => {
+      node.classList.toggle('settings-finder-hidden', !!q);
+    });
+  };
+  input.addEventListener('input', applyFilter);
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // Enter activates the first visible match (finder -> activation, once).
+    const first = modalEl.querySelector('[data-settings-tab]:not(.settings-finder-hidden)');
+    if (first) {
+      first.click();
+      const q = input.value.trim().toLowerCase();
+      const panel = modalEl.querySelector('[data-settings-panel="' + CSS.escape(first.dataset.settingsTab) + '"]');
+      const field = panel && [...panel.querySelectorAll('input[data-native-setting], select[data-native-setting], textarea[data-native-setting], input[data-ui-key]')].find(node => (node.dataset.nativeSetting || node.dataset.uiKey).includes(q) || (node.closest('.settings-row, label')?.textContent || '').toLowerCase().includes(q));
+      focusSettingsControl(field);
+      if (!field && first.dataset.settingsTab === 'ai' && q) focusNativeSettingsReference(q);
+    }
   });
 }
 
@@ -277,11 +472,86 @@ function initOpacityToggle() {
 
 const _aiEndpointRefreshers = new Set();
 let _aiEndpointRefreshInFlight = null;
+let _modelEndpointSnapshot = null;
+let _modelEndpointSnapshotAt = 0;
+let _modelEndpointFetchInFlight = null;
+let _ownerModelCatalogSnapshot = null;
+let _ownerModelCatalogSnapshotAt = 0;
+let _ownerModelCatalogFetchInFlight = null;
+let _aiSettingsInitialized = false;
 
-async function _fetchModelEndpoints() {
-  const epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin', cache: 'no-store' });
-  const endpoints = await epRes.json();
-  return Array.isArray(endpoints) ? endpoints : [];
+async function _fetchOwnerModelCatalog(options = {}) {
+  const force = options.force === true;
+  const fresh = _ownerModelCatalogSnapshot
+    && (Date.now() - _ownerModelCatalogSnapshotAt) < 5000;
+  if (!force && fresh) return _ownerModelCatalogSnapshot;
+  if (_ownerModelCatalogFetchInFlight) return _ownerModelCatalogFetchInFlight;
+  _ownerModelCatalogFetchInFlight = (async function() {
+    const response = await checkedFetch('/api/models', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    const data = await response.json();
+    _ownerModelCatalogSnapshot = data;
+    _ownerModelCatalogSnapshotAt = Date.now();
+    return data;
+  })();
+  try {
+    return await _ownerModelCatalogFetchInFlight;
+  } finally {
+    _ownerModelCatalogFetchInFlight = null;
+  }
+}
+
+async function _fetchModelEndpoints(options = {}) {
+  const force = options.force === true;
+  const fresh = _modelEndpointSnapshot && (Date.now() - _modelEndpointSnapshotAt) < 5000;
+  if (!force && fresh) return _modelEndpointSnapshot;
+  if (_modelEndpointFetchInFlight) return _modelEndpointFetchInFlight;
+  _modelEndpointFetchInFlight = (async () => {
+    // One DB-only projection includes both personal and received shared models.
+    // This also avoids serializing every AI Defaults picker behind separate
+    // connection and model requests.
+    const items = (await _fetchOwnerModelCatalog({ force })).items || [];
+    const snapshot = items.map(function(item) {
+      const connectionRoutes = (item.catalog || []).filter(function(route) {
+        return route.hidden !== true && route.entitled !== false && route.compatible !== false;
+      }).map(function(route) {
+        const selector = item.shared
+          ? route.model_id
+          : (route.provider_model_route_id || route.model_id);
+        return {
+          model_id: selector,
+          provider_model_id: route.provider_model_id || route.model_id,
+          display_name: route.display_name || route.model_id,
+          capabilities: route.capabilities || {},
+          operations: route.operations || [],
+          hidden: false,
+        };
+      });
+      return {
+        id: item.endpoint_id,
+        endpoint_id: item.endpoint_id,
+        name: item.endpoint_name || item.endpoint_id,
+        online: item.offline !== true,
+        is_enabled: item.offline !== true,
+        endpoint_kind: item.endpoint_kind,
+        billing_lane: item.billing_lane,
+        shared: item.shared === true,
+        shared_by: item.shared_by || null,
+        catalog: connectionRoutes,
+        models: connectionRoutes.map(function(route) { return route.model_id; }),
+      };
+    }).filter(function(item) { return item.id && item.catalog.length; });
+    _modelEndpointSnapshot = snapshot;
+    _modelEndpointSnapshotAt = Date.now();
+    return snapshot;
+  })();
+  try {
+    return await _modelEndpointFetchInFlight;
+  } finally {
+    _modelEndpointFetchInFlight = null;
+  }
 }
 
 function _endpointLabel(ep) {
@@ -394,7 +664,7 @@ export async function refreshAiModelEndpoints() {
   if (_aiEndpointRefreshInFlight) return _aiEndpointRefreshInFlight;
   _aiEndpointRefreshInFlight = (async function() {
     try {
-      const endpoints = await _fetchModelEndpoints();
+      const endpoints = await _fetchModelEndpoints({ force: true });
       _aiEndpointRefreshers.forEach(function(fn) {
         try { fn(endpoints); } catch (e) { console.warn('[settings] endpoint refresh handler failed', e); }
       });
@@ -405,121 +675,6 @@ export async function refreshAiModelEndpoints() {
     }
   })();
   return _aiEndpointRefreshInFlight;
-}
-
-/* Shared fallback-chain widget — mirrors the Default Chat Model fallback UI
- * for other model cards (Utility, Vision, …). Pass in the container/button
- * IDs, the endpoints list, the settings key to persist under, and the
- * model-filter (for Vision we exclude non-chat-capable models).
- */
-function _bindFallbackWidget(opts) {
-  var fbContainer = el(opts.containerId);
-  var addBtn = el(opts.addBtnId);
-  var endpointsRef = opts.endpoints;       // mutable list reference
-  var modelsFilter = opts.modelsFilter || function() { return true; };
-  var settingKey = opts.settingKey;
-  var current = opts.initial || [];        // [{endpoint_id, model}]
-
-  if (!fbContainer || !addBtn) return { setEndpoints: function() {}, setInitial: function() {} };
-
-  function enabledEps() { return (endpointsRef() || []).filter(function(e) { return e.is_enabled; }); }
-
-  function fillModels(selectEl, epId, selected) {
-    while (selectEl.options.length) selectEl.remove(0);
-    var ep = (endpointsRef() || []).find(function(e) { return e.id === epId; });
-    if (ep) {
-      _endpointCatalog(ep).forEach(function(entry) {
-        var m = entry.mid;
-        if (!modelsFilter(m, ep, entry)) return;
-        var o = document.createElement('option');
-        o.value = m;
-        o.textContent = m.split('/').pop();
-        selectEl.appendChild(o);
-      });
-    }
-    if (selected) selectEl.value = selected;
-  }
-
-  async function save() {
-    var clean = current.filter(function(f) { return f.endpoint_id && f.model; });
-    var body = {};
-    body[settingKey] = clean;
-    try {
-      await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    } catch (e) { console.warn('[fallback] save failed for ' + settingKey, e); }
-  }
-
-  function render() {
-    fbContainer.innerHTML = '';
-    current.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEps().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEps()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        save();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; save(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-      rm.addEventListener('click', function() {
-        current.splice(idx, 1);
-        render();
-        save();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
-  }
-
-  addBtn.addEventListener('click', function() {
-    var first = enabledEps()[0];
-    current.push({ endpoint_id: first ? first.id : '', model: '' });
-    render();
-    save();
-  });
-
-  render();
-
-  return {
-    setInitial: function(list) { current = (list || []).slice(); render(); },
-    refresh: render,
-  };
 }
 
 /* ── Persona manager (identity rulings R10/R11/R13) ──
@@ -568,7 +723,7 @@ async function loadDefaultPersonaPanel() {
     selectEl.innerHTML = '';
     const defOpt = document.createElement('option');
     defOpt.value = '__default__';
-    defOpt.textContent = `Default (${(_personaState.defaultRecord || {}).name || 'Odysseus'})`;
+    defOpt.textContent = `Default (${(_personaState.defaultRecord || {}).name || 'Open Clank'})`;
     selectEl.appendChild(defOpt);
     if (_personaState.templates.length) {
       const group = document.createElement('optgroup');
@@ -599,7 +754,7 @@ async function loadDefaultPersonaPanel() {
     if (!value || value === '__default__') {
       _personaState.kind = 'default'; _personaState.id = null;
       const record = _personaState.defaultRecord || {};
-      nameEl.value = record.name || 'Odysseus';
+      nameEl.value = record.name || 'Open Clank';
       promptEl.value = record.system_prompt || '';
     } else if (value.startsWith('tmpl:')) {
       const template = _personaState.templates.find(t => `tmpl:${t.id}` === value);
@@ -736,14 +891,7 @@ async function initDefaultChat() {
   var epSel = el('set-defaultEpSelect');
   var modelSel = el('set-defaultModelSelect');
   var msg = el('set-defaultChatMsg');
-  var fbContainer = el('set-defaultFallbacks');
-  var addFbBtn = el('set-defaultAddFallback');
   var _endpoints = [];
-  var _fallbacks = []; // [{endpoint_id, model}] — tried in order if primary fails
-
-  function enabledEndpoints() {
-    return _endpoints.filter(function(e) { return e.is_enabled; });
-  }
 
   // Fill any <select> with the models for a given endpoint id.
   function fillModels(selectEl, epId, selected) {
@@ -760,64 +908,6 @@ async function initDefaultChat() {
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
     _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
-    renderFallbacks();
-  }
-
-  // Render the fallback chain. Each row is endpoint + model + remove.
-  function renderFallbacks() {
-    fbContainer.innerHTML = '';
-    _fallbacks.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEndpoints().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEndpoints()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      // Keep the model in sync with the values actually shown.
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        saveDefault();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; saveDefault(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-      rm.addEventListener('click', function() {
-        _fallbacks.splice(idx, 1);
-        renderFallbacks();
-        saveDefault();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
   }
 
   try {
@@ -825,12 +915,6 @@ async function initDefaultChat() {
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
-    _fallbacks = Array.isArray(settings.default_model_fallbacks)
-      ? settings.default_model_fallbacks.map(function(f) {
-          return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' };
-        })
-      : [];
-    renderFallbacks();
   } catch (e) { console.warn('Failed to load default chat settings', e); }
 
   epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
@@ -838,26 +922,22 @@ async function initDefaultChat() {
 
   async function saveDefault() {
     try {
-      var clean = _fallbacks.filter(function(f) { return f.endpoint_id && f.model; });
       await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           default_endpoint_id: epSel.value,
-          default_model: modelSel.value,
-          default_model_fallbacks: clean
+          default_model: modelSel.value
         })
       });
+      try {
+        window.dispatchEvent(new CustomEvent('openclank:default-chat-changed', {
+          detail: { endpointId: epSel.value, modelId: modelSel.value }
+        }));
+      } catch (_) {}
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
-
-  if (addFbBtn) addFbBtn.addEventListener('click', function() {
-    var first = enabledEndpoints()[0];
-    _fallbacks.push({ endpoint_id: first ? first.id : '', model: '' });
-    renderFallbacks();
-    saveDefault();
-  });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
@@ -871,7 +951,6 @@ async function initUtilityModel() {
   var modelSel = el('set-utilityModelSelect');
   var msg = el('set-utilityChatMsg');
   var _endpoints = [];
-  var fallbackWidget = null;
   if (epSel && epSel.options[0]) epSel.options[0].textContent = 'Same as chat';
   if (modelSel && modelSel.options[0]) modelSel.options[0].textContent = 'Same as chat';
 
@@ -891,15 +970,6 @@ async function initUtilityModel() {
     var settings = await res.json();
     if (settings.utility_endpoint_id) epSel.value = settings.utility_endpoint_id;
     refreshModels(settings.utility_model || '');
-    fallbackWidget = _bindFallbackWidget({
-      containerId: 'set-utilityFallbacks',
-      addBtnId: 'set-utilityAddFallback',
-      endpoints: function() { return _endpoints; },
-      settingKey: 'utility_model_fallbacks',
-      initial: Array.isArray(settings.utility_model_fallbacks)
-        ? settings.utility_model_fallbacks.map(function(f) { return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' }; })
-        : [],
-    });
   } catch (e) { console.warn('Failed to load utility model settings', e); }
 
   // Persist whatever's currently selected. Empty endpoint or model → backend
@@ -926,7 +996,63 @@ async function initUtilityModel() {
     _endpoints = endpoints;
     _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
     refreshModels(modelSel.value);
-    if (fallbackWidget && fallbackWidget.refresh) fallbackWidget.refresh();
+  });
+}
+
+/* ── Memory Model ── */
+async function initMemoryModel() {
+  var epSel = el('set-memoryEpSelect');
+  var modelSel = el('set-memoryModelSelect');
+  var msg = el('set-memoryChatMsg');
+  var _endpoints = [];
+  if (!epSel || !modelSel) return;
+  if (epSel.options[0]) epSel.options[0].textContent = 'Same as Utility';
+  if (modelSel.options[0]) modelSel.options[0].textContent = 'Same as Utility';
+
+  try {
+    _endpoints = await _fetchModelEndpoints();
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+  } catch (e) { console.warn('Failed to load endpoints for memory model', e); }
+
+  function refreshModels(selectedModel) {
+    var ep = _endpoints.find(function(e) { return e.id === epSel.value; });
+    _fillModelSelect(modelSel, _endpointCatalog(ep), selectedModel, true);
+  }
+
+  try {
+    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.memory_endpoint_id) epSel.value = settings.memory_endpoint_id;
+    refreshModels(settings.memory_model || '');
+  } catch (e) { console.warn('Failed to load memory model settings', e); }
+
+  async function saveMemory() {
+    try {
+      await checkedFetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memory_endpoint_id: epSel.value || '',
+          memory_model: modelSel.value || '',
+        }),
+      });
+      msg.textContent = epSel.value && modelSel.value ? 'Saved' : 'Using Utility';
+      msg.style.color = 'var(--fg)';
+      setTimeout(function() { msg.textContent = ''; }, 1800);
+    } catch (e) {
+      msg.textContent = 'Failed to save';
+      msg.style.color = 'var(--red)';
+    }
+  }
+
+  epSel.addEventListener('change', function() { refreshModels(''); saveMemory(); });
+  modelSel.addEventListener('change', saveMemory);
+
+  _registerAiEndpointRefresh(function(endpoints) {
+    _endpoints = endpoints;
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+    refreshModels(modelSel.value);
   });
 }
 
@@ -1039,8 +1165,7 @@ async function initImageSettings() {
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
   try {
-    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
+    const modelsData = await _fetchOwnerModelCatalog();
     // Inpaint-compat allowlist — image gen here is scoped to inpainting only,
     // so DALL-E / GPT-Image-1 (no inpaint API) are excluded. Currently:
     //   - any model with 'inpaint' in the id
@@ -1059,7 +1184,7 @@ async function initImageSettings() {
         if (_isInpaintModel(mid)) imageModels.push(mid);
       });
     });
-    sortModelIds(imageModels).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; modelSel.appendChild(opt); });
+    sortModelIds([...new Set(imageModels)]).forEach(mid => { const opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; modelSel.appendChild(opt); });
     // Hardcoded fallbacks shown as "(not detected)" so users know what to
     // download/serve to enable inpaint here.
     ['stable-diffusion-3.5-medium', 'stable-diffusion-inpainting'].forEach(mid => {
@@ -1086,6 +1211,7 @@ async function initImageSettings() {
     try {
       await checkedFetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value }) });
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
@@ -1100,16 +1226,13 @@ async function initVisionSettings() {
   const msg = el('set-visionSettingsMsg');
   const enabledToggle = el('set-visionEnabledToggle');
   const configWrap = vlSel ? vlSel.closest('div[style*="flex-direction"]') : null;
-  var _visionEndpoints = [];
-  var visionFallbackWidget = null;
   var _vlExclude = ['audio', 'realtime', 'tts', 'dall-e', 'embedding', 'search', 'whisper'];
   function _isVisionModel(mid) {
     var lower = String(mid || '').toLowerCase();
     return !_vlExclude.some(function(kw) { return lower.includes(kw); });
   }
   try {
-    const modelsRes = await checkedFetch('/api/models', { credentials: 'same-origin' });
-    const modelsData = await modelsRes.json();
+    const modelsData = await _fetchOwnerModelCatalog();
     const visionModels = [];
     (modelsData.items || []).forEach(item => {
       if (item.offline) return;
@@ -1121,37 +1244,16 @@ async function initVisionSettings() {
         }
       });
     });
-    sortModelIds(visionModels).forEach(mid => {
+    sortModelIds([...new Set(visionModels)]).forEach(mid => {
       var opt = document.createElement('option'); opt.value = mid; opt.textContent = mid; vlSel.appendChild(opt);
     });
   } catch (e) { console.warn('Failed to load models for vision settings', e); }
-  // Also pull the raw endpoint list so the fallback widget can resolve
-  // endpoint-id → models the same way the other cards do.
-  try {
-    _visionEndpoints = (await _fetchModelEndpoints()).filter(function(ep) {
-      return !ep.virtual || _endpointCatalog(ep).some(function(entry) {
-        return entry.capabilities?.vision === true;
-      });
-    });
-  } catch (e) { console.warn('Failed to load endpoints for vision fallback', e); }
   try {
     const settingsRes = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
     if (settings.vision_model) vlSel.value = settings.vision_model;
     _syncModelLogo(vlSel);
     if (enabledToggle) enabledToggle.checked = settings.vision_enabled !== false;
-    visionFallbackWidget = _bindFallbackWidget({
-      containerId: 'set-visionFallbacks',
-      addBtnId: 'set-visionAddFallback',
-      endpoints: function() { return _visionEndpoints; },
-      // Vision fallback list filters to vision-capable models (same heuristic
-      // as the primary select above — exclude audio/tts/embedding/etc.).
-      modelsFilter: function(mid) { return _isVisionModel(mid); },
-      settingKey: 'vision_model_fallbacks',
-      initial: Array.isArray(settings.vision_model_fallbacks)
-        ? settings.vision_model_fallbacks.map(function(f) { return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' }; })
-        : [],
-    });
   } catch (e) { console.warn('Failed to load vision settings', e); }
 
   function syncVisionDisabled() {
@@ -1172,10 +1274,6 @@ async function initVisionSettings() {
   vlSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncVisionDisabled(); saveSettings(); });
 
-  _registerAiEndpointRefresh(function(endpoints) {
-    _visionEndpoints = endpoints;
-    if (visionFallbackWidget && visionFallbackWidget.refresh) visionFallbackWidget.refresh();
-  });
 }
 
 /* ── Face Recognition ── */
@@ -1215,11 +1313,13 @@ async function initTtsSettings() {
 
   var ttsKeywords = ['tts', 'audio'];
   try {
-    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = await _fetchModelEndpoints();
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled || ep.virtual) return;
-      var hasTTS = _endpointCatalog(ep).some(entry => ttsKeywords.some(kw => entry.mid.toLowerCase().includes(kw)));
+      var hasTTS = _endpointCatalog(ep).some(entry => (
+        (entry.operations || []).includes('audio.synthesize')
+        || ttsKeywords.some(kw => String(entry.providerModelId || entry.mid).toLowerCase().includes(kw))
+      ));
       if (!hasTTS) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
     });
@@ -1384,8 +1484,11 @@ async function initSttSettings() {
 
   // Add API endpoints that might support STT
   try {
-    var epRes = await checkedFetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
+    var endpoints = (await _fetchModelEndpoints()).filter(function(ep) {
+      return _endpointCatalog(ep).some(function(entry) {
+        return (entry.operations || []).includes('audio.transcribe');
+      });
+    });
     endpoints.forEach(function(ep) {
       if (!ep.is_enabled || ep.virtual) return;
       var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
@@ -1436,18 +1539,20 @@ var _searchProviderHints = {
   searxng: 'Private, self-hosted instance. Leave URL empty to use the SEARXNG_INSTANCE env var.',
   duckduckgo: 'No API key needed, but rate-limited — heavy use can return empty results. Configure a fallback below.',
   brave: 'Get your API key from ' + _LINK('https://brave.com/search/api/', 'brave.com/search/api'),
+  kagi: 'Premium search API. Generate a token at ' + _LINK('https://kagi.com/api', 'kagi.com/api'),
   google_pse: 'Requires a Google API key and a Programmable Search Engine ID (CX). Create one at ' + _LINK('https://programmablesearchengine.google.com/', 'programmablesearchengine.google.com'),
   tavily: 'AI-optimized search. 1,000 free credits/month at ' + _LINK('https://tavily.com/', 'tavily.com'),
   serper: 'Google results via API. 2,500 free queries at ' + _LINK('https://serper.dev/', 'serper.dev'),
+  mimo: 'Managed hosted search. Select a Search purpose binding in Provider Control; no browser credential is used.',
   disabled: 'Web search and deep research tools will be unavailable.',
 };
-var _searchNeedsKey = { brave: 1, google_pse: 1, tavily: 1, serper: 1 };
+var _searchNeedsKey = { brave: 1, kagi: 1, google_pse: 1, tavily: 1, serper: 1 };
 var _searchLabels = {
-  searxng: 'SearXNG', duckduckgo: 'DuckDuckGo', brave: 'Brave Search',
-  google_pse: 'Google PSE', tavily: 'Tavily', serper: 'Serper', disabled: 'Disabled',
+  searxng: 'SearXNG', duckduckgo: 'DuckDuckGo', brave: 'Brave Search', kagi: 'Kagi Search',
+  google_pse: 'Google PSE', tavily: 'Tavily', serper: 'Serper', mimo: 'MiMo hosted search', disabled: 'Disabled',
 };
 var _searchKeyFields = {
-  brave: 'brave_api_key', google_pse: 'google_pse_key',
+  brave: 'brave_api_key', kagi: 'kagi_api_key', google_pse: 'google_pse_key',
   tavily: 'tavily_api_key', serper: 'serper_api_key',
 };
 
@@ -1479,6 +1584,7 @@ async function initSearchSettings() {
     cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
     hint.innerHTML = _searchProviderHints[prov] || '';
     if (prov === 'brave') keyInput.placeholder = 'Brave API key';
+    else if (prov === 'kagi') keyInput.placeholder = 'Kagi API token';
     else if (prov === 'google_pse') keyInput.placeholder = 'Google API key';
     else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key';
     else if (prov === 'serper') keyInput.placeholder = 'Serper API key';
@@ -1642,7 +1748,7 @@ async function initSearchSettings() {
       .filter(function(o) { return !inChain.has(o.value); });
   }
   var addBtn = el('set-searchAddFallback');
-  var TRASH_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+  var TRASH_SVG = uiIcon("trash",20,{"role":"inherit"});
   function _renderFallbackChain() {
     if (!fbWrap) return;
     var chain = (_settings.search_fallback_chain || []).slice();
@@ -1771,18 +1877,18 @@ async function initSearchSettings() {
         var d = await r.json();
         var ms = Math.round(performance.now() - t0);
         if (d.error) {
-          msg.textContent = '✗ ' + d.error + ' (' + ms + 'ms)';
+          setControlMessage(msg, '✗ ' + d.error + ' (' + ms + 'ms)');
           msg.style.color = 'var(--red)';
         } else if (!d.results || !d.results.length) {
-          msg.textContent = '⚠ No results returned (' + ms + 'ms)';
+          setControlMessage(msg, '⚠ No results returned (' + ms + 'ms)');
           msg.style.color = 'var(--red)';
         } else {
           var topTitle = (d.results[0].title || d.results[0].url || '').slice(0, 60);
-          msg.textContent = '✓ ' + d.results.length + ' result' + (d.results.length === 1 ? '' : 's') + ' · ' + ms + 'ms · top: ' + topTitle;
+          setControlMessage(msg, '✓ ' + d.results.length + ' result' + (d.results.length === 1 ? '' : 's') + ' · ' + ms + 'ms · top: ' + topTitle);
           msg.style.color = 'var(--fg)';
         }
       } catch (e) {
-        msg.textContent = '✗ Test failed: ' + (e && e.message ? e.message : e);
+        setControlMessage(msg, '✗ Test failed: ' + (e && e.message ? e.message : e));
         msg.style.color = 'var(--red)';
       } finally {
         if (wp) { try { wp.destroy(); } catch (_) {} }
@@ -1800,7 +1906,7 @@ var _SEARCH_PROVIDER_LOGOS = {
   google_pse:'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.35 11.1H12v3.2h5.35c-.5 2.4-2.55 4-5.35 4-3.25 0-5.9-2.65-5.9-5.9s2.65-5.9 5.9-5.9c1.55 0 2.95.55 4.05 1.55l2.4-2.4C16.85 4.05 14.55 3 12 3 7 3 3 7 3 12s4 9 9 9c5.2 0 8.65-3.65 8.65-8.8 0-.4-.05-.7-.3-1.1z"/></svg>',
   tavily:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 8.5l4 2.5v6l6 3.5 6-3.5v-6l4-2.5L12 2zm-4 9.5L12 14l4-2.5V16l-4 2.5L8 16v-4.5z"/></svg>',
   serper:    '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11 4a7 7 0 1 0 4.2 12.6l4.5 4.5 1.4-1.4-4.5-4.5A7 7 0 0 0 11 4zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm-1 2v2H8v2h2v2h2v-2h2V10h-2V8h-2z"/></svg>',
-  disabled:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+  disabled:  uiIcon("unavailable",16,{"role":"inherit"}),
 };
 
 /* ── Deep Research Model (AI tab) ── */
@@ -1974,15 +2080,13 @@ async function initAgentSettings() {
   var roundsInput = el('set-agentMaxRounds');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
-  if (!toolsInput) return;
-
-  try {
-    var res = await checkedFetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
-    if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
-    if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+  if (!toolsInput && !el('set-agentNativeSave')) return;
+  mountNativeSettingsReference({card:el('agent-native-settings-card'),openSettings:open});
+  await mountNativeAgentSettings({ el, checkedFetch, onLoaded: settings => {
+    if (toolsInput && settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
+    if (roundsInput && settings.agent_max_rounds != null) roundsInput.value = settings.agent_max_rounds;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
-  } catch (e) {}
+  }});
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
   // when blank/non-numeric. Mirrors the server-side validation.
@@ -2006,19 +2110,20 @@ async function initAgentSettings() {
         body: JSON.stringify(payload)
       });
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (rounds != null ? ' · ' + rounds + ' legacy rounds/message (not native agent steps)' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
+  if (!toolsInput) return;
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (curR != null ? ' · ' + curR + ' legacy rounds/message (not native agent steps)' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }
@@ -2030,6 +2135,14 @@ function initAppearance() {
   syncAppearanceCheckboxes();
   syncPrivacyCheckboxes();
   syncCopalNotesSettings();
+  const contextMenuToggle = modalEl.querySelector('#set-custom-context-menu');
+  if (contextMenuToggle) {
+    contextMenuToggle.checked = localStorage.getItem('odysseus-custom-context-menu') !== 'off';
+    contextMenuToggle.addEventListener('change', () => {
+      localStorage.setItem('odysseus-custom-context-menu', contextMenuToggle.checked ? 'on' : 'off');
+      window.dispatchEvent(new CustomEvent('odysseus-context-menu-changed'));
+    });
+  }
 
   modalEl.querySelectorAll('[data-ui-key]').forEach(function(chk) {
     chk.addEventListener('change', async function() {
@@ -2086,11 +2199,14 @@ function initAppearance() {
     control.addEventListener('change', function() {
       if (!_copalModule?.updateNotesSettings) return;
       const key = control.dataset.copalNotesSetting;
-      const value = control.type === 'checkbox' ? control.checked : control.value;
+      const value = control.type === 'checkbox'
+        ? (key === 'completedVisibility' ? (control.checked ? 'hide' : 'show') : control.checked)
+        : control.value;
       _copalModule.updateNotesSettings({ [key]:value });
       syncCopalNotesSettings();
     });
   });
+  initCopalAppearanceControls();
 
   // Per-section reset buttons (arrow-circle-back icon in each card's h2).
   // Removes only the keys belonging to this section from the persisted
@@ -2115,12 +2231,84 @@ function initAppearance() {
 
 function syncCopalNotesSettings() {
   if (!modalEl || !_copalModule?.getNotesSettings) return;
-  const settings = _copalModule.getNotesSettings();
+  let settings;
+  try { settings = _copalModule.getNotesSettings(); } catch (_) { return; }
   modalEl.querySelectorAll('[data-copal-notes-setting]').forEach(function(control) {
     const value = settings[control.dataset.copalNotesSetting];
-    if (control.type === 'checkbox') control.checked = value === true;
+    if (control.type === 'checkbox') control.checked = control.dataset.copalNotesSetting === 'completedVisibility' ? value === 'hide' : value === true;
     else if (value != null) control.value = String(value);
   });
+}
+
+function initCopalAppearanceControls() {
+  const entries = modalEl?.querySelector('#set-copal-navigation-entries');
+  const panels = modalEl?.querySelector('#set-copal-notes-panels');
+  const render = () => {
+    if (!entries || !_copalModule?.getAppearanceEntries || !_copalModule?.getEntryVisibility) return;
+    let visibility;
+    try { visibility = _copalModule.getEntryVisibility(); } catch (_) { visibility = null; }
+    entries.replaceChildren();
+    if (!visibility) {
+      const message = document.createElement('p'); message.textContent = 'Copal is still loading; retry Appearance.'; entries.append(message);
+      // Copal initializes its scoped appearance preference asynchronously.
+      // Keep the normal Appearance tab live when it is opened during that
+      // short window instead of requiring the user to close and reopen it.
+      if (_copalModule.whenReady && entries.dataset.copalReadyPending !== '1') {
+        entries.dataset.copalReadyPending = '1';
+        _copalModule.whenReady().then(() => {
+          delete entries.dataset.copalReadyPending;
+          _copalAppearanceRefresh?.();
+        }).catch(() => { delete entries.dataset.copalReadyPending; });
+      }
+      return;
+    }
+    for (const entry of _copalModule.getAppearanceEntries()) {
+      const input = document.createElement('input'); input.type = 'checkbox'; input.checked = visibility[entry.id] !== false; input.dataset.copalEntryId = entry.id;
+      input.addEventListener('change', async () => { try { await _copalModule.updateEntryVisibility(entry.id, input.checked); } catch (error) { input.checked = !input.checked; window.uiModule?.showToast?.(error.message); } });
+      const row = document.createElement('label'); row.className = 'vis-row'; row.append(document.createElement('span'), Object.assign(document.createElement('span'), { textContent: entry.label }), input, Object.assign(document.createElement('span'), { className: 'vis-switch' }));
+      entries.append(row);
+    }
+  };
+  modalEl?.querySelectorAll('[data-copal-entry-action]').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      if (button.dataset.copalEntryAction === 'show') await _copalModule.setAllEntryVisibility(true);
+      else if (button.dataset.copalEntryAction === 'hide') await _copalModule.setAllEntryVisibility(false);
+      else await _copalModule.resetEntryVisibility();
+      render();
+    } catch (error) { window.uiModule?.showToast?.(error.message); }
+  }));
+  const renderPanels = () => {
+    if (!panels || !_copalModule?.getNotesPanels) return;
+    panels.replaceChildren();
+    const customize = document.createElement('button'); customize.type = 'button'; customize.className = 'copal-btn'; customize.textContent = 'Customize Explorer…';
+    customize.addEventListener('click', () => { try { _copalModule.customizeExplorer(); } catch (error) { window.uiModule?.showToast?.(error.message); } });
+    panels.append(customize);
+    let panelItems;
+    try { panelItems = _copalModule.getNotesPanels(); } catch (_) {
+      const message = document.createElement('p');
+      message.className = 'admin-toggle-sub';
+      message.textContent = 'Copal is still loading; retry Appearance.';
+      panels.append(message);
+      return;
+    }
+    for (const item of panelItems) {
+      if (['files', 'search'].includes(item.id)) continue;
+      const row = document.createElement('div'); row.className = 'settings-row copal-panel-setting';
+      const label = document.createElement('span'); label.className = 'settings-label'; label.textContent = item.label;
+      const side = document.createElement('select'); side.className = 'settings-select'; side.innerHTML = '<option value="left">Left</option><option value="right">Right</option>'; side.value = item.side;
+      side.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { side: side.value }); renderPanels(); });
+      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = !item.hidden; visible.addEventListener('change', async () => { await _copalModule.updateNotesPanel(item.id, { hidden: !visible.checked }); renderPanels(); });
+      const up = document.createElement('button'); up.type = 'button'; up.className = 'copal-btn'; up.innerHTML = uiIcon('chevron-up', 14); up.setAttribute('aria-label', 'Move panel up'); up.disabled = item.hidden; up.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'up' }); renderPanels(); });
+      const down = document.createElement('button'); down.type = 'button'; down.className = 'copal-btn'; down.innerHTML = uiIcon('chevron-down', 14); down.setAttribute('aria-label', 'Move panel down'); down.disabled = item.hidden; down.addEventListener('click', async () => { await _copalModule.updateNotesPanel(item.id, { move: 'down' }); renderPanels(); });
+      row.append(label, side, visible, up, down); panels.append(row);
+    }
+  };
+  if (_copalAppearanceRefresh) {
+    _copalAppearanceRefresh();
+    return;
+  }
+  _copalAppearanceRefresh = () => { render(); renderPanels(); };
+  _copalAppearanceRefresh();
 }
 
 function syncAppearanceCheckboxes() {
@@ -2159,35 +2347,35 @@ const SHORTCUT_DEFAULTS = {
   open_compare:   '',
   open_cookbook:  '',
   open_research:  '',
-  open_gallery:   '',
   open_library:   '',
   open_memory:    '',
   open_notes:     '',
   open_tasks:     '',
   open_theme:     '',
+  open_usage:     '',
 };
 
 const SHORTCUT_ICONS = {
-  search:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>',
-  toggle_sidebar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
-  new_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
-  fav_session:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-  delete_session: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
-  cancel:         '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
-  tts:            '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>',
-  incognito:      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>',
-  settings:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-  focus_input:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
-  open_calendar:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>',
-  open_cookbook:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
-  open_research:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
-  open_gallery:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
-  open_library:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-  open_memory:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>',
-  open_notes:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg>',
-  open_tasks:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>',
-  open_theme:     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg>',
+  search:         uiIcon("search",14,{"role":"inherit"}),
+  toggle_sidebar: uiIcon("menu",14,{"role":"inherit"}),
+  new_session:    uiIcon("add",14,{"role":"inherit"}),
+  fav_session:    uiIcon("bookmark",14,{"role":"inherit"}),
+  delete_session: uiIcon("trash",14,{"role":"inherit"}),
+  cancel:         uiIcon("close",14,{"role":"inherit"}),
+  tts:            uiIcon("audio",14,{"role":"inherit"}),
+  incognito:      uiIcon("eye-off",14,{"role":"inherit"}),
+  settings:       uiIcon("settings",14,{"role":"inherit"}),
+  focus_input:    uiIcon("chat",14,{"role":"inherit"}),
+  open_calendar:  uiIcon("calendar",14,{"role":"inherit"}),
+  open_compare:   uiIcon("compare",14,{"role":"inherit"}),
+  open_cookbook:  uiIcon("cookbook",14,{"role":"inherit"}),
+  open_research:  uiIcon("research",14,{"role":"inherit"}),
+  open_library:   uiIcon("library",14,{"role":"inherit"}),
+  open_memory:    uiIcon("memory",14,{"role":"inherit"}),
+  open_notes:     uiIcon("code",14,{"role":"inherit"}),
+  open_tasks:     uiIcon("tasks",14,{"role":"inherit"}),
+  open_theme:     uiIcon("hue",14,{"role":"inherit"}),
+  open_usage:     uiIcon("usage",14,{"role":"inherit"}),
 };
 
 const SHORTCUT_LABELS = {
@@ -2205,19 +2393,19 @@ const SHORTCUT_LABELS = {
   open_compare:   'Open Compare',
   open_cookbook:  'Open Cookbook',
   open_research:  'Open Deep Research',
-  open_gallery:   'Open Gallery',
   open_library:   'Open Library',
   open_memory:    'Open Memory',
-  open_notes:     'Open Notes',
+  open_notes:     'Open Editor',
   open_tasks:     'Open Clanker Tasks',
   open_theme:     'Open Theme',
+  open_usage:     'Open Usage',
 };
 
 const SHORTCUT_CATEGORIES = [
   { name: 'Navigation', keys: ['search', 'toggle_sidebar', 'focus_input', 'settings'] },
   { name: 'Sessions', keys: ['new_session', 'fav_session', 'delete_session'] },
   { name: 'Tools', keys: ['incognito', 'tts', 'cancel'] },
-  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_gallery', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme'] },
+  { name: 'Open Tools', keys: ['open_calendar', 'open_compare', 'open_cookbook', 'open_research', 'open_library', 'open_memory', 'open_notes', 'open_tasks', 'open_theme', 'open_usage'] },
 ];
 
 function _formatKeyCaps(combo) {
@@ -2302,14 +2490,14 @@ async function initShortcuts() {
         row.dataset.action = action;
         const keyContent = combo ? _formatKeyCaps(combo) : '<span class="shortcut-unset">Set</span>';
         row.innerHTML = `
-          <span class="shortcut-label"><span class="shortcut-icon">${icon}</span>${esc(label)}${hasConflict ? '<span class="shortcut-warn" title="Duplicate shortcut">!</span>' : ''}</span>
+          <span class="shortcut-label"><span class="shortcut-icon">${icon}</span>${esc(label)}${hasConflict ? '<span class="shortcut-warn" title="Duplicate shortcut">' + uiIcon("warning", 12, { role:"inherit" }) + '</span>' : ''}</span>
           <div class="shortcut-controls">
             <span class="shortcut-hint" hidden></span>
             <button class="shortcut-key${combo ? '' : ' shortcut-key-unset'}" data-action="${action}" title="Click to rebind">${keyContent}</button>
             <button class="shortcut-action-btn ${isCustom ? 'is-reset' : ''}" data-action="${action}" title="${isCustom ? 'Reset to default' : 'Confirm'}" style="${isCustom ? '' : 'visibility:hidden'}">
               ${isCustom
-                ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
-                : '\u2713'}
+                ? uiIcon("restore",13,{"role":"inherit"})
+                : uiIcon('check', 13, { role:'inherit' })}
             </button>
           </div>
         `;
@@ -2349,7 +2537,7 @@ async function initShortcuts() {
     btn.classList.add('listening');
     btn.textContent = 'Press keys...';
     // Show confirm button
-    actionBtn.textContent = '\u2713';
+    setControlMessage(actionBtn, '\u2713');
     actionBtn.classList.remove('is-reset');
     actionBtn.style.visibility = 'visible';
     actionBtn.title = 'Confirm';
@@ -2381,7 +2569,7 @@ async function initShortcuts() {
         btn.innerHTML = _formatKeyCaps(keybinds[action]);
         const isCustom = keybinds[action] !== SHORTCUT_DEFAULTS[action];
         if (isCustom) {
-          actionBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+          actionBtn.innerHTML = uiIcon("restore",13,{"role":"inherit"});
           actionBtn.classList.add('is-reset');
           actionBtn.title = 'Reset to default';
         } else {
@@ -2405,7 +2593,7 @@ async function initShortcuts() {
       pendingCombo = combo;
       btn.innerHTML = _formatKeyCaps(combo);
       // Now that a combo is captured, prompt to commit with Enter.
-      if (hintEl) hintEl.textContent = '\u21B5 Enter to save';
+      if (hintEl) setUiIconText(hintEl, 'enter', 'Enter to save', 11);
     }
 
     function cleanup() {
@@ -2449,6 +2637,24 @@ async function initShortcuts() {
    INIT & REFRESH
    ═══════════════════════════════════════════ */
 function initAccount() {
+  const emptyPasswordRow = el('settings-pw-empty-row');
+  const emptyPasswordToggle = el('settings-pw-empty');
+  const passwordNew = el('settings-pw-new');
+  const passwordConfirm = el('settings-pw-confirm');
+
+  const syncEmptyPasswordChoice = () => {
+    const useEmpty = !!emptyPasswordToggle?.checked;
+    if (passwordNew) {
+      passwordNew.disabled = useEmpty;
+      if (useEmpty) passwordNew.value = '';
+    }
+    if (passwordConfirm) {
+      passwordConfirm.disabled = useEmpty;
+      if (useEmpty) passwordConfirm.value = '';
+    }
+  };
+  emptyPasswordToggle?.addEventListener('change', syncEmptyPasswordChoice);
+
   // Populate user info
   fetch('/api/auth/status', { credentials: 'same-origin' })
     .then(r => r.json())
@@ -2458,6 +2664,11 @@ function initAccount() {
       const avatarEl = el('settings-account-avatar');
       if (nameEl) nameEl.textContent = d.username || 'Unknown';
       if (roleEl) roleEl.textContent = d.is_admin ? 'Admin' : 'User';
+      if (emptyPasswordRow) emptyPasswordRow.style.display = d.is_admin ? 'flex' : 'none';
+      if (!d.is_admin && emptyPasswordToggle) {
+        emptyPasswordToggle.checked = false;
+        syncEmptyPasswordChoice();
+      }
       if (avatarEl) {
         const initial = (d.username || '?')[0].toUpperCase();
         avatarEl.textContent = initial;
@@ -2480,12 +2691,14 @@ function initAccount() {
   if (saveBtn) {
     saveBtn.addEventListener('click', async () => {
       const cur = el('settings-pw-current').value;
-      const nw = el('settings-pw-new').value;
-      const conf = el('settings-pw-confirm').value;
+      const useEmpty = !!emptyPasswordToggle?.checked
+        && emptyPasswordRow?.style.display !== 'none';
+      const nw = useEmpty ? '' : el('settings-pw-new').value;
+      const conf = useEmpty ? '' : el('settings-pw-confirm').value;
       msgEl.style.color = '';
-      if (!cur || !nw) { msgEl.textContent = 'Fill in all fields'; msgEl.style.color = 'var(--red)'; return; }
-      if (nw.length < _authPolicy.password_min_length) { msgEl.textContent = `Min ${_authPolicy.password_min_length} characters`; msgEl.style.color = 'var(--red)'; return; }
-      if (nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && !nw) { msgEl.textContent = 'Enter a new password'; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && nw.length < _authPolicy.password_min_length) { msgEl.textContent = `Min ${_authPolicy.password_min_length} characters`; msgEl.style.color = 'var(--red)'; return; }
+      if (!useEmpty && nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
       saveBtn.disabled = true;
       try {
         const res = await checkedFetch('/api/auth/change-password', {
@@ -2495,10 +2708,12 @@ function initAccount() {
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'Failed'); }
         msgEl.style.color = 'var(--green)';
-        msgEl.textContent = 'Password updated';
+        msgEl.textContent = useEmpty ? 'Password set to empty' : 'Password updated';
         el('settings-pw-current').value = '';
         el('settings-pw-new').value = '';
         el('settings-pw-confirm').value = '';
+        if (emptyPasswordToggle) emptyPasswordToggle.checked = false;
+        syncEmptyPasswordChoice();
       } catch (e) {
         msgEl.style.color = 'var(--red)';
         msgEl.textContent = e.message;
@@ -2519,7 +2734,7 @@ function initAccount() {
           // 2FA is ON — show disable option
           tfaContent.innerHTML = `
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
-              <span style="color:var(--color-save-green, #4caf50);font-size:12px;font-weight:600;">&#x2713; Enabled</span>
+              <span style="color:var(--color-save-green, #4caf50);font-size:12px;font-weight:600;">${uiIcon("check", 12, { role:"inherit" })} Enabled</span>
               <span style="font-size:11px;opacity:0.5;">Authenticator app required on login</span>
             </div>
             <input id="tfa-disable-pw" type="password" placeholder="Enter password to disable" autocomplete="current-password" style="padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:12px;width:100%;box-sizing:border-box;margin-bottom:6px;">
@@ -2530,7 +2745,6 @@ function initAccount() {
           el('tfa-disable-btn').addEventListener('click', async () => {
             const pw = el('tfa-disable-pw').value;
             const msg = el('tfa-msg');
-            if (!pw) { msg.textContent = 'Enter your password'; msg.style.color = 'var(--red)'; return; }
             try {
               const r = await checkedFetch('/api/auth/2fa/disable', {
                 method: 'POST', credentials: 'same-origin',
@@ -2588,7 +2802,7 @@ function initAccount() {
                   // Show backup codes
                   const codes = result.backup_codes || [];
                   tfaContent.innerHTML = `
-                    <div style="color:var(--color-save-green, #4caf50);font-size:13px;font-weight:600;margin-bottom:8px;">&#x2713; 2FA Enabled!</div>
+                    <div style="color:var(--color-save-green, #4caf50);font-size:13px;font-weight:600;margin-bottom:8px;">${uiIcon("check", 12, { role:"inherit" })} 2FA Enabled!</div>
                     <div style="font-size:12px;opacity:0.7;margin-bottom:8px;">Save these backup codes somewhere safe. Each can be used once if you lose your authenticator:</div>
                     <div style="font-family:monospace;font-size:12px;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;columns:2;column-gap:16px;margin-bottom:8px;">${codes.map(c => '<div style="margin-bottom:2px;">' + c + '</div>').join('')}</div>
                     <button class="admin-btn-add" id="tfa-done-btn">Done</button>`;
@@ -2614,7 +2828,7 @@ function initAccount() {
       try { await checkedFetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
       // SECURITY: wipe unscoped client-side state on logout so the next user
       // doesn't inherit the previous account's session id, last-used model,
-      // draft chat input, or cached lists. Owner-namespaced Copal preferences
+      // draft chat input, or cached lists. Owner-namespaced browser preferences
       // remain available when their account signs in again.
       // Keep "odysseus-last-user" so the login form remembers the username
       // (if "Remember me" was on). Without this the chat composer pre-loaded
@@ -2625,8 +2839,8 @@ function initAccount() {
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
-          if (k && !_keepKeys.has(k) && !scopedCopalState) _toRemove.push(k);
+          const scopedOwnerState = k?.includes(':scope:');
+          if (k && !_keepKeys.has(k) && !scopedOwnerState) _toRemove.push(k);
         }
         _toRemove.forEach(k => localStorage.removeItem(k));
         sessionStorage.clear();
@@ -2647,10 +2861,16 @@ function initAll() {
     }
   }).observe(modalEl, { childList: true, subtree: true });
   initTabs();
-  mimoProviders.init({
+  initHelpLinks();
+  initSettingsFinder();
+  providerControl.init({
     onCatalogChanged: async () => {
       if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
-      await refreshAiModelEndpoints();
+      // The AI model cards are lazy. Until somebody opens that tab there are
+      // no controls to refresh, and fetching their endpoint projection here
+      // would duplicate providerControl's own connection/model reload.
+      if (_aiSettingsInitialized) await refreshAiModelEndpoints();
+      window.sessionModule?.updateModelPicker?.();
     },
   });
   initDrag();
@@ -2658,19 +2878,13 @@ function initAll() {
   initOpenPromptModalLink();
   initOpacityToggle();
   initialized = true;
-  initDefaultChat();
-  initTeacherModel();
-  initUtilityModel();
-  initImageSettings();
-  initVisionSettings();
-  initTtsSettings();
-  initSttSettings();
   if (window._isAdmin) {
     initSearchSettings();
-    initResearchSettings();
     initResearchSearchSettings();
-    initAgentSettings();
   }
+  // Agent settings are owner-scoped runtime policy, so regular authenticated
+  // users must receive the same load/save/readback path as administrators.
+  window.__agentSettingsReady = initAgentSettings();
   initAppearance();
   initShortcuts();
   initAccount();
@@ -2679,6 +2893,33 @@ function initAll() {
   initEmailAccountsSettings();
   initReminderSettings();
   initUnifiedIntegrations();
+}
+
+function initAiSettingsOnce() {
+  if (_aiSettingsInitialized) return false;
+  _aiSettingsInitialized = true;
+  // These initializers share _fetchModelEndpoints' in-flight request. Keeping
+  // them behind the AI tab means opening Add Models performs only the two
+  // providerControl core reads it actually needs.
+  initDefaultChat();
+  initTeacherModel();
+  initUtilityModel();
+  initMemoryModel();
+  initImageSettings();
+  initVisionSettings();
+  initTtsSettings();
+  initSttSettings();
+  if (window._isAdmin) initResearchSettings();
+  return true;
+}
+
+function activateAiSettings() {
+  const initializedNow = initAiSettingsOnce();
+  // Each initializer populates itself from the shared first snapshot. On a
+  // later visit retain the previous behavior of refreshing every registered
+  // AI model picker from the provider API.
+  if (!initializedNow) refreshAiModelEndpoints();
+  loadDefaultPersonaPanel();
 }
 
 function notifyIntegrationsChanged() {
@@ -2749,11 +2990,16 @@ async function initReminderSettings() {
   // what the Integrations panel manages. Treat the email channel as
   // configured if there's at least one account with SMTP set.
   let emailAccounts = [];
+  const smtpAccountReady = (account) => !!(
+    account.smtp_host
+    && account.smtp_user
+    && (account.has_smtp_password || account.oauth_provider === 'google')
+  );
   try {
     const res = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
     if (res.ok) {
       const d = await res.json();
-      emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+      emailAccounts = (d.accounts || []).filter(smtpAccountReady);
     }
   } catch (_) {}
   let smtpConfigured = emailAccounts.length > 0;
@@ -2816,6 +3062,184 @@ async function initReminderSettings() {
   const webhookIntgSel = el('set-reminder-webhook-intg');
   const webhookTemplateRow = el('set-reminder-webhook-template-row');
   const webhookTemplateIn = el('set-reminder-webhook-template');
+  const endpointsIn = el('set-reminder-endpoints');
+  const endpointsMsg = el('set-reminder-endpoints-msg');
+  const endpointsList = el('set-reminder-endpoints-list');
+  const addEndpointBtn = el('set-reminder-add-endpoint');
+  let endpointDraft = [];
+
+  function endpointValue(row) {
+    const channel = String(row.channel || 'browser');
+    if (channel === 'email') return row.email_to || '';
+    if (channel === 'ntfy') return row.ntfy_topic || '';
+    if (channel === 'webhook') return row.webhook_integration_id || '';
+    return '';
+  }
+  const ntfyIntegrations = () => allIntegrations.filter(i =>
+    String(i.preset || i.name || '').toLowerCase() === 'ntfy'
+  );
+  function renderReminderEndpoints() {
+    if (!endpointsList) return;
+    endpointsList.innerHTML = '';
+    endpointDraft.forEach((row, index) => {
+      const item = document.createElement('div');
+      item.className = 'reminder-endpoint-row';
+      item.dataset.index = String(index);
+      const channel = document.createElement('select');
+      channel.className = 'settings-select reminder-endpoint-channel';
+      channel.innerHTML = '<option value="browser">Browser</option><option value="email">Email</option><option value="ntfy">ntfy</option><option value="webhook">Webhook</option>';
+      channel.value = row.channel || 'browser';
+      const value = document.createElement('input');
+      value.className = 'settings-select reminder-endpoint-value';
+      value.type = channel.value === 'email' ? 'email' : 'text';
+      value.placeholder = channel.value === 'email' ? 'you@example.com' : channel.value === 'ntfy' ? 'topic' : channel.value === 'webhook' ? 'Integration' : 'In-app browser notification';
+      value.value = endpointValue(row);
+      value.disabled = channel.value === 'browser';
+      value.style.display = channel.value === 'email' || channel.value === 'ntfy' ? '' : 'none';
+      const account = document.createElement('select');
+      account.className = 'settings-select reminder-endpoint-account';
+      account.innerHTML = '<option value="">Default account</option>' + emailAccounts.map(a => `<option value="${esc(a.id)}">${esc(a.name || a.from_address || a.imap_user || 'Email account')}</option>`).join('');
+      account.value = row.email_account_id || '';
+      account.style.display = channel.value === 'email' ? '' : 'none';
+      const ntfySelect = document.createElement('select');
+      ntfySelect.className = 'settings-select reminder-endpoint-ntfy-integration';
+      const ntfyOptions = ntfyIntegrations();
+      ntfySelect.innerHTML = '<option value="">Default ntfy server</option>' + ntfyOptions.map(i => `<option value="${esc(i.id)}">${esc(i.name || i.id)}</option>`).join('');
+      if (row.ntfy_integration_id && !ntfyOptions.some(i => i.id === row.ntfy_integration_id)) {
+        ntfySelect.insertAdjacentHTML('beforeend', `<option value="${esc(row.ntfy_integration_id)}">Unavailable integration</option>`);
+      }
+      ntfySelect.value = row.ntfy_integration_id || '';
+      ntfySelect.style.display = channel.value === 'ntfy' ? '' : 'none';
+      const webhookSelect = document.createElement('select');
+      webhookSelect.className = 'settings-select reminder-endpoint-webhook-integration';
+      webhookSelect.innerHTML = allIntegrations.length
+        ? '<option value="">Select integration</option>' + allIntegrations.map(i => `<option value="${esc(i.id)}">${esc(i.name || i.id)}</option>`).join('')
+        : '<option value="">No integrations configured</option>';
+      if (row.webhook_integration_id && !allIntegrations.some(i => i.id === row.webhook_integration_id)) {
+        webhookSelect.insertAdjacentHTML('beforeend', `<option value="${esc(row.webhook_integration_id)}">Unavailable integration</option>`);
+      }
+      webhookSelect.value = row.webhook_integration_id || '';
+      webhookSelect.style.display = channel.value === 'webhook' ? '' : 'none';
+      const advanced = document.createElement('details');
+      advanced.className = 'reminder-endpoint-advanced';
+      advanced.style.display = channel.value === 'webhook' ? '' : 'none';
+      const advancedSummary = document.createElement('summary');
+      advancedSummary.textContent = 'Advanced payload template (optional)';
+      const payload = document.createElement('textarea');
+      payload.className = 'settings-select reminder-endpoint-payload';
+      payload.rows = 2;
+      payload.placeholder = '{"content":"{{title}}: {{message}}"}';
+      payload.value = row.webhook_payload_template || '';
+      payload.setAttribute('aria-label', 'Optional webhook payload template');
+      advanced.append(advancedSummary, payload);
+      const enabledLabel = document.createElement('label');
+      enabledLabel.className = 'reminder-endpoint-enabled';
+      enabledLabel.innerHTML = '<input type="checkbox"> Enabled';
+      enabledLabel.querySelector('input').checked = row.enabled !== false;
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'admin-btn-sm reminder-endpoint-remove';
+      remove.textContent = 'Remove';
+      const moveUp = document.createElement('button');
+      moveUp.type = 'button'; moveUp.className = 'admin-btn-sm reminder-endpoint-up';
+      moveUp.innerHTML = uiIcon('chevron-up', 14); moveUp.setAttribute('aria-label', 'Move endpoint up'); moveUp.title = 'Move endpoint up'; moveUp.disabled = index === 0;
+      const moveDown = document.createElement('button');
+      moveDown.type = 'button'; moveDown.className = 'admin-btn-sm reminder-endpoint-down';
+      moveDown.innerHTML = uiIcon('chevron-down', 14); moveDown.setAttribute('aria-label', 'Move endpoint down'); moveDown.title = 'Move endpoint down'; moveDown.disabled = index === endpointDraft.length - 1;
+      const test = document.createElement('button');
+      test.type = 'button'; test.className = 'admin-btn-sm reminder-endpoint-test';
+      test.textContent = 'Test';
+      const status = document.createElement('span');
+      status.className = 'reminder-endpoint-status';
+      status.setAttribute('role', 'status');
+      item.append(channel, value, account, ntfySelect, webhookSelect, advanced, enabledLabel, moveUp, moveDown, test, remove, status);
+      const sync = () => {
+        const next = { ...endpointDraft[index], channel: channel.value, enabled: enabledLabel.querySelector('input').checked };
+        if (channel.value === 'email') next.email_to = value.value.trim();
+        if (channel.value === 'email') next.email_account_id = account.value || '';
+        if (channel.value === 'ntfy') next.ntfy_topic = value.value.trim();
+        if (channel.value === 'ntfy') next.ntfy_integration_id = ntfySelect.value || '';
+        if (channel.value === 'webhook') next.webhook_integration_id = webhookSelect.value || '';
+        if (channel.value === 'webhook') next.webhook_payload_template = payload.value.trim();
+        endpointDraft[index] = next;
+        value.type = channel.value === 'email' ? 'email' : 'text';
+        value.disabled = channel.value === 'browser';
+        value.style.display = channel.value === 'email' || channel.value === 'ntfy' ? '' : 'none';
+        account.style.display = channel.value === 'email' ? '' : 'none';
+        ntfySelect.style.display = channel.value === 'ntfy' ? '' : 'none';
+        webhookSelect.style.display = channel.value === 'webhook' ? '' : 'none';
+        advanced.style.display = channel.value === 'webhook' ? '' : 'none';
+        value.placeholder = channel.value === 'email' ? 'you@example.com' : channel.value === 'ntfy' ? 'topic' : channel.value === 'webhook' ? 'Integration' : 'In-app browser notification';
+        scheduleEndpointSave(status);
+      };
+      channel.addEventListener('change', sync);
+      value.addEventListener('input', sync);
+      account.addEventListener('change', sync);
+      ntfySelect.addEventListener('change', sync);
+      webhookSelect.addEventListener('change', sync);
+      payload.addEventListener('input', sync);
+      enabledLabel.querySelector('input').addEventListener('change', sync);
+      moveUp.addEventListener('click', () => { if (index > 0) { [endpointDraft[index - 1], endpointDraft[index]] = [endpointDraft[index], endpointDraft[index - 1]]; renderReminderEndpoints(); scheduleEndpointSave(); } });
+      moveDown.addEventListener('click', () => { if (index < endpointDraft.length - 1) { [endpointDraft[index + 1], endpointDraft[index]] = [endpointDraft[index], endpointDraft[index + 1]]; renderReminderEndpoints(); scheduleEndpointSave(); } });
+      remove.addEventListener('click', () => { endpointDraft.splice(index, 1); renderReminderEndpoints(); scheduleEndpointSave(); });
+      test.addEventListener('click', async () => {
+        test.disabled = true;
+        status.textContent = 'Testing…';
+        try {
+          const personaSel = el('set-reminder-llm-persona');
+          const draft = { ...endpointDraft[index], channel: channel.value };
+          const testBody = {
+            note_id: 'test-' + Date.now(), title: 'Test Reminder',
+            body: 'This is a test reminder to verify this endpoint.',
+            channel: draft.channel, llm_synthesis: !!llmToggle.checked,
+            llm_persona: personaSel?.value || '',
+            ...(draft.channel === 'email' ? { email_to: value.value.trim(), email_account_id: account.value || '' } : {}),
+            ...(draft.channel === 'ntfy' ? { ntfy_topic: value.value.trim(), ntfy_integration_id: ntfySelect.value || '' } : {}),
+            ...(draft.channel === 'webhook' ? { webhook_integration_id: webhookSelect.value || '', webhook_payload_template: payload.value.trim() } : {}),
+          };
+          const response = await checkedFetch('/api/notes/fire-reminder', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(testBody) });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || 'Test failed');
+          const sent = draft.channel === 'email' ? data.email_sent : draft.channel === 'ntfy' ? data.ntfy_sent : draft.channel === 'webhook' ? data.webhook_sent : true;
+          if (!sent) throw new Error(data.email_error || data.ntfy_error || data.webhook_error || 'Endpoint did not report delivery');
+          status.textContent = 'Test sent'; status.style.color = 'var(--green,#50fa7b)';
+        } catch (error) {
+          status.textContent = error?.message || 'Test failed'; status.style.color = 'var(--red)';
+        } finally { test.disabled = false; }
+      });
+      endpointsList.append(item);
+    });
+    if (endpointsIn) endpointsIn.value = JSON.stringify(endpointDraft);
+  }
+  let endpointSaveTimer;
+  function scheduleEndpointSave(statusEl) {
+    clearTimeout(endpointSaveTimer);
+    if (endpointsMsg) { endpointsMsg.textContent = 'Saving…'; endpointsMsg.style.color = 'var(--fg)'; }
+    endpointSaveTimer = setTimeout(async () => {
+      const submitted = JSON.stringify(endpointDraft);
+      try {
+        const response = await save({ reminder_endpoints: { version: 1, endpoints: endpointDraft } });
+        // The server assigns deterministic IDs during migration. Adopt them
+        // only when no newer edit landed while this save was in flight.
+        if (JSON.stringify(endpointDraft) === submitted) {
+          const saved = await response.clone().json().catch(() => null);
+          const rows = saved?.reminder_endpoints?.endpoints;
+          if (Array.isArray(rows)) {
+            endpointDraft = rows.map(row => ({ ...row }));
+            renderReminderEndpoints();
+          }
+        }
+        if (endpointsMsg) { endpointsMsg.textContent = 'Saved'; endpointsMsg.style.color = 'var(--green,#50fa7b)'; }
+        if (statusEl) statusEl.textContent = '';
+      } catch (error) {
+        if (statusEl) statusEl.textContent = 'Save failed';
+      }
+    }, 450);
+  }
+  addEndpointBtn?.addEventListener('click', () => {
+    endpointDraft.push({ channel: 'browser', enabled: true });
+    renderReminderEndpoints();
+    scheduleEndpointSave();
+  });
 
   function populateReminderEmailAccounts(selectedId = '') {
     if (!emailAcctSel) return;
@@ -2857,7 +3281,7 @@ async function initReminderSettings() {
       const res = await checkedFetch('/api/email/accounts', { credentials: 'same-origin' });
       if (res.ok) {
         const d = await res.json();
-        emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+        emailAccounts = (d.accounts || []).filter(smtpAccountReady);
       }
     } catch (_) {}
     smtpConfigured = emailAccounts.length > 0;
@@ -2911,7 +3335,7 @@ async function initReminderSettings() {
   // regardless of channel). The hint should make that clear so
   // users don't think they have to choose between channels.
   const CHANNEL_HINTS = {
-    browser: 'Reminders appear as browser notifications inside Odysseus.',
+    browser: 'Reminders appear as browser notifications inside Open Clank.',
     email: 'Reminders are emailed and shown as a browser notification.',
     ntfy: 'Reminders are pushed via ntfy AND shown as a browser notification.',
     webhook: 'Reminders are POSTed to the selected integration AND shown as a browser notification. Use {{title}} and {{message}} in the payload template.',
@@ -2987,6 +3411,18 @@ async function initReminderSettings() {
         if (tpl) { webhookTemplateIn.value = tpl; save({ reminder_webhook_payload_template: tpl }); }
       }
     }
+    if (endpointsIn) {
+      const saved = s.reminder_endpoints;
+      endpointDraft = Array.isArray(saved)
+        ? saved.map(row => ({ ...row }))
+        : (saved && Array.isArray(saved.endpoints) ? saved.endpoints.map(row => ({ ...row })) : []);
+      renderReminderEndpoints();
+      const invalid = saved && Array.isArray(saved.errors) ? saved.errors : [];
+      if (invalid.length && endpointsMsg) {
+        endpointsMsg.textContent = invalid.join('; ');
+        endpointsMsg.style.color = 'var(--red)';
+      }
+    }
     // Restore the previously-picked email account (if any), otherwise
     // default to the account flagged is_default in the integrations
     // list. Falls through to the first option if neither exists.
@@ -3003,13 +3439,19 @@ async function initReminderSettings() {
 
   async function save(patch) {
     try {
-      await checkedFetch('/api/auth/settings', {
+      const response = await checkedFetch('/api/auth/settings', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-    } catch (e) { console.warn('Failed to save reminder settings', e); }
+      if (!response.ok) {
+        let detail = 'Settings save failed';
+        try { const payload = await response.json(); detail = payload.detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      return response;
+    } catch (e) { console.warn('Failed to save reminder settings', e); throw e; }
   }
 
   channelSel.addEventListener('change', () => {
@@ -3110,6 +3552,13 @@ async function initReminderSettings() {
               webhook_integration_id: webhookIntgSel?.value || '',
               webhook_payload_template: webhookTemplateIn?.value.trim() || '',
             } : {}),
+            ...(channelSel.value === 'email' ? {
+              email_to: emailToIn?.value.trim() || '',
+              email_account_id: emailAcctSel?.value || '',
+            } : {}),
+            ...(channelSel.value === 'ntfy' ? {
+              ntfy_topic: ntfyTopicIn?.value.trim() || '',
+            } : {}),
           }),
         });
         const data = await res.json();
@@ -3153,6 +3602,17 @@ async function initReminderSettings() {
 async function initEmailAccountsSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
+
+  el('set-email-open-library-settings')?.addEventListener('click', async () => {
+    try {
+      const mod = await import('./emailLibrary.js?v=20260722emailfastindex1');
+      if (typeof mod.openEmailLibrarySettings === 'function') {
+        await mod.openEmailLibrarySettings();
+      }
+    } catch (e) {
+      console.warn('Failed to open Email settings page', e);
+    }
+  });
   const manageBtn = el('set-email-open-integrations');
   if (manageBtn && manageBtn.dataset.bound !== '1') {
     manageBtn.dataset.bound = '1';
@@ -3268,7 +3728,7 @@ async function initEmailAccountsSettings() {
         <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="eaf-display-name" class="settings-input" placeholder="Your Name" value="${esc(a.display_name || '')}"></div>
         <div id="eaf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
           <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
-          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? uiIcon("check", 12, { role:"inherit" }) + "Connected via Google OAuth" : 'Not connected — click below to authorize'}</div>
           <button type="button" id="eaf-oauth-btn" class="admin-btn-add" style="font-size:11px">${a.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
         </div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:6px 0 2px">IMAP (Receiving)</div>
@@ -3286,12 +3746,12 @@ async function initEmailAccountsSettings() {
         <div class="settings-row eaf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.')}</label><input id="eaf-smtp-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_smtp_password ? '(unchanged)' : ''}"></div>
         <div class="settings-row" style="margin-top:10px;align-items:center;">
           <button class="admin-btn-add" id="eaf-save" style="background:var(--red);border-color:var(--red);color:#fff;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            ${uiIcon("check",11,{"role":"inherit"})}
             ${isEdit ? 'Save' : 'Create'}
           </button>
           <span id="eaf-msg" style="font-size:11px;flex:1;margin-left:8px;"></span>
           <button class="admin-btn-add" id="eaf-cancel" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;position:relative;top:1px;margin-left:auto;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            ${uiIcon("close",11,{"role":"inherit"})}
             Cancel
           </button>
         </div>
@@ -3311,7 +3771,7 @@ async function initEmailAccountsSettings() {
     const eafProviderNotes = {
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Open Clank does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
       },
     };
     const eafNoteEl = el('eaf-provider-note');
@@ -3443,14 +3903,21 @@ async function initEmailSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
 
-  const styleKey = 'odysseus-email-writing-style';
+  const styleKey = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `odysseus-email-writing-style:${account}` : 'odysseus-email-writing-style';
+  };
   const styleEl = el('set-email-style');
+  const emailAccountSuffix = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `?account_id=${encodeURIComponent(account)}` : '';
+  };
 
   // The account/CardDAV config endpoints can be slow when remote mail servers
   // are cold. Populate the Writing Style box independently so saved prose does
   // not appear seconds after the panel opens.
   try {
-    const cachedStyle = localStorage.getItem(styleKey);
+    const cachedStyle = localStorage.getItem(styleKey());
     if (styleEl && cachedStyle !== null && !styleEl.value) styleEl.value = cachedStyle;
   } catch (_) {}
 
@@ -3460,7 +3927,7 @@ async function initEmailSettings() {
       const data = await res.json();
       const style = data.style || '';
       if (styleEl) styleEl.value = style;
-      try { localStorage.setItem(styleKey, style); } catch (_) {}
+      try { localStorage.setItem(styleKey(), style); } catch (_) {}
     } catch (_) {}
   };
   loadWritingStyle();
@@ -3513,7 +3980,7 @@ async function initEmailSettings() {
         body: JSON.stringify(data),
       });
       const result = await res.json();
-      if (msg) msg.textContent = result.success ? '✓ Saved' : (result.error || 'Failed');
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : (result.error || 'Failed'));
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -3537,7 +4004,7 @@ async function initEmailSettings() {
         body: JSON.stringify(data),
       });
       const result = await res.json();
-      if (msg) msg.textContent = result.success ? '✓ Saved' : (result.error || 'Failed');
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : (result.error || 'Failed'));
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -3580,8 +4047,8 @@ async function initEmailSettings() {
       const data = await res.json();
       if (data.success && data.style) {
         if (styleEl) styleEl.value = data.style;
-        try { localStorage.setItem(styleKey, data.style); } catch (_) {}
-        if (msg) msg.textContent = '✓ Style extracted';
+        try { localStorage.setItem(styleKey(), data.style); } catch (_) {}
+        if (msg) setControlMessage(msg, '✓ Style extracted');
       } else {
         if (msg) msg.textContent = data.error || 'Failed';
       }
@@ -3607,9 +4074,9 @@ async function initEmailSettings() {
       });
       const result = await res.json();
       if (result.success) {
-        try { localStorage.setItem(styleKey, style); } catch (_) {}
+        try { localStorage.setItem(styleKey(), style); } catch (_) {}
       }
-      if (msg) msg.textContent = result.success ? '✓ Saved' : 'Failed';
+      if (msg) setControlMessage(msg, result.success ? '✓ Saved' : 'Failed');
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
       if (msg) msg.textContent = 'Failed';
@@ -3825,15 +4292,15 @@ async function initIntegrations() {
 /* ══ Unified Integrations ══ */
 
 const INTG_TYPES = {
-  api:     { label: 'API',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>' },
-  caldav:  { label: 'CalDAV',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>' },
-  contacts: { label: 'Contacts', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
-  carddav: { label: 'CardDAV', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
-  email:   { label: 'Email',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
-  mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
+  api:     { label: 'API',     icon: uiIcon("link",14,{"role":"inherit"}) },
+  caldav:  { label: 'CalDAV',  icon: uiIcon("calendar",14,{"role":"inherit"}) },
+  contacts: { label: 'Contacts', icon: uiIcon("contact",14,{"role":"inherit"}) },
+  carddav: { label: 'CardDAV', icon: uiIcon("contact",14,{"role":"inherit"}) },
+  email:   { label: 'Email',   icon: uiIcon("email",14,{"role":"inherit"}) },
+  mcp:     { label: 'MCP',     icon: uiIcon("model",14,{"role":"inherit"}) },
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
-  vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
+  vault:   { label: 'Vault',   icon: uiIcon("lock",14,{"role":"inherit"}) },
 };
 
 // Config shared by the Codex Agent and Claude Agent forms. Both use the same
@@ -4014,7 +4481,7 @@ async function initUnifiedIntegrations() {
       </div>
       ${statusDot}
       <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" data-intg-name="${(item.name || '').replace(/"/g, '&quot;')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        ${uiIcon("trash",13,{"role":"inherit"})}
       </button>
     </div>`;
   }
@@ -4067,7 +4534,7 @@ async function initUnifiedIntegrations() {
             await checkedFetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carddav_url: '', carddav_username: '', carddav_password: '' }) });
           }
           else if (type === 'email') await checkedFetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'mcp') await checkedFetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'mcp') { await checkedFetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' }); void refreshReadyNativeCatalog(); }
           else if (type === 'codex' || type === 'claude') await checkedFetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await checkedFetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
@@ -4118,7 +4585,7 @@ async function initUnifiedIntegrations() {
     // Letter-in-brand-color logo for each API preset; outline plug icon for
     // "Custom (no preset)". Matches the email-provider dropdown pattern.
     const _apiLetter = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
-    const _apiCustomIco = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+    const _apiCustomIco = uiIcon("link",16,{"role":"inherit","style":"flex-shrink:0;opacity:0.7"});
     const API_PRESET_LOGO = {
       miniflux:        _apiLetter('M', '#214c87'),
       gitea:           _apiLetter('G', '#609926'),
@@ -4138,7 +4605,7 @@ async function initUnifiedIntegrations() {
       .map(([k, label]) => `<button type="button" class="ufapi-option" data-value="${esc(k)}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;">${_apiIconFor(k)}<span>${esc(label)}</span></button>`).join('');
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>API Integration</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("link",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}API Integration</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">Preset</label>
             <div style="position:relative;flex:1;min-width:0;">
@@ -4229,7 +4696,7 @@ async function initUnifiedIntegrations() {
       if (ntfyHint) {
         ntfyHint.style.display = isNtfy ? 'block' : 'none';
         if (isNtfy) {
-          ntfyHint.innerHTML = 'Enter the ntfy server URL Odysseus can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
+          ntfyHint.innerHTML = 'Enter the ntfy server URL Open Clank can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
         }
       }
       if (url) {
@@ -4298,7 +4765,7 @@ async function initUnifiedIntegrations() {
     const isNew = !editId || editId === 'new';
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${isNew ? 'Add CalDAV Calendar' : 'Edit CalDAV Calendar'}</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("calendar",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}${isNew ? 'Add CalDAV Calendar' : 'Edit CalDAV Calendar'}</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">Label</label><input id="uf-caldav-label" class="settings-input" placeholder="e.g. Work, Personal"></div>
           <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-caldav-url" class="settings-input" placeholder="https://www.google.com/calendar/dav/you@gmail.com/user/"></div>
@@ -4408,7 +4875,7 @@ async function initUnifiedIntegrations() {
   async function showCardDavForm() {
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Contacts (CardDAV)</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;">${uiIcon("contact",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}Contacts (CardDAV)</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">URL</label><input id="uf-carddav-url" class="settings-input" placeholder="http://localhost:5232/user/contacts/"></div>
           <div class="settings-row"><label class="settings-label">Username</label><input id="uf-carddav-user" class="settings-input"></div>
@@ -4416,11 +4883,11 @@ async function initUnifiedIntegrations() {
           <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
             <span id="uf-carddav-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-carddav-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              ${uiIcon("check",11,{"role":"inherit"})}
               Save
             </button>
             <button class="admin-btn-add" id="uf-carddav-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
           </div>
@@ -4428,7 +4895,7 @@ async function initUnifiedIntegrations() {
       </div>
       <div class="admin-card contacts-manager" style="margin-top:8px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <h2 style="font-size:13px;margin:0;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
+          <h2 style="font-size:13px;margin:0;display:flex;align-items:center;gap:6px;">${uiIcon("download",14,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
           <button class="admin-btn-sm" id="cm-import-btn" style="margin-left:auto;">Import</button>
           <button class="admin-btn-sm" id="cm-export-vcf-btn">Export .vcf</button>
           <button class="admin-btn-sm" id="cm-export-csv-btn">Export .csv</button>
@@ -4623,11 +5090,11 @@ async function initUnifiedIntegrations() {
               <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
             </div>
             <button class="admin-btn-sm contact-edit" title="Edit" style="display:inline-flex;align-items:center;gap:4px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              ${uiIcon("edit",12,{"role":"inherit"})}
               Edit
             </button>
             <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.85;display:inline-flex;align-items:center;gap:4px;">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              ${uiIcon("trash",12,{"role":"inherit"})}
               Delete
             </button>
           </div>
@@ -4731,7 +5198,7 @@ async function initUnifiedIntegrations() {
     // option. Letter-in-brand-color circle for known providers; outline
     // envelope for "Custom…". Inline SVG (no external assets, no emoji).
     const _letterLogo = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
-    const _customLogo = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
+    const _customLogo = uiIcon("email",16,{"role":"inherit","style":"flex-shrink:0;opacity:0.7"});
     const PROV_LOGO = {
       '':       _customLogo,
       gmail:    _letterLogo('G', '#ea4335'),
@@ -4767,16 +5234,16 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="uf-display-name" class="settings-input" placeholder="Your Name"></div>
           <div id="uf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
             <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
-            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? uiIcon("check", 12, { role:"inherit" }) + "Connected via Google OAuth" : 'Not connected — click below to authorize'}</div>
             <button type="button" id="uf-oauth-btn" class="admin-btn-add" style="font-size:11px">${existing && existing.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
           </div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>IMAP (Receiving)</div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px;display:flex;align-items:center;gap:5px;">${uiIcon("inbox",12,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}IMAP (Receiving)</div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="uf-imap-host" class="settings-input" placeholder="imap.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="uf-imap-port" class="settings-input" type="number" placeholder="993" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Username${_hint('Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.')}</label><input id="uf-imap-user" class="settings-input" placeholder="you@example.com"></div>
           <div class="uf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password). For Migadu and Fastmail, your mailbox password usually works. Outlook / Office 365 generally requires OAuth and will not work with this password form.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div></div>
           <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls" checked><span class="admin-slider"></span></label></div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;">${uiIcon("send",12,{"role":"inherit","style":"color:var(--accent, var(--red));flex-shrink:0;"})}SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.')}</label><input id="uf-smtp-host" class="settings-input" placeholder="smtp.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="uf-smtp-port" class="settings-input" type="number" placeholder="465" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Security${_hint('SSL for port 465, STARTTLS for port 587, or None for local SMTP bridges such as Proton Mail Bridge.')}</label><select id="uf-smtp-security" class="settings-select"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
@@ -4788,18 +5255,18 @@ async function initUnifiedIntegrations() {
             <span id="uf-email-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-email-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
               <span class="uf-email-test-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 4 12 14.01 9 11.01"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                ${uiIcon("check",11,{"role":"inherit"})}
               </span>
               Test
             </button>
             <button class="admin-btn-add" id="uf-email-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
               <span class="uf-email-save-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                ${uiIcon("check",11,{"role":"inherit"})}
               </span>
               <span class="uf-email-save-label">${isEdit ? 'Save' : 'Create'}</span>
             </button>
             <button class="admin-btn-add" id="uf-email-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
           </div>
@@ -4829,7 +5296,7 @@ async function initUnifiedIntegrations() {
       },
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Open Clank does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
         url: 'https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online',
         linkLabel: 'Read Microsoft note',
       },
@@ -4874,7 +5341,7 @@ async function initUnifiedIntegrations() {
           return;
         }
         uiModule.showToast?.('Copied');
-        copyBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Copied';
+        copyBtn.innerHTML = uiIcon("check",10,{"role":"inherit"}) + " Copied";
         setTimeout(() => {
           if (copyBtn.isConnected) copyBtn.innerHTML = orig;
         }, 1500);
@@ -4889,11 +5356,11 @@ async function initUnifiedIntegrations() {
         <div style="opacity:0.8;margin-bottom:6px;">${esc(n.body)}</div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer" class="admin-btn-sm" style="background:var(--red);border-color:var(--red);color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            ${uiIcon("external",10,{"role":"inherit"})}
             ${esc(n.linkLabel || 'Generate App Password')}
           </a>
           <button type="button" class="admin-btn-sm uf-prov-copy" data-url="${esc(n.url)}" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            ${uiIcon("copy",10,{"role":"inherit"})}
             Copy link
           </button>
         </div>`;
@@ -5084,7 +5551,7 @@ async function initUnifiedIntegrations() {
     // Spinner SVG kept inline so we can swap it back to the original
     // checkmark on completion. ~13px to match the button icon size.
     const _spinner = '<span style="display:inline-block;width:11px;height:11px;border-radius:50%;border:1.5px solid currentColor;border-top-color:transparent;animation:whirlpool-spin 0.7s linear infinite"></span>';
-    const _checkIcon = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    const _checkIcon = uiIcon("check",11,{"role":"inherit"});
 
     el('uf-email-test').addEventListener('click', async () => {
       const body = _collectBody();
@@ -5346,7 +5813,7 @@ async function initUnifiedIntegrations() {
       if (el('uf-mcp-pasteback')) return;  // already shown
       msg.innerHTML =
         'Authorize in the opened tab. If the redirect fails (remote access), paste the resulting URL here: ' +
-        '<input id="uf-mcp-pasteback" class="settings-input" placeholder="http://localhost:7000/api/mcp/oauth/callback?code=..." style="margin-top:4px">' +
+        '<input id="uf-mcp-pasteback" class="settings-input" placeholder="http://localhost:7777/api/mcp/oauth/callback?code=..." style="margin-top:4px">' +
         '<button class="admin-btn-sm" id="uf-mcp-paste-go" style="margin-top:4px">Submit</button>';
       const pasteGo = el('uf-mcp-paste-go');
       if (pasteGo) pasteGo.addEventListener('click', async () => {
@@ -5382,6 +5849,7 @@ async function initUnifiedIntegrations() {
           if (s.auth_url) openAuth(s.auth_url);
           if (s.status === 'connected') {
             if (msg) msg.textContent = `Connected (${s.tool_count || 0} tools)`;
+            void refreshReadyNativeCatalog();
             await renderList(); return;
           }
           if (s.status === 'error') {
@@ -5430,6 +5898,7 @@ async function initUnifiedIntegrations() {
             const r = await checkedFetch(`/api/mcp/servers/${srv.id}/reconnect`, { method: 'POST', credentials: 'same-origin' });
             const d = await r.json();
             msg.textContent = d.connected ? `Connected (${d.tool_count} tools)` : `Failed: ${d.error || 'unknown'}`;
+            void refreshReadyNativeCatalog();
             await renderList();
             showMcpForm(editId); // refresh this view
           } catch (e) { msg.textContent = 'Failed'; }
@@ -5438,6 +5907,7 @@ async function initUnifiedIntegrations() {
         el('uf-mcp-toggle').addEventListener('click', async () => {
           const fd = new FormData(); fd.append('is_enabled', String(!srv.is_enabled));
           await checkedFetch(`/api/mcp/servers/${srv.id}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
+          void refreshReadyNativeCatalog();
           await renderList();
           showMcpForm(editId);
         });
@@ -5455,6 +5925,7 @@ async function initUnifiedIntegrations() {
                 const dis = [];
                 panel.querySelectorAll('input[type=checkbox]').forEach(cb => { if (!cb.checked) dis.push(cb.dataset.mcpToolName); });
                 await checkedFetch(`/api/mcp/servers/${srv.id}/tools`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ disabled: dis }) });
+                void refreshReadyNativeCatalog();
                 const cnt = panel.querySelector('.mcp-tools-count');
                 if (cnt) cnt.textContent = `${tools.length - dis.length}/${tools.length} enabled`;
               };
@@ -5518,6 +5989,7 @@ async function initUnifiedIntegrations() {
         try {
           const r = await checkedFetch('/api/mcp/servers', { method: 'POST', credentials: 'same-origin', body: fd });
           const data = await r.json().catch(() => ({}));
+          if(r.ok)void refreshReadyNativeCatalog();
           if (r.ok && data.needs_auth) {
             el('uf-mcp-msg').textContent = 'Preparing authorization…';
             _handleMcpAuth(data.id, data.auth_url);
@@ -5564,12 +6036,12 @@ async function initUnifiedIntegrations() {
     );
     const current = agentTokens.find(t => String(t.id) === String(editId));
     const _scopeIcons = {
-      todos: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
-      documents: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
-      email: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2 6 12 13 22 6"/></svg>',
-      calendar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-      memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 2 9.5v3A2.5 2.5 0 0 0 4.5 15a2.5 2.5 0 0 0 2.5 2.5A2.5 2.5 0 0 0 9.5 20H10V2z"/><path d="M14.5 2a2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 22 9.5v3A2.5 2.5 0 0 1 19.5 15a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 14.5 20H14V2z"/></svg>',
-      cookbook: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+      todos: uiIcon("tasks",14,{"role":"inherit"}),
+      documents: uiIcon("document",14,{"role":"inherit"}),
+      email: uiIcon("email",14,{"role":"inherit"}),
+      calendar: uiIcon("calendar",14,{"role":"inherit"}),
+      memory: uiIcon("memory",14,{"role":"inherit"}),
+      cookbook: uiIcon("cookbook",14,{"role":"inherit"}),
     };
     const _scopeNiceLabel = (label) => label.replace(/\s+(write|drafts?|send)$/i, '');
     const _scopeAction = (key) => (key.split(':')[1] || '').toLowerCase();
@@ -5628,7 +6100,7 @@ async function initUnifiedIntegrations() {
             <div style="position:relative;">
               <code id="uf-codex-token" style="display:block;word-break:break-all;font-size:11px;padding:6px 30px 6px 8px;background:rgba(0,0,0,0.08);border-radius:4px;"></code>
               <button type="button" class="admin-btn-sm" id="uf-codex-copy-token" title="Copy token" aria-label="Copy token" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                ${uiIcon("copy",13,{"role":"inherit"})}
               </button>
             </div>
 
@@ -5640,35 +6112,35 @@ async function initUnifiedIntegrations() {
               <span style="font-weight:600;font-size:11px;">Configure access</span>
               <span style="flex:1"></span>
               <button type="button" class="admin-btn-sm" id="uf-codex-copy-setup" title="Copy setup" aria-label="Copy setup" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                ${uiIcon("copy",11,{"role":"inherit"})}
                 <span>Copy</span>
               </button>
               <button type="button" class="admin-btn-sm" id="uf-codex-toggle-config" aria-expanded="false" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
-                <svg id="uf-codex-toggle-config-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s"><polyline points="6 9 12 15 18 9"/></svg>
+                ${uiIcon("chevron-down",10,{"role":"inherit","style":"transition:transform 0.15s","id":"uf-codex-toggle-config-caret"})}
                 <span>Configure</span>
               </button>
             </div>
             <div id="uf-codex-config-body" style="display:none;">
-              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Open Clank tools this agent can use. New agents start with chat only.</div>
               <div id="uf-codex-inline-scopes"></div>
             </div>
           </div>
           <div class="settings-row" style="margin-top:10px;align-items:center;gap:6px;">
             <button class="admin-btn-add" id="uf-codex-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              ${uiIcon("close",11,{"role":"inherit"})}
               Cancel
             </button>
             <span id="uf-codex-msg" style="font-size:11px;flex:1;text-align:center;"></span>
             <button class="admin-btn-add" id="uf-codex-revoke" style="display:none;align-items:center;gap:5px;background:color-mix(in srgb, var(--color-error) 10%, transparent);color:var(--color-error);border:1px solid var(--color-error);font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              ${uiIcon("trash",11,{"role":"inherit"})}
               Revoke
             </button>
             <button class="admin-btn-add" id="uf-codex-create-btn" style="display:${current ? 'none' : 'inline-flex'};align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
+              ${uiIcon("key",11,{"role":"inherit"})}
               Create token
             </button>
             <button class="admin-btn-add" id="uf-codex-save" style="display:none;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              ${uiIcon("check",11,{"role":"inherit"})}
               Save
             </button>
           </div>
@@ -5903,8 +6375,8 @@ async function initUnifiedIntegrations() {
       selection.removeAllRanges();
       selection.addRange(range);
     };
-    const COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-    const CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    const COPY_ICON = uiIcon("copy",13,{"role":"inherit"});
+    const CHECK_ICON = uiIcon("check",13,{"role":"inherit"});
     el('uf-codex-copy-setup')?.addEventListener('click', async () => {
       const token = el('uf-codex-copy-setup')?.dataset.token || '';
       const btn = el('uf-codex-copy-setup');
@@ -6047,70 +6519,582 @@ function syncAdminVisibility() {
   });
 }
 
-async function loadPermissionGrants() {
-  const list = el('mimo-permission-grants');
-  const status = el('mimo-permission-grants-status');
-  if (!list || !window._isAdmin) return;
+let _fileAccessInitialized = false;
+let _fileAccessLoadId = 0;
+
+async function loadCanonicalPolicyState() {
+  const response = await checkedFetch('/api/file-policy/state?include_inactive=true', {
+    credentials: 'same-origin', cache: 'no-store',
+  });
+  return response.json();
+}
+
+function announceFilePolicyChanged(detail = {}) {
+  document.dispatchEvent(new CustomEvent('openclank:file-policy-changed', {
+    detail: { source: 'settings', ...detail },
+  }));
+}
+
+function locationKindLabel(location) {
+  if (location?.kind === 'exact_file') return 'Exact file';
+  if (location?.kind === 'whole_root') return 'Whole disk / volume';
+  return 'Folder and contents';
+}
+
+function fileCapabilitySummary(capabilities) {
+  const values = new Set(Array.isArray(capabilities) ? capabilities : []);
+  const labels = [];
+  if (values.has('read')) labels.push('Browse / download');
+  if (values.has('write')) labels.push('Modify');
+  if (values.has('execute')) labels.push('Execute');
+  return labels.join(' + ') || 'No file access';
+}
+
+function fileModifyCapabilities(binding, allowWrite) {
+  const capabilities = new Set(binding.capabilities || []);
+  if (allowWrite) capabilities.add('write');
+  else capabilities.delete('write');
+  return [...capabilities];
+}
+
+function filePolicyRow(titleText, metaText, { inactive = false } = {}) {
+  const row = document.createElement('div');
+  row.className = `admin-user-row file-policy-row${inactive ? ' file-policy-inactive' : ''}`;
+  const info = document.createElement('div');
+  info.className = 'file-policy-info';
+  const title = document.createElement('div');
+  title.className = 'file-policy-title';
+  title.textContent = titleText;
+  const meta = document.createElement('div');
+  meta.className = 'admin-toggle-sub';
+  meta.textContent = metaText;
+  info.append(title, meta);
+  row.append(info);
+  return row;
+}
+
+const FILE_POLICY_CONTROL_ICONS = Object.freeze({
+  'Disable':'pause', 'Enable':'play', 'Disable modify':'lock', 'Allow modify':'edit',
+  'Revoke':'unavailable', 'Restore Location':'restore', 'Remove Location':'remove',
+  'Enable agent':'agents', 'Save name':'save', 'Cancel':'close', 'Rename':'edit',
+  'Restore Workspace':'restore', 'Archive Workspace':'archive',
+  'Reset workspace permissions':'restore', 'Save expiry':'save', 'Clear expiry':'remove',
+  'Resolve':'check', 'Retry':'refresh',
+});
+function filePolicyButton(label, action, statusId, { disabled = false } = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'admin-btn-sm';
+  button.textContent = label;
+  if (FILE_POLICY_CONTROL_ICONS[label]) setUiIconText(button, FILE_POLICY_CONTROL_ICONS[label], label);
+  button.disabled = disabled;
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { await action(); }
+    catch (error) {
+      const status = el(statusId) || el('file-policy-status');
+      if (status) status.textContent = error.message || 'Could not update file access.';
+    } finally { button.disabled = disabled; }
+  });
+  return button;
+}
+
+async function changeFilePolicy(path, method, payload, mutation) {
+  const response = await checkedFetch(`/api/file-policy/${path}`, {
+    method, credentials: 'same-origin',
+    ...(payload === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    }),
+  });
+  let result = {};
+  try { result = await response.json(); } catch (_) {}
+  announceFilePolicyChanged({ mutation });
+  await loadFileAccessSettings();
+  return result;
+}
+
+function fileBindingStatus(binding) {
+  if (!['active', 'disabled'].includes(binding.status)) return binding.status || 'disabled';
+  if (binding.expires_unix_ms != null && Number(binding.expires_unix_ms) <= Date.now()) return 'expired';
+  if (binding.lifetime === 'once' && Number(binding.remaining_uses) <= 0) return 'used';
+  return binding.status;
+}
+
+function fileBindingDetails(binding, state, usersById, { omitLocation = false, omitAccount = false } = {}) {
+  const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+  const workspace = (state.workspaces || []).find(item => String(item.id) === String(binding.workspace_id));
+  const details = [];
+  const owner = binding.subject_username || usersById.get(String(binding.subject_id))?.username || binding.subject_id;
+  if (!omitAccount && String(binding.subject_id) !== String(state.subject_id)) details.push(`Account: ${owner}`);
+  if (!omitLocation && location) details.push(location.display_path || location.canonical_path || location.id);
+  else if (!omitLocation && binding.location_id) details.push(`Location: ${binding.location_id}`);
+  if (!binding.location_id && !binding.workspace_id && !binding.chat_id) details.push('Account-wide scope');
+  if (binding.workspace_id) details.push(`Workspace: ${workspace?.name || binding.workspace_id}`);
+  if (binding.chat_id) details.push(`Chat: ${binding.chat_id}`);
+  const lifetimes = { always: 'Until revoked', workspace: 'This workspace', chat: 'This chat', once: 'One use' };
+  details.push(lifetimes[binding.lifetime] || binding.lifetime || 'Unknown lifetime');
+  if (binding.expires_unix_ms != null) {
+    const expiry = new Date(Number(binding.expires_unix_ms));
+    if (!Number.isNaN(expiry.getTime())) details.push(`Expires ${expiry.toLocaleString()}`);
+  }
+  if (binding.remaining_uses != null) details.push(`${binding.remaining_uses} use${Number(binding.remaining_uses) === 1 ? '' : 's'} remaining`);
+  const status = fileBindingStatus(binding);
+  details.push(binding.status === 'disabled' && status !== 'disabled' ? `disabled · ${status}` : status);
+  if (location && (!location.enabled || location.availability !== 'available')) {
+    details.push(!location.enabled ? 'Location disabled' : `Location ${location.availability || 'unavailable'}`);
+  }
+  if (workspace?.archived) details.push('Workspace archived');
+  return details.join(' · ');
+}
+
+function fileLocationCeiling(location, state) {
+  const capabilities = new Set(location.capabilities || []);
+  if (state.effective_scope?.host) return capabilities;
+  const effective = (state.effective_scope?.locations || []).find(item => String(item.location_id) === String(location.id));
+  return new Set((effective?.app_capabilities || []).filter(capability => capabilities.has(capability)));
+}
+
+function renderCurrentAppFilesystemAccess(state) {
+  const list = el('odysseus-file-visible-to-me-list');
+  if (!list) return;
+  if (state.effective_scope?.host) {
+    list.replaceChildren(filePolicyRow('Full OS-visible filesystem', 'Your account follows the OS account’s file permissions. Editor opens at home by default.'));
+    return;
+  }
+  const locations = new Map((state.locations || []).map(location => [String(location.id), location]));
+  const effective = (state.effective_scope?.locations || []).filter(scope => (scope.app_capabilities || []).length);
+  list.replaceChildren(...effective.map(scope => {
+    const location = locations.get(String(scope.location_id));
+    return filePolicyRow(location?.display_path || location?.canonical_path || scope.location_id,
+      `${locationKindLabel(location)} · ${fileCapabilitySummary(scope.app_capabilities)}`);
+  }));
+  if (!effective.length) list.textContent = 'No files or folders are currently shared with your account.';
+}
+
+function populateVisibilitySelectors(users, locations) {
+  const subject = el('odysseus-file-visibility-subject');
+  const root = el('odysseus-file-visibility-root');
+  if (!subject || !root) return;
+  const previousSubject = subject.value;
+  const previousRoot = root.value;
+  subject.replaceChildren(new Option('Choose an account', ''));
+  (Array.isArray(users) ? users : [])
+    .filter(user => user && !user.is_admin && user.username)
+    .sort((a, b) => String(a.username).localeCompare(String(b.username)))
+    .forEach(user => {
+      const option = new Option(String(user.username), String(user.account_id || user.username));
+      option.dataset.username = String(user.username);
+      subject.append(option);
+    });
+  if ([...subject.options].some(option => option.value === previousSubject)) subject.value = previousSubject;
+  root.replaceChildren(new Option('Choose a Location', ''));
+  for (const location of locations || []) {
+    if (!location.enabled || location.availability !== 'available') continue;
+    root.append(new Option(`${locationKindLabel(location)} · ${location.display_path || location.canonical_path || location.id}`, String(location.id)));
+  }
+  if ([...root.options].some(option => option.value === previousRoot)) root.value = previousRoot;
+}
+
+function renderPeopleAccess(state, users) {
+  const list = el('odysseus-file-visibility-assignments');
+  if (!list || !state.is_admin) return;
+  populateVisibilitySelectors(users, state.locations);
+  const usersById = new Map(users.filter(user => user?.account_id).map(user => [String(user.account_id), user]));
+  const locations = new Map((state.locations || []).map(location => [String(location.id), location]));
+  const assignments = (state.bindings || []).filter(binding => binding.binding_class === 'people');
+  list.replaceChildren(...assignments.map(binding => {
+    const location = locations.get(String(binding.location_id));
+    const active = fileBindingStatus(binding) === 'active';
+    const username = binding.subject_username || usersById.get(String(binding.subject_id))?.username || binding.subject_id;
+    const row = filePolicyRow(`${username} · ${location?.display_path || location?.canonical_path || binding.location_id}`, `${fileCapabilitySummary(binding.capabilities)} · ${fileBindingDetails(binding, state, new Map(), { omitLocation: true, omitAccount: true })}`, { inactive: !active });
+    const endpoint = `people/${encodeURIComponent(binding.id)}`;
+    if (['active', 'disabled'].includes(binding.status)) {
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'people-access'), 'odysseus-file-visibility-status', {
+        disabled: !active && (!location?.enabled || location.availability !== 'available' || !usersById.has(String(binding.subject_id)) || ['expired', 'used'].includes(fileBindingStatus(binding))),
+      }));
+      const hasWrite = (binding.capabilities || []).includes('write');
+      row.append(filePolicyButton(hasWrite ? 'Disable modify' : 'Allow modify', () => changeFilePolicy(endpoint, 'PATCH', { capabilities: fileModifyCapabilities(binding, !hasWrite) }, 'people-access'), 'odysseus-file-visibility-status', {
+        disabled: !active || !(location?.capabilities || []).includes('write') || !fileModifyCapabilities(binding, !hasWrite).length,
+      }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'people-access'), 'odysseus-file-visibility-status'));
+    }
+    return row;
+  }));
+  if (!assignments.length) list.textContent = 'No Locations have been shared with other accounts.';
+}
+
+function renderFileLocations(state) {
+  const list = el('odysseus-file-roots');
+  if (!list) return;
+  const locations = state.locations || [];
+  list.replaceChildren(...locations.map(location => {
+    const row = filePolicyRow(location.display_path || location.canonical_path || location.id,
+      `${locationKindLabel(location)} · ${fileCapabilitySummary(location.capabilities)} · ${location.enabled ? 'enabled' : 'disabled'} · ${location.availability || 'unknown'}`,
+      { inactive: !location.enabled || location.availability !== 'available' });
+    if (state.is_admin && !location.enabled) {
+      row.append(filePolicyButton('Restore Location', async () => {
+        if (!await uiModule.styledConfirm(
+          `Restore “${location.display_path || location.canonical_path || location.id}”? This restores the Location’s registration. Previous People access, agent access, and operation approvals stay revoked.`,
+          { title: 'Restore Location?', confirmText: 'Restore Location', cancelText: 'Cancel' },
+        )) return;
+        await changeFilePolicy('locations', 'POST', {
+          path: location.canonical_path || location.display_path,
+          kind: location.kind,
+          capabilities: location.capabilities,
+          agent_access: false,
+        }, 'location-restore');
+        const status = el('odysseus-file-root-status');
+        if (status) status.textContent = 'Location restored. Choose any People or agent access explicitly.';
+      }, 'odysseus-file-root-status', { disabled: !(location.canonical_path || location.display_path) || !(location.capabilities || []).length }));
+    } else if (state.is_admin) {
+      row.append(filePolicyButton('Remove Location', async () => {
+        if (!await uiModule.styledConfirm(
+          `Remove “${location.display_path || location.canonical_path || location.id}”? This revokes its People access, agent access, and operation approvals, and archives its Workspaces. Files on disk are not deleted.`,
+          { title: 'Remove Location?', confirmText: 'Remove Location', cancelText: 'Keep Location', danger: true },
+        )) return;
+        const result = await changeFilePolicy(`locations/${encodeURIComponent(location.id)}`, 'DELETE', undefined, 'location-remove');
+        const status = el('odysseus-file-root-status');
+        if (status) status.textContent = `Removed Location; revoked ${Number(result.bindings_revoked || 0)} access records and archived ${Number(result.workspaces_archived || 0)} Workspaces.`;
+      }, 'odysseus-file-root-status'));
+    }
+    return row;
+  }));
+  if (!locations.length) list.textContent = 'No registered Locations are available to this account.';
+  const select = el('odysseus-permissions-reset-location');
+  if (select) {
+    const previous = select.value;
+    select.replaceChildren(new Option('Choose a Location', ''));
+    for (const location of locations) select.append(new Option(location.display_path || location.canonical_path || location.id, String(location.id)));
+    if ([...select.options].some(option => option.value === previous)) select.value = previous;
+  }
+}
+
+function renderAgentAccess(state, usersById) {
+  const list = el('file-policy-agent-access');
+  if (!list) return;
+  const bindings = (state.bindings || []).filter(binding => binding.binding_class === 'agent');
+  list.replaceChildren(...bindings.map(binding => {
+    const status = fileBindingStatus(binding);
+    const active = status === 'active';
+    const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+    const ceiling = location ? fileLocationCeiling(location, state) : new Set();
+    const effective = (state.effective_scope?.locations || []).find(scope => String(scope.location_id) === String(binding.location_id));
+    const available = String(binding.subject_id) === String(state.subject_id)
+      ? ` · Available to your agents: ${fileCapabilitySummary(effective?.agent_capabilities || [])}` : '';
+    const row = filePolicyRow(`Agent · ${fileCapabilitySummary(binding.capabilities)}`, `${fileBindingDetails(binding, state, usersById)}${available}`, { inactive: !active });
+    if (String(binding.subject_id) === String(state.subject_id) && ['active', 'disabled'].includes(binding.status)) {
+      const endpoint = `agent-access/${encodeURIComponent(binding.id)}`;
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'agent-access'), 'file-policy-agent-status', {
+        disabled: !active && (!location?.enabled || location.availability !== 'available' || !ceiling.has('read') || status === 'expired' || status === 'used'),
+      }));
+      const hasWrite = (binding.capabilities || []).includes('write');
+      row.append(filePolicyButton(hasWrite ? 'Disable modify' : 'Allow modify', () => changeFilePolicy(endpoint, 'PATCH', { capabilities: fileModifyCapabilities(binding, !hasWrite) }, 'agent-access'), 'file-policy-agent-status', { disabled: !active || !ceiling.has('write') || !fileModifyCapabilities(binding, !hasWrite).length }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'agent-access'), 'file-policy-agent-status'));
+    }
+    return row;
+  }));
+  for (const location of state.locations || []) {
+    if (!location.enabled || location.availability !== 'available' || !fileLocationCeiling(location, state).has('read')) continue;
+    if (bindings.some(binding => String(binding.subject_id) === String(state.subject_id) && String(binding.location_id) === String(location.id) && binding.lifetime === 'always' && ['active', 'disabled'].includes(binding.status))) continue;
+    const row = filePolicyRow(`Agent access off · ${location.display_path || location.canonical_path || location.id}`, 'Enable browsing for your agents within this Location.');
+    row.append(filePolicyButton('Enable agent', () => changeFilePolicy('agent-access', 'POST', { location_id: location.id, capabilities: ['read'] }, 'agent-access'), 'file-policy-agent-status'));
+    list.append(row);
+  }
+  if (!list.childNodes.length) list.textContent = 'No agent file access is configured.';
+}
+
+async function changeFileWorkspace(workspace, changes, mutation) {
   try {
-    const response = await checkedFetch('/api/mimo/permission-grants', { credentials: 'same-origin' });
-    const data = await response.json();
-    const grants = Array.isArray(data.grants) ? data.grants : [];
-    list.replaceChildren(...grants.map((grant) => {
-      const row = document.createElement('div');
-      row.className = 'admin-user-row';
-      const text = document.createElement('span');
-      text.textContent = `${grant.permission_type} · ${grant.pattern} · ${grant.workspace || 'any workspace'}`;
-      const revoke = document.createElement('button');
-      revoke.type = 'button';
-      revoke.className = 'admin-btn-sm';
-      revoke.textContent = 'Revoke';
-      revoke.addEventListener('click', async () => {
-        try {
-          await checkedFetch(`/api/mimo/permission-grants/${grant.id}`, { method: 'DELETE', credentials: 'same-origin' });
-          await loadPermissionGrants();
-        } catch (error) { status.textContent = error.message; }
-      });
-      row.append(text, revoke);
-      return row;
-    }));
-    if (!grants.length) list.textContent = 'No persistent grants.';
-    status.textContent = `${grants.length} owner-scoped persistent grant${grants.length === 1 ? '' : 's'}`;
+    return await changeFilePolicy(`workspaces/${encodeURIComponent(workspace.id)}`, 'PATCH', {
+      ...changes, expected_revision: workspace.revision,
+    }, mutation);
   } catch (error) {
-    list.textContent = '';
-    status.textContent = error.message;
+    // Refresh a stale revision before offering another deliberate edit.
+    await loadFileAccessSettings();
+    throw error;
+  }
+}
+
+function workspaceRenameControls(workspace) {
+  const fields = document.createElement('div');
+  fields.className = 'file-policy-review-fields';
+  fields.style.display = 'none';
+  const input = document.createElement('input');
+  input.className = 'settings-input';
+  input.setAttribute('aria-label', 'Workspace name');
+  input.maxLength = 200;
+  input.value = workspace.name || '';
+  const save = filePolicyButton('Save name', async () => {
+    const name = input.value.trim();
+    if (!name) throw new Error('Enter a Workspace name.');
+    if (name === workspace.name) { fields.style.display = 'none'; return; }
+    await changeFileWorkspace(workspace, { name }, 'workspace-rename');
+  }, 'file-policy-agent-status');
+  const cancel = filePolicyButton('Cancel', () => { fields.style.display = 'none'; }, 'file-policy-agent-status');
+  fields.append(input, save, cancel);
+  const button = filePolicyButton('Rename', () => {
+    fields.style.display = 'flex';
+    input.focus();
+    input.select();
+  }, 'file-policy-agent-status');
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); save.click(); }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); fields.style.display = 'none'; }
+  });
+  return { button, fields };
+}
+
+function renderFileWorkspaces(state, usersById) {
+  const list = el('file-policy-workspaces');
+  if (!list) return;
+  list.replaceChildren(...(state.workspaces || []).map(workspace => {
+    const location = (state.locations || []).find(item => String(item.id) === String(workspace.location_id));
+    const related = (state.bindings || []).filter(binding => String(binding.workspace_id) === String(workspace.id));
+    const configured = related.filter(binding => ['active', 'disabled'].includes(binding.status)).length;
+    const path = [location?.display_path || location?.canonical_path || workspace.location_id, workspace.relative_folder].filter(Boolean).join(' / ');
+    const ownWorkspace = String(workspace.owner_subject_id) === String(state.subject_id);
+    const owner = !ownWorkspace
+      ? ` · Account: ${usersById.get(String(workspace.owner_subject_id))?.username || workspace.owner_subject_id}` : '';
+    const locationAvailable = !!location?.enabled && location.availability === 'available';
+    const row = filePolicyRow(workspace.name || workspace.id,
+      `${path} · ${workspace.archived ? 'archived' : 'active workspace'}${owner}${locationAvailable ? '' : ' · Location unavailable'} · ${configured} scoped permission${configured === 1 ? '' : 's'}`,
+      { inactive: workspace.archived || !locationAvailable });
+    let rename = null;
+    if (ownWorkspace || state.is_admin) {
+      rename = workspaceRenameControls(workspace);
+      row.append(rename.button);
+      const archive = filePolicyButton(workspace.archived ? 'Restore Workspace' : 'Archive Workspace', async () => {
+        if (!workspace.archived && !await uiModule.styledConfirm(
+          `Archive “${workspace.name || workspace.id}”? This revokes active permissions scoped to this Workspace. Files remain on disk. Restoring the Workspace keeps those permissions revoked.`,
+          { title: 'Archive Workspace?', confirmText: 'Archive Workspace', cancelText: 'Keep Workspace', danger: true },
+        )) return;
+        await changeFileWorkspace(workspace, { archived: !workspace.archived }, workspace.archived ? 'workspace-restore' : 'workspace-archive');
+        const status = el('file-policy-agent-status');
+        if (status) status.textContent = workspace.archived
+          ? 'Workspace restored. Its revoked permissions remain revoked.'
+          : 'Workspace archived and its active scoped permissions revoked. Files remain on disk.';
+      }, 'file-policy-agent-status', { disabled: workspace.archived && !locationAvailable });
+      if (workspace.archived && !locationAvailable) archive.title = 'Restore the Location before restoring this Workspace.';
+      row.append(archive);
+    }
+    if (ownWorkspace && related.some(binding => ['agent', 'operation'].includes(binding.binding_class) && ['active', 'disabled'].includes(binding.status))) {
+      row.append(filePolicyButton('Reset workspace permissions', () => resetFileAgentPermissions('workspace', { workspace_id: workspace.id }, workspace.name || 'This workspace'), 'file-policy-agent-status'));
+    }
+    if (rename) row.append(rename.fields);
+    return row;
+  }));
+  if (!list.childNodes.length) list.textContent = 'No registered Workspaces.';
+}
+
+function operationExpiryControls(binding, endpoint) {
+  const details = document.createElement('details');
+  details.className = 'file-policy-expiry';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Edit expiry';
+  const fields = document.createElement('div');
+  fields.className = 'file-policy-review-fields';
+  const input = document.createElement('input');
+  input.type = 'datetime-local';
+  input.className = 'settings-input';
+  input.setAttribute('aria-label', 'Approval expiry in your local time');
+  if (binding.expires_unix_ms != null) {
+    const expiry = new Date(Number(binding.expires_unix_ms));
+    if (!Number.isNaN(expiry.getTime())) {
+      input.value = new Date(expiry.getTime() - expiry.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    }
+  }
+  const localTime = document.createElement('span');
+  localTime.className = 'admin-toggle-sub';
+  localTime.textContent = 'Your local time';
+  fields.append(input, localTime);
+  fields.append(filePolicyButton('Save expiry', async () => {
+    const timestamp = new Date(input.value).getTime();
+    if (!input.value || !Number.isFinite(timestamp) || timestamp <= Date.now()) throw new Error('Choose an expiry in the future.');
+    await changeFilePolicy(endpoint, 'PATCH', { expires_unix_ms: timestamp }, 'operation-expiry');
+  }, 'odysseus-permissions-reset-status'));
+  if (binding.expires_unix_ms != null) {
+    fields.append(filePolicyButton('Clear expiry', () => changeFilePolicy(endpoint, 'PATCH', { expires_unix_ms: null }, 'operation-expiry'), 'odysseus-permissions-reset-status'));
+  }
+  details.append(summary, fields);
+  return details;
+}
+
+function renderOperationApprovals(state, usersById) {
+  const list = el('odysseus-agent-grants');
+  if (!list) return;
+  const bindings = state.operation_approvals || [];
+  list.replaceChildren(...bindings.map(binding => {
+    const approval = binding.approval || {};
+    const operation = approval.permission_type || binding.operation || 'Operation approval';
+    const target = [approval.pattern, approval.resource].filter(Boolean).join(' · ');
+    const status = fileBindingStatus(binding);
+    const active = status === 'active';
+    const row = filePolicyRow(`${operation}${target ? ` · ${target}` : ''}`,
+      fileBindingDetails(binding, state, usersById), { inactive: !active });
+    const canManage = state.is_admin || String(binding.subject_id) === String(state.subject_id);
+    if (canManage && ['active', 'disabled'].includes(binding.status)) {
+      const endpoint = `operation-approvals/${encodeURIComponent(binding.id)}`;
+      const location = (state.locations || []).find(item => String(item.id) === String(binding.location_id));
+      const workspace = (state.workspaces || []).find(item => String(item.id) === String(binding.workspace_id));
+      const cannotEnable = status === 'expired' || status === 'used'
+        || (!!binding.location_id && (!location?.enabled || location.availability !== 'available'))
+        || (!!binding.workspace_id && (!workspace || workspace.archived));
+      row.append(filePolicyButton(active ? 'Disable' : 'Enable', () => changeFilePolicy(endpoint, 'PATCH', { enabled: !active }, 'operation-approval'), 'odysseus-permissions-reset-status', { disabled: !active && cannotEnable }));
+      row.append(filePolicyButton('Revoke', () => changeFilePolicy(endpoint, 'DELETE', undefined, 'operation-revoke'), 'odysseus-permissions-reset-status'));
+      row.append(operationExpiryControls(binding, endpoint));
+    }
+    return row;
+  }));
+  if (!bindings.length) list.textContent = 'No saved operation approvals.';
+}
+
+async function resetFileAgentPermissions(scope, payload, label) {
+  const request = async preview => {
+    const response = await checkedFetch(`/api/file-policy/resets${preview ? '/preview' : ''}`, {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, ...payload }),
+    });
+    return response.json();
+  };
+  const preview = await request(true);
+  const count = Number(preview.total_matched ?? preview.matched ?? 0);
+  if (!await uiModule.styledConfirm(
+    `${label} will revoke ${count} agent permission${count === 1 ? '' : 's'}. Shared Locations and human access remain unchanged.`,
+    { title: `Reset ${label.toLowerCase()}?`, confirmText: 'Reset permissions', cancelText: 'Keep permissions', danger: true },
+  )) return;
+  const result = await request(false);
+  announceFilePolicyChanged({ mutation: 'permission-reset', scope });
+  await loadFileAccessSettings();
+  const status = el('odysseus-permissions-reset-status');
+  const revoked = Number(result.total_revoked ?? result.matched ?? 0);
+  if (status) status.textContent = `Reset ${revoked} agent permission${revoked === 1 ? '' : 's'}${result.pending_rejected ? ` and rejected ${result.pending_rejected} pending requests` : ''}.`;
+}
+
+function initFileAccessControls() {
+  if (_fileAccessInitialized) return;
+  _fileAccessInitialized = true;
+  el('odysseus-file-root-add')?.addEventListener('click', () => { void openFileLocationWizard(); });
+  document.addEventListener('openclank:file-policy-changed', event => {
+    if (event.detail?.source === 'settings' || modalEl?.classList.contains('hidden')) return;
+    const panel = modalEl?.querySelector('[data-settings-panel="file-access"]');
+    if (panel && !panel.classList.contains('hidden')) void loadFileAccessSettings();
+  });
+  el('odysseus-file-visibility-add')?.addEventListener('click', async () => {
+    const button = el('odysseus-file-visibility-add');
+    const status = el('odysseus-file-visibility-status');
+    const account = el('odysseus-file-visibility-subject')?.selectedOptions?.[0];
+    const locationId = el('odysseus-file-visibility-root')?.value || '';
+    const capabilities = ['read', 'write'].filter(name => el(`odysseus-file-visibility-${name}`)?.checked);
+    if (!account?.dataset.username || !locationId || !capabilities.length) {
+      if (status) status.textContent = 'Choose an account, a Location, and at least one access capability.';
+      return;
+    }
+    button.disabled = true;
+    try { await changeFilePolicy('people', 'POST', { subject_username: account.dataset.username, location_id: locationId, capabilities }, 'people-access'); }
+    catch (error) { if (status) status.textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  const bindReset = (id, scope, context, label) => {
+    el(id)?.addEventListener('click', async () => {
+      const button = el(id);
+      const status = el('odysseus-permissions-reset-status');
+      button.disabled = true;
+      try {
+        const payload = context();
+        if (!payload) throw new Error(`There is no ${label.toLowerCase()} to reset.`);
+        await resetFileAgentPermissions(scope, payload, label);
+      } catch (error) { if (status) status.textContent = error.message; }
+      finally { button.disabled = false; }
+    });
+  };
+  bindReset('odysseus-permissions-reset-chat', 'chat', () => {
+    const chatId = window.sessionModule?.getCurrentSessionId?.();
+    return chatId ? { chat_id: chatId } : null;
+  }, 'This chat');
+  bindReset('odysseus-permissions-reset-workspace', 'workspace', () => {
+    const workspaceId = getWorkspaceId();
+    return workspaceId ? { workspace_id: workspaceId } : null;
+  }, 'This workspace');
+  bindReset('odysseus-permissions-reset-location-button', 'location', () => {
+    const locationId = el('odysseus-permissions-reset-location')?.value;
+    return locationId ? { location_id: locationId } : null;
+  }, 'This Location');
+  bindReset('odysseus-permissions-reset-all', 'all_agent', () => ({}), 'All agent permissions');
+}
+
+async function loadFileAccessSettings() {
+  initFileAccessControls();
+  const loadId = ++_fileAccessLoadId;
+  const status = el('file-policy-status');
+  if (status) status.textContent = 'Loading file access…';
+  try {
+    const state = await loadCanonicalPolicyState();
+    let users = [];
+    let accountWarning = '';
+    if (state.is_admin) {
+      try {
+        const response = await checkedFetch('/api/auth/users', { credentials: 'same-origin', cache: 'no-store' });
+        users = (await response.json()).users || [];
+      } catch (_) { accountWarning = 'Account names are unavailable; account IDs are shown.'; }
+    }
+    if (loadId !== _fileAccessLoadId) return;
+    const usersById = new Map(users.filter(user => user?.account_id).map(user => [String(user.account_id), user]));
+    modalEl?.querySelectorAll('[data-settings-panel="file-access"] .admin-only').forEach(control => { control.style.display = state.is_admin ? '' : 'none'; });
+    renderCurrentAppFilesystemAccess(state);
+    renderFileLocations(state);
+    renderPeopleAccess(state, users);
+    renderFileWorkspaces(state, usersById);
+    renderAgentAccess(state, usersById);
+    renderOperationApprovals(state, usersById);
+    if (status) status.textContent = accountWarning;
+  } catch (error) {
+    if (loadId !== _fileAccessLoadId) return;
+    for (const id of ['odysseus-file-visible-to-me-list', 'odysseus-file-roots', 'odysseus-file-visibility-assignments', 'file-policy-workspaces', 'file-policy-agent-access', 'odysseus-agent-grants']) el(id)?.replaceChildren();
+    if (status) status.textContent = error.message || 'Could not load file access.';
   }
 }
 
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
-export function open(tab) {
+export function open(tab, options = {}) {
+  if (tab) {
+    const normalized = normalizeSettingsPanel(tab);
+    if (!normalized) { uiModule.showToast('Unknown settings panel: ' + tab); tab = 'ai'; }
+    else tab = normalized;
+  }
   if (!initialized) initAll();
+  cancelPendingSettingsClose();
+  modalEl?.querySelector('.modal-content, .settings-modal-content')?.classList.remove('modal-closing');
   syncAppearanceCheckboxes();
   syncCopalNotesSettings();
+  if (tab === 'appearance' || !tab) initCopalAppearanceControls();
   if (modalEl.classList.contains('hidden')) {
     resetWindowPlacement();
   }
   modalEl.classList.remove('hidden');
   syncAdminVisibility();
-  const content = modalEl.querySelector('.settings-modal-content');
   if (tab) {
     if (ADMIN_ONLY_TABS.has(tab) && !window._isAdmin) tab = 'ai';
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
   }
   // Auto-init admin data if showing an admin tab
   let activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
   if (ADMIN_ONLY_TABS.has(activeTab) && !window._isAdmin) {
     activeTab = 'ai';
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === activeTab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== activeTab));
   }
-  document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
-  syncAppearanceOpacity(activeTab === 'appearance');
-  if (activeTab === 'ai') refreshAiModelEndpoints();
-  if (activeTab === 'added-models' && window._isAdmin) mimoProviders.load();
-  if (activeTab === 'added-models' && window._isAdmin) loadPermissionGrants();
+  // One activation path shared with nav clicks / finder / deep-link.
+  activatePanel(activeTab);
+  if (options.field) {
+    Promise.resolve(window.__agentSettingsReady).then(() => {
+      if (options.field.startsWith('reference:')) {
+        if (!focusNativeSettingsReference(options.field.slice(10))) uiModule.showToast('Unknown native settings reference');
+        return;
+      }
+      const field = [...modalEl.querySelectorAll('input,select,textarea')].find(node=>node.dataset.nativeSetting === options.field || node.dataset.uiKey === options.field || node.id === options.field);
+      if (field) focusSettingsControl(field);
+      else uiModule.showToast('This setting is not available: ' + options.field);
+    });
+  }
   if (ADMIN_MODULE_TABS.has(activeTab) && window._isAdmin && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
@@ -6121,22 +7105,59 @@ export function setCopalModule(copalModule) {
   syncCopalNotesSettings();
 }
 
+// Files supplies an explicit, owned Workspace ID. Open the surface before
+// delivering context so this also works before the library's first mount.
+window.addEventListener('hex-open', (event) => {
+  const workspaceId = String(event.detail?.workspaceId || '').trim();
+  if (!workspaceId) return;
+  open('hexes');
+  modalEl?.querySelector('[data-general-hex-library]')?.dispatchEvent(
+    new CustomEvent('hex-context', { detail: Object.freeze({ workspaceId }) }),
+  );
+});
+
+export async function openFileLocationWizard({ suggestedPath = '', showSettings = true } = {}) {
+  if (showSettings) open('file-access');
+  const controller = await import('./fileLocationController.js');
+  return controller.openFileLocationWizard({
+    suggestedPath,
+    onAdded: async ({ path, agentAccess }) => {
+      if (initialized) await loadFileAccessSettings();
+      const status = el('odysseus-file-root-status');
+      if (status) status.textContent = `Added ${path}. Agent access is ${agentAccess ? 'enabled within this Location' : 'off'}.`;
+    },
+  });
+}
+
 export function close() {
   if (!modalEl) return;
+  const closeEpoch = cancelPendingSettingsClose();
   // Always clear the appearance-tab body class so the rest of the app
   // doesn't keep its dimmed state if the modal got closed mid-tab.
   document.body.classList.remove('settings-appearance-open');
   syncAppearanceOpacity(false); // clear any opacity-slider fade
   const content = modalEl.querySelector('.modal-content, .settings-modal-content');
+  const finishClose = event => {
+    if (event && event.target !== content) return;
+    if (closeEpoch !== _closeEpoch) return;
+    cancelPendingSettingsClose();
+    const changed = !modalEl.classList.contains('hidden');
+    modalEl.classList.add('hidden');
+    content?.classList.remove('modal-closing');
+    // Presentation invalidation only: not the manager's close/input lifecycle.
+    // Emit after actual hiding, including reduced-motion/timer fallback.
+    if (changed) window.dispatchEvent(new CustomEvent('openclank:presentation-visibility-changed', {
+      detail: { source: 'settings', visible: false },
+    }));
+  };
   if (content && !content.classList.contains('modal-closing')) {
     content.classList.add('modal-closing');
-    content.addEventListener('animationend', () => {
-      modalEl.classList.add('hidden');
-      content.classList.remove('modal-closing');
-    }, { once: true });
-    setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } }, 250);
+    _closeAnimationTarget = content;
+    _closeAnimationHandler = finishClose;
+    content.addEventListener('animationend', finishClose);
+    _closeTimer = setTimeout(finishClose, 250);
   } else {
-    modalEl.classList.add('hidden');
+    finishClose();
   }
 }
 
@@ -6155,9 +7176,9 @@ export function close() {
       window.settingsModule.open('integrations');
       // Brief toast-style banner.
       const banner = document.createElement('div');
-      banner.textContent = success
+      setControlMessage(banner, success
         ? '✓ Google account connected — email is ready'
-        : `Google OAuth failed: ${errMsg || 'unknown error'}`;
+        : `Google OAuth failed: ${errMsg || 'unknown error'}`);
       Object.assign(banner.style, {
         position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
         background: success ? 'var(--accent, #50fa7b)' : 'var(--red, #ff5555)',
@@ -6174,7 +7195,67 @@ export function close() {
   _tryOpen();
 })();
 
-const settingsModule = { open, close, setCopalModule, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+// Direct navigation: ?settings=<panel> opens Settings to that panel once.
+// /settings/<panel> is handled by the shell applet registry (app.js).
+(function _handleSettingsDeepLink() {
+  const sp = new URLSearchParams(window.location.search);
+  const raw = sp.get('settings');
+  if (!raw) return;
+  const panel = normalizeSettingsPanel(raw);
+  if (!panel) return;
+  sp.delete('settings');
+  const q = sp.toString();
+  const clean = window.location.pathname + (q ? `?${q}` : '') + window.location.hash;
+  window.history.replaceState(null, '', clean);
+  function _tryOpen() {
+    if (window.settingsModule && typeof window.settingsModule.open === 'function') {
+      window.settingsModule.open(panel);
+    } else {
+      setTimeout(_tryOpen, 100);
+    }
+  }
+  _tryOpen();
+})();
+
+export function getCommandCatalogEntries() {
+  const panels = Object.entries(SETTINGS_OWNERSHIP).map(([panel, item]) => ({
+    identity: 'settings:' + panel, token: 'settings ' + panel, aliases: [],
+    help: item.consumer, category: 'Settings', origin: 'host', executor: 'settings',
+    scope: item.scope, destination: {panel},
+    availability: ADMIN_ONLY_TABS.has(panel) && !window._isAdmin ? 'unavailable' : 'available',
+    reason: ADMIN_ONLY_TABS.has(panel) && !window._isAdmin ? 'Administrator access required' : '',
+  }));
+  const root = modalEl || document.getElementById('settings-modal');
+  const presentation = [...(root?.querySelectorAll('[data-ui-key]') || [])].map(control => ({
+    identity:'setting:appearance:' + control.dataset.uiKey, token:'settings appearance ' + control.dataset.uiKey,
+    aliases:[], help:control.closest('label')?.textContent.trim() || control.dataset.uiKey,
+    category:'Settings', origin:'host', executor:'settings', scope:'browser-local',
+    destination:{panel:'appearance',field:control.dataset.uiKey}, availability:'available',
+  }));
+  return panels.concat(presentation, agentSettingsCatalogEntries(), nativeReferenceCatalogEntries());
+}
+
+export function openSettings(name, options = {}) {
+  const value = String(name || '').trim();
+  if (normalizeSettingsPanel(value)) return open(value,options);
+  const field = value.match(/^(.*)\s+(\S+)$/);
+  return field && normalizeSettingsPanel(field[1]) ? open(field[1], {field:field[2]}) : open(value, options);
+}
+
+const settingsModule = {
+  open, openSettings, getCommandCatalogEntries, close, openFileLocationWizard, setCopalModule, initIntegrations, initUnifiedIntegrations,
+  syncAdminVisibility, refreshAiModelEndpoints,
+  panelIds: SETTINGS_PANEL_IDS, normalizePanel: normalizeSettingsPanel,
+};
 
 
 export default settingsModule;
+
+function setControlMessage(node, message) {
+  if (!node) return;
+  const text = String(message || '');
+  const ids = { '✓':'check', '✗':'close', '⚠':'warning' };
+  const id = ids[text.charAt(0)];
+  if (id) setUiIconText(node, id, text.slice(1).trimStart());
+  else node.textContent = text;
+}

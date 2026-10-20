@@ -3,17 +3,25 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const I18N_DIR = path.join(ROOT, 'static', 'i18n');
 const require = createRequire(import.meta.url);
-const babelParser = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'parser'));
-const traverseModule = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'traverse'));
-const traverse = traverseModule.default || traverseModule;
+// Babel is only required for JavaScript AST extraction. Validation, freeze and
+// structured extraction must run without installing Copal's node_modules.
+let babelParser = null;
+let traverse = null;
+function loadBabel() {
+  if (babelParser && traverse) return;
+  babelParser = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'parser'));
+  const traverseModule = require(path.join(ROOT, 'packages', 'Copal', 'node_modules', '@babel', 'traverse'));
+  traverse = traverseModule.default || traverseModule;
+}
 
-const LOCALES = Object.freeze({
+const LOCALE_SEEDS = {
   en: { name: 'English', target: 'English', dir: 'ltr' },
   'zh-Hans': { name: '简体中文', target: 'Simplified Chinese', dir: 'ltr' },
   ja: { name: '日本語', target: 'Japanese', dir: 'ltr' },
@@ -29,6 +37,38 @@ const LOCALES = Object.freeze({
   sw: { name: 'Kiswahili', target: 'standard Swahili', dir: 'ltr' },
   ur: { name: 'اردو', target: 'standard Urdu', dir: 'rtl' },
   fa: { name: 'فارسی', target: 'contemporary Persian', dir: 'rtl' },
+};
+
+// Keep the audited canonical registry authoritative when extraction runs.
+// Long-tail locales can point at the English fallback catalog until their
+// translated files arrive; extraction must not silently shrink the registry
+// back to the original fifteen-language list.
+const existingRegistry = (() => {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(I18N_DIR, 'registry.json'), 'utf8'));
+    return value && typeof value === 'object' ? value : {};
+  } catch (_) { return {}; }
+})();
+const pickLocaleMeta = (meta = {}) => ({
+  name: meta.name || meta.id || undefined,
+  target: meta.target || meta.name || undefined,
+  dir: meta.dir || 'ltr',
+  ...(meta.catalog ? { catalog: meta.catalog } : {}),
+  ...(meta.html_lang ? { html_lang: meta.html_lang } : {}),
+  ...(meta.alias_of ? { alias_of: meta.alias_of } : {}),
+  ...(meta.display_only ? { display_only: true } : {}),
+});
+const LOCALES = Object.freeze({
+  ...Object.fromEntries(Object.entries(LOCALE_SEEDS).map(([id, item]) => [id, {
+    ...item,
+    ...(existingRegistry.locales?.[id]?.catalog ? { catalog: existingRegistry.locales[id].catalog } : {}),
+    ...(existingRegistry.locales?.[id]?.html_lang ? { html_lang: existingRegistry.locales[id].html_lang } : {}),
+    ...(existingRegistry.locales?.[id]?.alias_of ? { alias_of: existingRegistry.locales[id].alias_of } : {}),
+    ...(existingRegistry.locales?.[id]?.display_only ? { display_only: true } : {}),
+  }])),
+  ...Object.fromEntries(Object.entries(existingRegistry.locales || {})
+    .filter(([id]) => !LOCALE_SEEDS[id])
+    .map(([id, meta]) => [id, { id, ...pickLocaleMeta(meta) }])),
 });
 
 const BRANDS = Object.freeze([
@@ -49,12 +89,19 @@ const STABLE_TOKENS = Object.freeze([
 const JS_EXCLUDES = [
   /\/static\/lib\//,
   /\.min\.js$/,
-  /\/static\/js\/copal\/codemirror\.js$/,
+  /\/static\/js\/i18n\.js$/,
+  // The source editor build emits both codemirror.js and content-hashed
+  // siblings. They are generated/vendor code and must never become UI keys.
+  /\/static\/js\/copal\/codemirror(?:[-.].*)?\.js$/,
+  /\/static\/js\/(?:[^/]+[-.]?)?chunk(?:[-.].*)?\.js$/,
+  /\/static\/js\/(?:[^/]+[-.]?)?vendor(?:[-.].*)?\.js$/,
+  /\/static\/js\/copal\/[^/]+\.chunk\.[^/]+\.js$/,
   /\/static\/js\/modelCatalog\.js$/,
   /\/static\/js\/mimoModels\.js$/,
   /\/static\/js\/mimoProviders\.generated\.js$/,
   /\/node_modules\//,
   /\/\.references\//,
+  /\/\.clanker\/references\//,
   /\/packages\/mimo-code\//,
   /\/packages\/Copal\/src\/components\/ui\//,
   /\/packages\/Copal\/src\/lib\/emoji-data\.ts$/,
@@ -74,8 +121,12 @@ const JSON_UI_FILES = ['static/manifest.json'];
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.ts', '.tsx', '.jsx']);
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
 const PLACEHOLDER = /\{([a-zA-Z_][a-zA-Z0-9_]*|\d+)\}/g;
+const CSS_PROPERTY = /^(?:--|align|animation|appearance|backdrop|background|border|bottom|box|color|column|content|cursor|display|fill|filter|flex|float|font|gap|grid|height|inset|justify|left|letter|line|margin|max|min|object|opacity|order|outline|overflow|padding|perspective|pointer|position|right|table|text|top|transform|transition|user|vertical|visibility|white|width|word|z-index|zoom)(?:-[a-z]+)*$/iu;
+const HTML_SELECTOR_TAG = /^(?:a|article|button|code|div|form|h[1-6]|input|label|li|main|option|p|pre|select|span|table|td|textarea|th|tr|ul)$/iu;
 
 function walk(target) {
+  const rel = path.relative(ROOT, target).split(path.sep).join('/');
+  if (/(?:^|\/)(?:\.references|\.clanker\/references)(?:\/|$)/.test(rel)) return [];
   if (!fs.existsSync(target)) return [];
   const stat = fs.statSync(target);
   if (stat.isFile()) return [target];
@@ -97,6 +148,28 @@ function normalizeSource(raw) {
 function looksUserFacing(raw) {
   const value = normalizeSource(raw);
   if (value.length < 2 || value.length > 600 || !/[A-Za-z]/.test(value)) return false;
+  // These values are implementation literals collected from querySelector,
+  // style assignments, MIME allowlists and embedded templates. Keep their
+  // historical keys for compatibility, but never treat them as live UI copy.
+  if (/^\{\{[\s\S]*\}\}$/u.test(value)) return false;
+  if (HTML_SELECTOR_TAG.test(value) && (value === value.toLowerCase() || value === value.toUpperCase())) return false;
+  if (/^(?:[-\w]+\.)?[a-z0-9_-]+\.(?:json|memes|zip),application\/[a-z0-9.+-]+(?:,|$)/iu.test(value)) return false;
+  if (/^(?:[.#][\w-]+|\[[^\]]+\]|(?:select|div|span|button|input|textarea|form|option|table|tr|td|th|h[1-6])(?:[.#:[\s]|$))/u.test(value)) return false;
+  if (/^(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD|SELECT|INSERT|UPDATE|DROP)\b(?:\s|$)/u.test(value)) return false;
+  if (/^(?:python3|python|node|bash|sh)\s+-c\b|^\[\s*["']-[a-z]/iu.test(value)) return false;
+  if (/^(?:[a-z][\w-]*:){1,2}[\w.-]+$/u.test(value)) return false;
+  const declarations = value.split(';').map(part => part.trim()).filter(Boolean);
+  if (declarations.some(part => {
+    const match = part.match(/^([\w-]+)\s*:\s*(.+)$/u);
+    if (!match || !CSS_PROPERTY.test(match[1])) return false;
+    return declarations.length > 1 || /(?:[-\d.]|var\(|#|\{|\b(?:auto|none|inherit|initial|transparent|flex|block|inline|absolute|relative|fixed|hidden|pointer)\b)/iu.test(match[2]);
+  })) return false;
+  // Selectors, CSS declarations and generated module identifiers are source
+  // implementation details even when they occur in a UI-adjacent object.
+  if (/^(?:[.#][\w-]+|--[\w-]+)(?:[\s>+~:#.\[\]=*"'-].*)?$/u.test(value)) return false;
+  if (/^(?:[a-z-]+)\s*:\s*(?:[a-z0-9#.%(), -]+)$/iu.test(value)) return false;
+  if (/^[\w-]+\.(?:css|js|mjs|ts|tsx|jsx|json|html)(?:[?#].*)?$/iu.test(value)) return false;
+  if (/^(?:GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s+\//u.test(value)) return false;
   if (/<\/?[a-z][^>]*>/i.test(value)) return false;
   if (/^\{[^{}]+\}$/.test(value) || /\{[^{}]*(?:[().]|::)[^{}]*\}/.test(value)) return false;
   if (/^(?:&#(?:x[0-9a-f]+|\d+);|\\[0-9a-f]{2,6})$/i.test(value)) return false;
@@ -277,6 +350,7 @@ function isLikelyStandaloneMessage(value) {
 }
 
 function extractJavaScript(file, collector) {
+  loadBabel();
   const code = fs.readFileSync(file, 'utf8');
   let ast;
   try {
@@ -370,6 +444,40 @@ function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
 
+function catalogRecords(payload) {
+  // Donor revisions exist in both the historical flat object shape and the
+  // source/context/messages envelope. Keep the importer schema agnostic while
+  // leaving this build's flat runtime catalogs untouched.
+  if (payload && payload.schema === 1 && Array.isArray(payload.messages)) {
+    return payload.messages
+      .filter(record => record && typeof record.source === 'string')
+      .map(record => ({
+        key: typeof record.key === 'string' ? record.key : null,
+        source: record.source,
+        context: typeof record.context === 'string' ? record.context : '',
+        target: typeof record.target === 'string' ? record.target : undefined,
+      }));
+  }
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') return [];
+  return Object.entries(payload).map(([key, target]) => ({
+    key,
+    source: key,
+    context: '',
+    target: typeof target === 'string' ? target : undefined,
+  }));
+}
+
+function gitFile(donor, revision, file) {
+  try {
+    return execFileSync('git', ['-C', donor, 'show', `${revision}:${file}`], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -416,14 +524,58 @@ function extract() {
     if (fs.existsSync(file)) extractCss(file, collector);
   }
 
-  const records = [...collector.entries.values()]
-    .map(record => ({ ...record, locations: record.locations.sort() }))
+  // Structured first-party content (TreeHouse lessons/awards, official docs)
+  // is data in Python modules. Fold it into the live census so extract() does
+  // not demote those keys to compatibility.
+  try {
+    const structured = JSON.parse(execFileSync('python3', [path.join(ROOT, 'scripts', 'i18n_structured_extract.py')], {
+      encoding: 'utf8',
+      cwd: ROOT,
+    }));
+    for (const record of structured.records || []) {
+      const existing = collector.entries.get(record.key);
+      if (existing) {
+        if (!existing.locations.includes(...record.locations)) {
+          for (const location of record.locations) if (!existing.locations.includes(location)) existing.locations.push(location);
+        }
+        continue;
+      }
+      collector.entries.set(record.key, {
+        key: record.key,
+        source: record.source,
+        kind: record.kind || 'structured-prose',
+        locations: [...(record.locations || [])],
+      });
+    }
+  } catch (error) {
+    process.stderr.write(`warning: structured extraction skipped: ${error.message}\n`);
+  }
+
+  const liveRecords = [...collector.entries.values()]
+    .map(record => ({ ...record, status: 'live', locations: record.locations.sort() }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+  // A source census is allowed to lose a render site while a compatibility
+  // key is still present in shipped catalogs. Keep that key and make the
+  // reason explicit in the ledger instead of silently deleting translations.
+  const liveKeys = new Set(liveRecords.map(record => record.key));
+  const compatibilityRecords = Object.entries(existingEnglish)
+    .filter(([key]) => !liveKeys.has(key))
+    .map(([key, source]) => ({
+      key,
+      source,
+      kind: 'compatibility',
+      status: 'compatibility',
+      locations: [],
+      reason: 'retained catalog key absent from current first-party census',
+    }));
+  const records = [...liveRecords, ...compatibilityRecords]
     .sort((a, b) => a.key.localeCompare(b.key));
   const english = Object.fromEntries(records.map(record => [record.key, record.source]));
   const ledger = {
-    version: 1,
-    generated_at: new Date().toISOString(),
+    version: 2,
     source_count: records.length,
+    current_source_count: liveRecords.length,
+    compatibility_count: compatibilityRecords.length,
     source_hash: hashText(JSON.stringify(english)),
     roots: {
       html: HTML_FILES,
@@ -434,25 +586,40 @@ function extract() {
     entries: records,
   };
   const registry = {
-    version: 1,
+    version: 2,
     default_locale: 'en',
-    locales: Object.fromEntries(Object.entries(LOCALES).map(([id, item]) => [id, { name: item.name, dir: item.dir }])),
-    aliases: {
+    locales: Object.fromEntries(Object.entries(LOCALES).map(([id, item]) => {
+      const meta = {
+        name: item.name,
+        dir: item.dir,
+        ...(item.catalog ? { catalog: item.catalog } : {}),
+        ...(item.html_lang ? { html_lang: item.html_lang } : {}),
+        ...(item.alias_of ? { alias_of: item.alias_of } : {}),
+        ...(item.display_only ? { display_only: true } : {}),
+      };
+      if (item.target) meta.target = item.target;
+      return [id, meta];
+    })),
+    aliases: existingRegistry.aliases || {
       zh: 'zh-Hans', 'zh-CN': 'zh-Hans', 'zh-SG': 'zh-Hans',
       in: 'id', 'pa-IN': 'pa-Guru',
     },
-    do_not_auto_map: ['zh-TW', 'zh-HK', 'zh-MO', 'zh-Hant', 'pa-PK', 'pa-Arab'],
+    do_not_auto_map: existingRegistry.do_not_auto_map || [],
   };
 
   writeJson(englishFile, english);
   for (const locale of Object.keys(LOCALES).filter(id => id !== 'en')) {
+    // Display aliases (en-CA → fr) reuse the donor catalog file. Do not
+    // duplicate French bytes into an en-CA.json catalog.
+    if (LOCALES[locale]?.catalog && LOCALES[locale].catalog !== locale) continue;
     const file = path.join(I18N_DIR, `${locale}.json`);
     if (!fs.existsSync(file)) continue;
     const catalog = readJson(file, {});
     writeJson(file, Object.fromEntries(
-      Object.keys(english)
-        .filter(key => typeof catalog[key] === 'string')
-        .map(key => [key, catalog[key]]),
+      Object.keys(english).map(key => [
+        key,
+        typeof catalog[key] === 'string' && catalog[key].trim() ? catalog[key] : english[key],
+      ]),
     ));
   }
   writeJson(path.join(I18N_DIR, 'ledger.json'), ledger);
@@ -475,6 +642,232 @@ function placeholderSet(value) {
   return [...value.matchAll(PLACEHOLDER)].map(match => match[1]).sort();
 }
 
+function donorRecords(payload, donorEnglish = {}) {
+  if (payload && payload.schema === 1 && Array.isArray(payload.messages)) {
+    return payload.messages
+      .filter(record => record && typeof record.source === 'string')
+      .map(record => ({
+        key: typeof record.key === 'string' ? record.key : null,
+        source: normalizeSource(record.source),
+        context: typeof record.context === 'string' ? record.context.trim() : '',
+        target: typeof record.target === 'string' ? record.target : undefined,
+      }));
+  }
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') return [];
+  return Object.entries(payload).map(([key, target]) => ({
+    key,
+    source: typeof donorEnglish[key] === 'string' ? normalizeSource(donorEnglish[key]) : null,
+    context: '',
+    target: typeof target === 'string' ? target : undefined,
+  }));
+}
+
+function digest(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function importDonor(donor) {
+  if (!donor) throw new Error('import-donor requires an explicit donor checkout path');
+  const revision = '08eeb26a4e9b28190e6832f88b7d6e1d0a12646a';
+  if (!fs.existsSync(donor)) throw new Error(`donor checkout does not exist: ${donor}`);
+  const donorEnglishText = gitFile(donor, revision, 'static/i18n/en.json');
+  if (!donorEnglishText) throw new Error(`unable to read donor revision ${revision}`);
+  const donorEnglishPayload = JSON.parse(donorEnglishText);
+  const donorEnglish = donorEnglishPayload?.messages
+    ? Object.fromEntries(donorRecords(donorEnglishPayload).map(record => [record.key || record.source, record.source]))
+    : donorEnglishPayload;
+  let currentEnglish = readJson(path.join(I18N_DIR, 'en.json'), {});
+  const baselineEnglishText = gitFile(ROOT, 'HEAD', 'static/i18n/en.json');
+  const baselineEnglish = baselineEnglishText ? JSON.parse(baselineEnglishText) : {};
+  // Recover any baseline source rows lost by the interrupted extractor before
+  // resolving donor keys. Their prior targets are restored below per locale.
+  currentEnglish = Object.fromEntries(Object.entries({ ...baselineEnglish, ...currentEnglish })
+    .sort(([left], [right]) => left.localeCompare(right)));
+  writeJson(path.join(I18N_DIR, 'en.json'), currentEnglish);
+  const currentRegistry = readJson(path.join(I18N_DIR, 'registry.json'), {});
+  const currentFiles = new Set(fs.readdirSync(I18N_DIR)
+    .filter(name => /^[A-Za-z0-9-]+\.json$/u.test(name))
+    .map(name => name.slice(0, -5)));
+  const sourceToKeys = new Map();
+  for (const [key, source] of Object.entries(currentEnglish)) {
+    const normalized = normalizeSource(source);
+    const keys = sourceToKeys.get(normalized) || [];
+    keys.push(key);
+    sourceToKeys.set(normalized, keys);
+  }
+  const aliases = { 'zh-CN': 'zh-Hans', 'zh-TW': 'zh-Hant' };
+  const donorRegistryText = gitFile(donor, revision, 'static/i18n/registry.json');
+  const donorRegistry = donorRegistryText ? JSON.parse(donorRegistryText) : {};
+  const donorLocales = Object.keys(donorRegistry.locales || {})
+    .filter(id => id !== 'en' && id !== 'brands');
+  const changedSourceKeys = new Set();
+  const baselineChangedSourceKeys = Object.keys(donorEnglish)
+    .filter(key => baselineEnglish[key] !== undefined && donorEnglish[key] !== baselineEnglish[key])
+    .sort();
+  const currentLedger = readJson(path.join(I18N_DIR, 'ledger.json'), {});
+  const liveKeys = new Set((currentLedger.entries || [])
+    .filter(entry => entry.status === 'live' && typeof entry.key === 'string')
+    .map(entry => entry.key));
+  const baselineKeys = new Set(Object.keys(baselineEnglish));
+  const censusAddedKeys = [...liveKeys].filter(key => !baselineKeys.has(key)).sort();
+  const censusRemovedKeys = [...baselineKeys].filter(key => !liveKeys.has(key)).sort();
+  const ambiguousContexts = [];
+  const conflicts = [];
+  const importedByLocale = {};
+  const donorFiles = [];
+  const mappedDonorLocales = new Set();
+  const restoredByLocale = {};
+
+  for (const donorLocale of donorLocales) {
+    const locale = aliases[donorLocale] || donorLocale;
+    if (locale === 'en') continue;
+    const committedPath = `static/i18n/${donorLocale}.json`;
+    const committedText = gitFile(donor, revision, committedPath);
+    const workingPath = path.join(donor, 'static', 'i18n', `${donorLocale}.json`);
+    const workingText = fs.existsSync(workingPath) ? fs.readFileSync(workingPath, 'utf8') : null;
+    if (!committedText && !workingText) continue;
+    donorFiles.push({
+      locale: donorLocale,
+      mapped_locale: locale,
+      committed_revision: revision,
+      committed_sha256: committedText ? digest(committedText) : null,
+      working_sha256: workingText ? digest(workingText) : null,
+    });
+    mappedDonorLocales.add(locale);
+    const committed = donorRecords(committedText ? JSON.parse(committedText) : {}, donorEnglish);
+    const committedByKey = new Map();
+    for (const row of committed) {
+      if (row.key && row.source && currentEnglish[row.key] !== undefined) {
+        if (normalizeSource(currentEnglish[row.key]) === row.source) committedByKey.set(row.key, row);
+        else changedSourceKeys.add(row.key);
+      }
+    }
+    const working = donorRecords(workingText ? JSON.parse(workingText) : {}, donorEnglish);
+    const workingBySource = new Map();
+    for (const row of working) {
+      if (!row.source || !row.target) continue;
+      const keys = sourceToKeys.get(row.source) || [];
+      if (keys.length !== 1) {
+        if (keys.length > 1) ambiguousContexts.push({ locale, source: row.source, keys: [...keys].sort() });
+        continue;
+      }
+      const prior = workingBySource.get(row.source);
+      if (!prior || row.context < prior.context) workingBySource.set(row.source, row);
+    }
+    const file = path.join(I18N_DIR, `${locale}.json`);
+    const currentCatalog = readJson(file, {});
+    const baselineCatalogText = gitFile(ROOT, 'HEAD', `static/i18n/${locale}.json`);
+    const baselineCatalog = baselineCatalogText ? JSON.parse(baselineCatalogText) : {};
+    const output = {};
+    let imported = 0;
+    let restored = 0;
+    for (const [key, source] of Object.entries(currentEnglish)) {
+      let existing = currentCatalog[key];
+      // The interrupted extractor may have dropped a current translation. If
+      // the baseline source is unchanged, recover its target before applying
+      // donor candidates; this keeps current authored work authoritative.
+      if ((!existing || existing === source)
+          && baselineEnglish[key] === source
+          && translationIsStructurallyValid(source, baselineCatalog[key])
+          && baselineCatalog[key] !== source) {
+        existing = baselineCatalog[key];
+        restored += 1;
+      }
+      const committed = committedByKey.get(key);
+      const workingRow = workingBySource.get(normalizeSource(source));
+      const donorTarget = committed?.target && committed.target !== committed.source
+        ? committed.target
+        : workingRow?.target && workingRow.target !== workingRow.source ? workingRow.target : undefined;
+      const donorKind = committed?.target && committed.target !== committed.source ? 'committed'
+        : donorTarget ? 'working-source-context' : null;
+      // A malformed donor row is recorded by omission from the import and
+      // falls back to the source. It must never make a current key disappear.
+      const usableDonorTarget = donorTarget && translationIsStructurallyValid(source, donorTarget)
+        ? donorTarget : undefined;
+      const usableDonorKind = usableDonorTarget ? donorKind : null;
+      if (typeof existing === 'string' && existing.trim() && existing !== source) {
+        output[key] = existing;
+        if (usableDonorTarget && usableDonorTarget !== existing) {
+          conflicts.push({ locale, key, source, retained: existing, donor: usableDonorTarget, donor_kind: usableDonorKind });
+        }
+      } else if (usableDonorTarget) {
+        output[key] = usableDonorTarget;
+        imported += 1;
+      } else {
+        output[key] = source;
+      }
+    }
+    writeJson(file, output);
+    importedByLocale[locale] = { imported, restored, keys: Object.keys(output).length };
+    restoredByLocale[locale] = restored;
+  }
+
+  // Existing translated catalogs remain active; other registry choices retain
+  // an explicit English fallback so no language silently disappears.
+  const locales = { ...(currentRegistry.locales || {}) };
+  for (const [locale, metadata] of Object.entries(locales)) {
+    const active = locale !== 'en' && (mappedDonorLocales.has(locale) || currentFiles.has(locale));
+    locales[locale] = {
+      name: metadata.name || locale,
+      dir: metadata.dir || 'ltr',
+      catalog: active ? locale : 'en',
+    };
+  }
+  writeJson(path.join(I18N_DIR, 'registry.json'), {
+    version: 2,
+    default_locale: currentRegistry.default_locale || 'en',
+    locales,
+    aliases: currentRegistry.aliases || {},
+    do_not_auto_map: currentRegistry.do_not_auto_map || [],
+  });
+  donorFiles.sort((a, b) => a.locale.localeCompare(b.locale));
+  const provenance = {
+    schema: 1,
+    operation: 'translation-recovery',
+    donor: {
+      source: 'https://github.com/odysseus-dev/odysseus',
+      checkout_scope: 'Local source checkout; absolute operator path omitted from published provenance',
+      revision,
+      license: 'AGPL-3.0',
+      license_sha256: (() => {
+        const text = gitFile(donor, revision, 'LICENSE');
+        return text ? digest(text) : null;
+      })(),
+      files: donorFiles,
+    },
+    current: {
+      english_sha256: digest(JSON.stringify(currentEnglish)),
+      english_keys: Object.keys(currentEnglish).length,
+    },
+    current_source_census: {
+      baseline: 'HEAD:static/i18n/en.json',
+      baseline_keys: baselineKeys.size,
+      live_keys: liveKeys.size,
+      added_keys: censusAddedKeys,
+      removed_keys: censusRemovedKeys,
+      added_count: censusAddedKeys.length,
+      removed_count: censusRemovedKeys.length,
+    },
+    mapping: aliases,
+    imported_by_locale: Object.fromEntries(Object.entries(importedByLocale).sort()),
+    restored_current_by_locale: Object.fromEntries(Object.entries(restoredByLocale).sort()),
+    changed_source_keys: [...changedSourceKeys].sort(),
+    baseline_changed_source_keys: baselineChangedSourceKeys,
+    ambiguous_contexts: [...new Map(ambiguousContexts.map(row => [JSON.stringify(row), row])).values()]
+      .sort((a, b) => `${a.locale}\0${a.source}`.localeCompare(`${b.locale}\0${b.source}`)),
+    conflicts: conflicts.sort((a, b) => `${a.locale}\0${a.key}`.localeCompare(`${b.locale}\0${b.key}`)),
+    counts: {
+      changed_sources: changedSourceKeys.size,
+      baseline_changed_sources: baselineChangedSourceKeys.length,
+      ambiguous_contexts: ambiguousContexts.length,
+      conflicts: conflicts.length,
+      restored_current: Object.values(restoredByLocale).reduce((sum, count) => sum + count, 0),
+    },
+  };
+  writeJson(path.join(I18N_DIR, 'provenance.json'), provenance);
+  process.stdout.write(`donor-imported locales=${Object.keys(importedByLocale).length} conflicts=${conflicts.length} changed_sources=${changedSourceKeys.size}\n`);
+}
+
 function validate() {
   const english = readJson(path.join(I18N_DIR, 'en.json'), null);
   if (!english || typeof english !== 'object' || Array.isArray(english)) throw new Error('missing or invalid en.json');
@@ -483,10 +876,22 @@ function validate() {
   const warnings = [];
   const untranslatedAllowed = new Set([...BRANDS, ...STABLE_TOKENS, 'English']);
 
+  const validatedCatalogFiles = new Set();
   for (const [locale, meta] of Object.entries(LOCALES)) {
-    const file = path.join(I18N_DIR, `${locale}.json`);
+    const catalogName = meta.catalog || locale;
+    if (catalogName === 'en') {
+      process.stdout.write(`${locale}: fallback catalog=en dir=${meta.dir}\n`);
+      continue;
+    }
+    const file = path.join(I18N_DIR, `${catalogName}.json`);
+    // Display aliases such as en-CA share the donor catalog (fr). Validate the
+    // donor file once and report the alias as covered by it.
+    if (validatedCatalogFiles.has(catalogName)) {
+      process.stdout.write(`${locale}: alias catalog=${catalogName} dir=${meta.dir}\n`);
+      continue;
+    }
     if (!fs.existsSync(file)) {
-      errors.push(`${locale}: missing catalog`);
+      errors.push(`${locale}: missing catalog ${catalogName}.json`);
       continue;
     }
     const catalog = readJson(file, null);
@@ -494,6 +899,7 @@ function validate() {
       errors.push(`${locale}: invalid catalog`);
       continue;
     }
+    validatedCatalogFiles.add(catalogName);
     const keys = Object.keys(catalog).sort();
     const missing = englishKeys.filter(key => !(key in catalog));
     const extra = keys.filter(key => !(key in english));
@@ -519,7 +925,7 @@ function validate() {
         warnings.push(`${locale}:${key}: unchanged English: ${source}`);
       }
     }
-    process.stdout.write(`${locale}: keys=${keys.length} dir=${meta.dir}\n`);
+    process.stdout.write(`${locale}: keys=${keys.length} catalog=${catalogName} dir=${meta.dir}\n`);
   }
 
   for (const warning of warnings.slice(0, 80)) process.stderr.write(`warning: ${warning}\n`);
@@ -728,11 +1134,18 @@ function generateLocalizedManifests() {
   const sourceManifest = readJson(path.join(ROOT, 'static', 'manifest.json'), {});
   const english = readJson(path.join(I18N_DIR, 'en.json'), {});
   const descriptionKey = Object.keys(english).find(key => english[key] === sourceManifest.description);
-  for (const locale of Object.keys(LOCALES)) {
-    const catalog = readJson(path.join(I18N_DIR, `${locale}.json`), {});
+  const cache = new Map();
+  const loadCatalog = name => {
+    if (!cache.has(name)) cache.set(name, readJson(path.join(I18N_DIR, `${name}.json`), {}));
+    return cache.get(name);
+  };
+  for (const [locale, meta] of Object.entries(LOCALES)) {
+    const catalogName = meta.catalog || locale;
+    const catalog = catalogName === 'en' ? english : loadCatalog(catalogName);
     writeJson(path.join(ROOT, 'static', `manifest.${locale}.json`), {
       ...sourceManifest,
-      lang: locale,
+      lang: meta.html_lang || catalogName,
+      name: meta.name,
       description: catalog[descriptionKey] || sourceManifest.description,
     });
   }
@@ -742,6 +1155,7 @@ function generateLocalizedManifests() {
 async function main() {
   const [command = 'validate', locale] = process.argv.slice(2);
   if (command === 'extract') extract();
+  else if (command === 'import-donor') importDonor(locale);
   else if (command === 'validate') validate();
   else if (command === 'translate') await translateLocale(locale);
   else if (command === 'translate-all') {
@@ -755,8 +1169,12 @@ async function main() {
   } else if (command === 'repair-google-all') {
     for (const id of Object.keys(GOOGLE_CODES)) await repairLocaleGoogle(id);
   } else if (command === 'manifests') generateLocalizedManifests();
-  else {
-    throw new Error('usage: node scripts/i18n-catalog.mjs extract|validate|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
+  else if (command === 'freeze' || command === 'structured-extract') {
+    const script = path.join(ROOT, 'scripts', command === 'freeze' ? 'i18n_freeze.py' : 'i18n_structured_extract.py');
+    const extra = process.argv.slice(3);
+    execFileSync('python3', [script, ...extra], { stdio: 'inherit', cwd: ROOT });
+  } else {
+    throw new Error('usage: node scripts/i18n-catalog.mjs extract|import-donor DONOR|validate|freeze|structured-extract|translate LOCALE|translate-all|translate-google LOCALE|translate-google-all|repair-google-all|manifests');
   }
 }
 

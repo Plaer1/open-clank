@@ -1,0 +1,1 @@
+Finding101 is permanent in A; parity can still change. Accepting the union instead of intersection is a different language.

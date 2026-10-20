@@ -24,7 +24,7 @@ const env = Layer.mergeAll(
 
 function buildRequest(extra?: Partial<Parameters<PermissionType.Interface["ask"]>[0]>) {
   return {
-    permission: "bash_delete" as never,
+    permission: "bash_destructive" as never,
     patterns: ["rm /tmp/some-file"],
     always: [],
     metadata: {},

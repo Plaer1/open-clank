@@ -1,6 +1,7 @@
 # src/document_processor.py
 """Document processing: PDF/OCR extraction, text file handling, image VL analysis, user content building."""
 
+import asyncio
 import os
 import logging
 import mimetypes
@@ -9,12 +10,24 @@ import tempfile
 import urllib.parse
 from typing import List, Dict, Any
 
-from src.llm_core import llm_call
-
 logger = logging.getLogger(__name__)
 
 MAX_INLINE_ATTACHMENT_CHARS = 24000
 MIN_INLINE_ATTACHMENT_SLICE = 500
+NATIVE_MEDIA_SOURCE_BYTES = 150 * 1024 * 1024
+NATIVE_MEDIA_PAYLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _native_media_limit_message(display_name: str, mime: str, size: int) -> str | None:
+    """Return a typed result before reading/encoding an oversized media source."""
+    if size > NATIVE_MEDIA_SOURCE_BYTES:
+        return (f"\n\n[Attachment unavailable: {display_name} is {size:,} bytes, "
+                f"over the {NATIVE_MEDIA_SOURCE_BYTES:,}-byte source limit.]" )
+    encoded = ((size + 2) // 3) * 4
+    if encoded > NATIVE_MEDIA_PAYLOAD_BYTES:
+        return (f"\n\n[Attachment unavailable: {display_name} encodes to {encoded:,} bytes, "
+                f"over the {NATIVE_MEDIA_PAYLOAD_BYTES:,}-byte native payload limit.]" )
+    return None
 
 
 def _is_text_file(path: str) -> bool:
@@ -304,92 +317,92 @@ def _load_vl_settings() -> dict:
         return {}
 
 
-def _resolve_vl_model(configured: str, owner: str | None = None) -> tuple:
-    """Resolve the vision model to (url, model_id, headers).
+async def analyze_image_with_vl_result_async(
+    image_path: str,
+    owner: str | None = None,
+    *,
+    root_operation_id: str | None = None,
+    grant_id: str | None = None,
+    model_route_id: str | None = None,
+    prompt: str = "Describe this image in detail",
+) -> dict:
+    """Analyze an image through the owner-bound vision.describe operation."""
 
-    Uses admin-configured model if set, otherwise tries auto-detection
-    of known vision-capable models across configured endpoints.
-    """
-    from src.ai_interaction import _resolve_model
-
-    if configured:
-        return _resolve_model(configured, owner=owner)
-
-    # Auto-detect: try known vision-capable models in priority order
-    candidates = [
-        "gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini",
-        "claude-sonnet-4-5-20250929", "claude-opus-4-20250514",
-        "gemini-2.0-flash", "gemini-2.5-pro",
-        "llava", "pixtral", "qwen2-vl",
-    ]
-    for candidate in candidates:
-        try:
-            return _resolve_model(candidate, owner=owner)
-        except (ValueError, Exception):
-            continue
-
-    raise ValueError("No vision model available")
-
-
-def analyze_image_with_vl_result(image_path: str, owner: str | None = None) -> dict:
-    """Analyze an image and return both text and the model that produced it."""
-    logger.info(f"Analyzing image with VL model: {image_path}")
+    logger.info("Analyzing image through the managed vision route")
+    settings = _load_vl_settings()
+    if not settings.get("vision_enabled", True):
+        return {
+            "text": "[Vision is disabled — enable it in Settings → Vision]",
+            "model": "",
+        }
+    selected_route = (
+        str(model_route_id or settings.get("vision_model") or "").strip()
+        or None
+    )
     try:
-        settings = _load_vl_settings()
-        if not settings.get("vision_enabled", True):
-            return {"text": "[Vision is disabled — enable it in Settings → Vision]", "model": ""}
-        vl_model = settings.get("vision_model", "")
+        from src.openclank.modality_facade import describe_image_path
 
-        try:
-            url, model_id, headers = _resolve_vl_model(vl_model, owner=owner)
-        except ValueError:
-            return {"text": "[No vision model configured — set one in Settings → Vision]", "model": vl_model or ""}
+        result = await describe_image_path(
+            owner=owner or "",
+            image_path=image_path,
+            prompt=prompt,
+            model_route_id=selected_route,
+            root_operation_id=root_operation_id,
+            grant_id=grant_id,
+        )
+        return {
+            "text": str(result.output.get("text") or ""),
+            "model": result.model_route_id,
+        }
+    except Exception as exc:
+        logger.warning(
+            "Managed vision analysis unavailable (%s)",
+            type(exc).__name__,
+        )
+        return {
+            "text": "[VL model unavailable - image not analyzed]",
+            "model": "",
+        }
 
-        with open(image_path, "rb") as f:
-            img_data = base64.b64encode(f.read()).decode("utf-8")
 
-        ext = os.path.splitext(image_path)[1].lower()
-        mime_map = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png", ".gif": "gif", ".webp": "webp"}
-        img_format = mime_map.get(ext, "jpeg")
+def analyze_image_with_vl_result(
+    image_path: str,
+    owner: str | None = None,
+    *,
+    root_operation_id: str | None = None,
+    grant_id: str | None = None,
+    model_route_id: str | None = None,
+) -> dict:
+    """Synchronous compatibility wrapper for non-async import/OCR workers.
 
-        vl_messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/{img_format};base64,{img_data}"}},
-                ],
-            }
-        ]
-        # Vision-specific fallback chain (Settings → Vision → Fallbacks). A
-        # downed vision endpoint can fall through to the next configured model
-        # — same shape as task/chat but its own list (`vision_model_fallbacks`).
-        try:
-            from src.endpoint_resolver import resolve_vision_fallback_candidates
-            _vl_candidates = [(url, model_id, headers)] + resolve_vision_fallback_candidates(owner=owner)
-        except Exception:
-            _vl_candidates = [(url, model_id, headers)]
+    Async request and chat paths must await analyze_image_with_vl_result_async
+    so execution stays on the application supervisor's event loop.
+    """
 
-        last_err = None
-        for i, (_url, _model, _headers) in enumerate([c for c in _vl_candidates if c and c[0] and c[1]]):
-            try:
-                description = llm_call(_url, _model, vl_messages, headers=_headers, timeout=120)
-                logger.info("VL analysis complete with model %s", _model)
-                return {"text": description, "model": _model}
-            except Exception as e:
-                last_err = e
-                tag = "primary" if i == 0 else "candidate"
-                logger.warning(f"[vision fallback] {tag} {_model} failed ({type(e).__name__}); trying next")
-                continue
-        raise last_err if last_err else RuntimeError("No vision model endpoint configured")
-
-    except Exception as e:
-        logger.error(f"VL model unavailable: {e}")
-        return {"text": "[VL model unavailable - image not analyzed]", "model": ""}
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            analyze_image_with_vl_result_async(
+                image_path,
+                owner=owner,
+                root_operation_id=root_operation_id,
+                grant_id=grant_id,
+                model_route_id=model_route_id,
+            )
+        )
+    logger.warning(
+        "Synchronous vision compatibility call refused on an active event loop"
+    )
+    return {
+        "text": "[VL model unavailable - image not analyzed]",
+        "model": "",
+    }
 
 
 def analyze_image_with_vl(image_path: str, owner: str | None = None) -> str:
-    """Analyze an image using the admin-configured Vision-Language model."""
+    """Compatibility wrapper for synchronous document import workers."""
+
     return analyze_image_with_vl_result(image_path, owner=owner).get("text", "")
 
 
@@ -403,6 +416,7 @@ def build_user_content(
     owner: str | None = None,
     resolved_uploads: dict[str, Dict[str, Any]] | None = None,
     structured_resources: bool = False,
+    extract_attachments: bool = True,
 ) -> str | List[Dict[str, Any]]:
     """Build user content with attachments (text, images, audio, documents).
 
@@ -437,6 +451,17 @@ def build_user_content(
         _, ext = os.path.splitext(path.lower())
         mime = upload_info.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream"
         display_name = upload_info.get("name") or upload_info.get("original_name") or path
+        try:
+            source_size = os.path.getsize(path)
+        except OSError:
+            source_size = -1
+        if source_size < 0:
+            limit_message = f"\n\n[Attachment unavailable: {display_name} could not be statted safely.]"
+        else:
+            limit_message = _native_media_limit_message(display_name, mime, source_size)
+        if limit_message:
+            content[0]["text"] += limit_message
+            continue
 
         if upload_handler.is_image_file(display_name, mime):
             try:
@@ -445,7 +470,9 @@ def build_user_content(
                 # Extensionless uploads (e.g. a pasted screenshot) have no ext,
                 # so fall back to the resolved MIME subtype rather than emitting
                 # an invalid "data:image/;base64," with an empty subtype.
-                image_format = ext[1:] or (mime.split("/", 1)[1] if mime.startswith("image/") else "png")
+                image_format = (mime.split("/", 1)[1] if mime.startswith("image/") else "png")
+                if image_format == "jpg":
+                    image_format = "jpeg"
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/{image_format};base64,{encoded_string}"},
@@ -474,7 +501,9 @@ def build_user_content(
                     content.insert(0, {"type": "text", "text": "[Audio attached but could not be processed]"})
 
         elif upload_handler.is_document_file(display_name, mime):
-            if mime == "application/pdf":
+            if not extract_attachments:
+                extracted_text = f"\n\n[Attachment retained as an original resource: {display_name}]"
+            elif mime == "application/pdf":
                 extracted_text = None
                 if session_id:
                     try:

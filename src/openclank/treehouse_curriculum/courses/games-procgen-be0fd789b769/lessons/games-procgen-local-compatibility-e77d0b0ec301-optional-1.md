@@ -1,0 +1,1 @@
+Remove unsupported values; never silently replace a fixed domain.

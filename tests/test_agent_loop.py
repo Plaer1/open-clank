@@ -9,6 +9,7 @@ _MOCKED_IMPORTS = [
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
     'src.database',
     'src.agent_tools',
+    'src.openclank.chat_routing',
     'core.models', 'core.database',
 ]
 _INJECTED_IMPORT_STUBS = {}
@@ -40,6 +41,7 @@ try:
         _compute_final_metrics,
         _append_tool_results,
         _insert_before_latest_user,
+        _tag_agent_round,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -102,6 +104,26 @@ def test_insert_before_latest_user_appends_when_no_user_message_exists():
     context = {"role": "system", "content": "context"}
 
     assert _insert_before_latest_user(messages, context) == [messages[0], context]
+
+
+def test_agent_round_tagging_preserves_fallback_and_actual_model_fields():
+    fallback = _tag_agent_round(
+        {"type": "fallback", "selected_model": "selected", "answered_by": "fallback", "reason": "quota"},
+        2,
+    )
+    actual = _tag_agent_round(
+        {"type": "model_actual", "model": "resolved", "provider": "managed"},
+        2,
+    )
+
+    assert fallback == {
+        "type": "fallback",
+        "selected_model": "selected",
+        "answered_by": "fallback",
+        "reason": "quota",
+        "round": 2,
+    }
+    assert actual == {"type": "model_actual", "model": "resolved", "provider": "managed", "round": 2}
 
 
 # ---------------------------------------------------------------------------

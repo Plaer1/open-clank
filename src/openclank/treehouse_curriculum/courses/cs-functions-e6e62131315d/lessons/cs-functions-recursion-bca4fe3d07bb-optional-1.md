@@ -1,0 +1,1 @@
+A base case somewhere in the code is insufficient unless every allowed path reaches it.

@@ -1,0 +1,1 @@
+h=0; the mask controls placement separately from height generation.

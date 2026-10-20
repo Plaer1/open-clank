@@ -1,6 +1,15 @@
 # ADR: canonical Copal event notes
 
-Status: accepted and implemented 2026-07-10.
+Status: accepted and implemented 2026-07-10; historical storage description.
+
+Current applicability — October 6, 2026: current hosted Copal source uses only
+its Files-backed vault. Older installed revisions may retain Redb stores and
+require explicit, reviewed conversion or offline recovery. The Redb-specific storage
+statements below describe the July implementation, not a new-install recipe.
+Event identity/frontmatter and unknown-field preservation remain relevant;
+Calendar's move to the Copal launcher is navigation, not a backend migration.
+See [setup](../setup.md), [upgrading](../upgrading.md) and
+[backup coverage](../backup-restore.md) for current operator boundaries.
 
 ## Context
 

@@ -1,0 +1,19 @@
+{
+  "id": "ro",
+  "name": "Română",
+  "dir": "ltr",
+  "catalog": "ro",
+  "html_lang": "ro",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4748,
+    "english_fallback": 4874
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

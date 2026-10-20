@@ -1,0 +1,4 @@
+- Defaults can be withdrawn when new facts arrive: 'birds normally fly' does not settle a particular penguin's flight. A default is not an exception-free universal.
+- Fuzzy membership assigns a degree such as tall(A)=0.7; that is not automatically a 70% probability that a crisp claim is true. State the chosen membership rule.
+- Paraconsistent inference avoids deriving every conclusion merely from a contradiction; it does not declare all contradictory claims correct.
+- Try: a record says P and not P. Explain why a system that reports the conflict without concluding unrelated Q is using a different consequence policy from classical explosion. Check: contradiction handling must be explicit; deleting one fact without justification hides the conflict.

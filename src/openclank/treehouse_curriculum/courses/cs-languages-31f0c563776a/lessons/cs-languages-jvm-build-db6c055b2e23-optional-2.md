@@ -1,0 +1,1 @@
+Use the JDK/runtime required by the target project. Read its source/release level and dependency requirements together. A class-file version accepted by the runtime does not guarantee that every library API or game-loader hook exists.

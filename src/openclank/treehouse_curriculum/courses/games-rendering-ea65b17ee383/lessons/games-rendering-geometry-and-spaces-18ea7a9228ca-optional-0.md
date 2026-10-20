@@ -1,0 +1,1 @@
+World position is (4,2), view-relative position (3,1); the response identifies the coordinate-space mismatch.

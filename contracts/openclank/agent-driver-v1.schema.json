@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.dev/contracts/agent-driver-v1.schema.json",
+  "title": "Open Clank direct agent driver envelope v1",
+  "type": "object",
+  "required": ["schema_version", "request_id", "owner_subject_id", "session_id", "runtime_id", "runtime_epoch", "runtime_generation", "command", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "owner_subject_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime_epoch": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "runtime_generation": {"type": "integer", "minimum": 0},
+    "run_id": {"type": "string", "maxLength": 128},
+    "turn_id": {"type": "string", "maxLength": 128},
+    "command": {"enum": ["hello", "activate", "open_session", "restore_session", "submit_turn", "cancel_turn", "set_model", "set_mode", "set_config", "resolve_permission", "resolve_question", "provider_control", "close", "shutdown"]},
+    "payload": {"type": "object", "maxProperties": 128},
+    "deadline_unix_ms": {"type": "integer", "minimum": 0},
+    "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
+  },
+  "additionalProperties": false
+}

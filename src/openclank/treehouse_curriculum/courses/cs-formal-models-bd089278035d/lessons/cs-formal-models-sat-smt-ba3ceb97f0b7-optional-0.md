@@ -1,0 +1,1 @@
+Any P with Q=true; no integer solution, but real2.5 works.

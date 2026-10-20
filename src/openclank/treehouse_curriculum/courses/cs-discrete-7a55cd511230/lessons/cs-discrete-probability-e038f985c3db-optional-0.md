@@ -1,0 +1,1 @@
+Use sample space {2,4,6}, giving 2/3; expectation is 2; explain that 2 need not occur.

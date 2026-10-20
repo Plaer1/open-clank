@@ -1,0 +1,1 @@
+`t=([1],2)` prevents `t[0]=[9]`, but permits `t[0].append(3)`: the inner list becomes `[1,3]`. Tuple immutability and deep immutability are different claims.

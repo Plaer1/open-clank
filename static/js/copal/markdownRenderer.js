@@ -1,0 +1,312 @@
+import { recordPresentation, achievementOwner, visiblePresentation, queueReceipt } from '../achievementProducer.js';
+/**
+ * Shared full-document Markdown renderer.
+ *
+ * Explicit callbacks replace applet-singleton imports so Code Editor rich
+ * comments, Copal Editor, Wiki bodies and TreeHouse can consume one renderer
+ * without initialization cycles. Rendering is never code execution: plugin
+ * query blocks stay inert and app links go through a typed destination
+ * registry, never the chat-command interpreter.
+ */
+import { findReferenceToken, createReferenceRenderer, extractReferenceSection, createReferenceSourceLocator } from './markdownResources.js';
+
+// ---------------------------------------------------------------------------
+// App destination registry (clank://<screen>/<panel-or-item>)
+// ---------------------------------------------------------------------------
+const appDestinations = new Map();
+
+/**
+ * Register a typed app destination handler. The handler opens/focuses the
+ * screen and must preserve current drafts. It must not toggle an already-open
+ * window closed or start an unrelated chat.
+ */
+export function registerAppDestination(name, handler) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key || typeof handler !== 'function') return () => {};
+  appDestinations.set(key, handler);
+  return () => { if (appDestinations.get(key) === handler) appDestinations.delete(key); };
+}
+
+export function listAppDestinations() {
+  return [...appDestinations.keys()];
+}
+
+/**
+ * Resolve and open a clank:// destination. Unknown targets produce a useful
+ * error; they never execute an arbitrary route or chat command.
+ */
+export async function openAppDestination(destination, event = null, { sourceKind = 'editor', workspaceId = null } = {}) {
+  const accountId = achievementOwner();
+  const raw = String(destination || '').replace(/^clank:\/\//i, '').replace(/\/+$/, '');
+  if (!raw) return { ok:false, error:'Empty app destination.' };
+  const [screen, ...rest] = raw.split('/');
+  const key = String(screen || '').trim().toLowerCase();
+  const handler = appDestinations.get(key);
+  if (!handler) {
+    return { ok:false, error:`Unknown app destination: ${raw}`, destination:raw };
+  }
+  const panel = rest.filter(Boolean).join('/') || null;
+  try {
+    const resolved = await handler({ screen:key, panel, destination:raw, event });
+    if (!resolved?.element || resolved.destinationExists !== true || !await visiblePresentation(resolved.element)) {
+      return { ok:false, error:`App destination did not resolve: ${raw}`, destination:raw };
+    }
+    await recordPresentation('surface.visited', { surface:key, sourceKind, appLinkResolved:true, destinationExists:true }, { accountId, workspaceId });
+    return { ok:true, destination:raw, documentId:resolved.documentId || null };
+  } catch (error) {
+    return { ok:false, error:error?.message || `App destination failed: ${raw}`, destination:raw };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Full Markdown renderer factory
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {object} options
+ * @param {function} options.h - hyperscript element factory
+ * @param {function} options.documents - returns the visible document list
+ * @param {function} [options.findByName] - resolve a short name to a document
+ * @param {function} [options.assetUrl] - map an asset target to a URL
+ * @param {function} options.openTarget - (target, fragment, event) navigation
+ * @param {function} [options.openAppDestination] - (destination, event) override
+ * @param {function} [options.onConvertPluginBlock] - inert-block conversion hook
+ * @returns {{ renderMarkdown: function, renderPreview: function, renderReference: function, appendMarkdownInline: function }}
+ */
+export function createMarkdownRenderer({
+  h,
+  documents,
+  findByName = null,
+  assetUrl = () => null,
+  resolveAsset = null,
+  openTarget,
+  openAppDestination: appOpen = openAppDestination,
+  onConvertPluginBlock = null,
+}) {
+  const resolveName = (name) => (typeof findByName === 'function' ? findByName(name) : (documents() || []).find((doc) => doc.name === name) || null);
+
+  async function navigateReference(target, fragment, event, context = {}) {
+    const source = context.origin;
+    const accountId = achievementOwner();
+    let link = null;
+    if (source?.id && source?.head && Number.isInteger(context.reference?.sourceStart)) {
+      try {
+        const response = await fetch(`/api/copal/documents/${encodeURIComponent(source.id)}/link-occurrences?workspace=${encodeURIComponent(source.resource?.key?.workspaceId || source.workspaceId || 'default')}`, { credentials:'same-origin' });
+        const proof = response.ok ? await response.json() : null;
+        if (String(proof?.revisionId) === String(context.sourceRevision || source.head)) link = proof.links.find(item => item.start === context.reference.sourceStart && item.targetDocumentId === target.id);
+      } catch (_) { /* Navigation remains available without qualification. */ }
+    }
+    const destination = await openTarget(target, fragment, event);
+    if (link && destination?.documentId === target.id && await visiblePresentation(destination.element)) {
+      const occurrenceId = crypto.randomUUID();
+      await queueReceipt(`link:${occurrenceId}`, { linkId:link.linkId, targetDocumentId:target.id, sourceRevisionId:link.sourceRevisionId, occurrenceId },
+        { accountId, url:`/api/copal/documents/${encodeURIComponent(source.id)}/link-navigation?workspace=${encodeURIComponent(source.resource?.key?.workspaceId || source.workspaceId || 'default')}` });
+    }
+    return destination;
+  }
+  const renderReference = createReferenceRenderer({
+    h,
+    documents:() => documents() || [],
+    assetUrl,
+    resolveAsset,
+    openTarget:navigateReference,
+    openAppDestination:async (destination, event) => {
+      const result = await appOpen(destination, event);
+      if (result && result.ok === false && result.error && typeof openTarget === 'function') {
+        // Surface a useful error without executing anything else.
+        openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event);
+      }
+      return result;
+    },
+    renderDocument:(text, seen, origin) => renderMarkdown(text, seen, origin),
+  });
+
+  function appendMarkdownInline(parent, value, context = {}) {
+    let rest = String(value || '');
+    const token = /(!?\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|([^\]]+))?\]\]|`([^`]+)`|\*\*([^*]+)\*\*|~~([^~]+)~~|==([^=]+)==|(?<!\*)\*([^*]+)\*(?!\*)|\[([^\]]+)\]\(([^)\s]+)\)|\$([^$\n]+)\$|<%[^%]*%>|(?<![\p{L}\p{N}_])#([A-Za-z0-9_/-]+))/u;
+    const appendText = (text) => parent.append(document.createTextNode(String(text || '').replace(/\\(?=[\\`*_[\]{}()#+.!|~-])/g, '')));
+    const openFromEvent = (target, event) => {
+      if (!target) return;
+      openTarget(target, null, event);
+    };
+    while (rest) {
+      const match = rest.match(token);
+      const reference = findReferenceToken(rest);
+      if (reference && !(context.treeHouseTopicLinks && match?.[10]?.startsWith('#treehouse-unit=') && reference.index===match.index) && (!match || reference.index <= match.index)) {
+        appendText(rest.slice(0, reference.index));
+        const exact = rest.slice(reference.index, reference.index + reference.length);
+        const sourceStart = context.locateReference?.(exact);
+        parent.append(renderReference({ ...reference, sourceStart }, context));
+        rest = rest.slice(reference.index + reference.length); continue;
+      }
+      if (!match) { appendText(rest); return; }
+      appendText(rest.slice(0, match.index));
+      if (match[2]) {
+        const target = resolveName(match[2]);
+        parent.append(h('button', { class:'copal-chip', type:'button', text:match[3] || match[2], onclick:(event) => openFromEvent(target, event) }));
+      } else if (match[4]) parent.append(h('code', { text:match[4] }));
+      else if (match[5]) parent.append(h('strong', { text:match[5] }));
+      else if (match[6]) parent.append(h('del', { text:match[6] }));
+      else if (match[7]) parent.append(h('mark', { text:match[7] }));
+      else if (match[8]) parent.append(h('em', { text:match[8] }));
+      else if (match[9]) {
+        const isExternal = /^https?:\/\//i.test(match[10]);
+        const isApp = /^clank:\/\//i.test(match[10]);
+        let topicTarget=null;
+        if(context.treeHouseTopicLinks && /^#treehouse-unit=/.test(match[10]))try {const target=decodeURIComponent(match[10].slice('#treehouse-unit='.length));if(/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,200}$/.test(target))topicTarget=target;}catch{/* invalid fragment stays unresolved */}
+        if(topicTarget)parent.append(h('a',{href:`#treehouse-unit=${encodeURIComponent(topicTarget)}`,text:match[9]}));
+        else if (isExternal) parent.append(h('a', { href:match[10], target:'_blank', rel:'noopener noreferrer', text:match[9] }));
+        else if (isApp) parent.append(h('button', { class:'copal-chip copal-app-link', type:'button', 'data-app-destination':match[10].replace(/^clank:\/\//i, ''), text:match[9], onclick:async (event) => { const result = await appOpen(match[10], event); if (result && result.ok === false) openTarget({ kind:'app-destination-error', name:result.error, id:null }, null, event); } }));
+        else {
+          const target = resolveName(match[10]);
+          parent.append(h('button', { class:`copal-chip${target ? '' : ' unresolved'}`, type:'button', disabled:!target, text:match[9], onclick:(event) => openFromEvent(target, event) }));
+        }
+      } else if (match[11]) parent.append(h('span', { class:'copal-inline-math', text:match[11] }));
+      else if (match[12]) parent.append(h('code', { class:'copal-templater-block', text:match[12] }));
+      else if (match[13]) parent.append(h('span', { class:'copal-markdown-tag', text:`#${match[13]}` }));
+      rest = rest.slice(match.index + match[0].length);
+    }
+  }
+
+  function renderMarkdown(text, seen = new Set(), origin = null, options = {}) {
+    const root = h('div');
+    const acceptedSource = String(text || '');
+    const sourceRevision = origin?.head;
+    const locateReference = createReferenceSourceLocator(acceptedSource);
+    const inline = (parent, value) => appendMarkdownInline(parent, value, { origin, seen, locateReference, sourceRevision, treeHouseTopicLinks:options.treeHouseTopicLinks===true });
+    const lines = String(text || '').split('\n');
+    let lineOffset = 0;
+    if (lines[0]?.trim() === '---') {
+      const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+      if (end > 0) { lines.splice(0, end + 1); lineOffset = end + 1; }
+    }
+    // Stamp each top-level block with its 1-based source line span (original
+    // numbering, including any stripped frontmatter). Consumers like the
+    // Markdown Formatting Demo source-reveal read these; rendering itself is
+    // unchanged.
+    const stamp = (node, start, end) => {
+      if (node && node.nodeType === 1) {
+        node.setAttribute('data-md-start', String(start + 1 + lineOffset));
+        node.setAttribute('data-md-end', String(end + 1 + lineOffset));
+      }
+      return node;
+    };
+    const appendBlock = (node, start, end) => {
+      const code = node.querySelector?.('pre.copal-markdown-code code');
+      if (code?.dataset.language) {
+        const syntax = h('span', { role:'status', 'aria-live':'polite', class:'copal-code-syntax-status', text:'Loading syntax…' });
+        node.insertBefore(syntax, code.parentNode);
+        const prepare = globalThis.odysseusHighlight?.prepareElement;
+        if (prepare) {
+          const paint = () => {
+            syntax.hidden = false; syntax.textContent = 'Loading syntax…';
+            void prepare(code, code.dataset.language).then(ready => {
+              syntax.hidden = ready; syntax.textContent = ready ? '' : 'Plain source; syntax unavailable for this block ';
+              if (!ready) syntax.append(h('button', { type:'button', class:'copal-btn', text:'Retry highlighting', onclick:paint }));
+            });
+          };
+          paint();
+        }
+        else syntax.textContent = 'Plain source; syntax highlighter unavailable';
+      }
+      root.append(stamp(node, start, end));
+    };
+    let codeBlock = null;
+    for (let index = 0; index < lines.length; index += 1) {
+      const blockStart = index;
+      const raw = lines[index].replace(/%%[^%\n]*(?:%(?!%)[^%\n]*)*%%/g, '');
+      const fence = /^\s*```\s*([^\s`]*)/.exec(raw);
+      if (fence) {
+        if (codeBlock) { appendBlock(codeBlock.wrapper, codeBlock.start, index); codeBlock = null; }
+        else {
+          const lang = fence[1] || '';
+          const isPluginBlock = /^(dataview|tasks|dataviewjs|tasksjs)$/i.test(lang);
+          const code = h('code', { 'data-language':lang });
+          const pre = h('pre', { class:'copal-markdown-code' }, code);
+          const copy = h('button', { type:'button', class:'copal-btn copal-code-copy', text:'Copy', onclick:async() => navigator.clipboard.writeText(code.textContent || '') });
+          const header = fence[1] ? h('figcaption', { text:fence[1] }) : null;
+          if (isPluginBlock) {
+            const banner = h('div', { class:'copal-plugin-block-banner' },
+              h('span', { class:'copal-plugin-block-badge', text:`${lang} block` }),
+              h('span', { text:'Inert — plugin queries are not executed in the editor.' }));
+            const convertBtn = onConvertPluginBlock
+              ? h('button', { type:'button', class:'copal-btn copal-plugin-convert', text:'Convert to Base', onclick:() => onConvertPluginBlock(code.textContent || '', lang) })
+              : null;
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block copal-plugin-block' }, header, banner, copy, convertBtn, pre), start:index };
+          } else {
+            codeBlock = { code, wrapper:h('figure', { class:'copal-code-block' }, header, copy, pre), start:index };
+          }
+        }
+        continue;
+      }
+      if (codeBlock) { codeBlock.code.append(document.createTextNode(`${raw}\n`)); continue; }
+      if (!raw.trim()) continue;
+      if (/^\s*%%/.test(raw) || /^\s*<!--/.test(raw)) continue;
+      if (raw.trim().startsWith('$$')) {
+        const math = [raw];
+        while (!(math.length > 1 || raw.trim() !== '$$') || !math.at(-1).trim().endsWith('$$')) {
+          if (index + 1 >= lines.length) break;
+          math.push(lines[++index]);
+        }
+        appendBlock(h('pre', { class:'copal-math-block', text:math.join('\n').replace(/^\s*\$\$|\$\$\s*$/g, '').trim() }), blockStart, index);
+        continue;
+      }
+      const callout = raw.match(/^>\s*\[!([A-Za-z0-9_-]+)\][+-]?\s*(.*)$/);
+      if (callout) {
+        const body = [];
+        while (lines[index + 1]?.match(/^>\s?/)) body.push(lines[++index].replace(/^>\s?/, ''));
+        const box = h('aside', { class:`copal-callout copal-callout-${callout[1].toLowerCase()}` }, h('strong', { text:callout[2] || callout[1] }));
+        for (const line of body) { const paragraph = h('p'); inline(paragraph, line); box.append(paragraph); }
+        appendBlock(box, blockStart, index);
+        continue;
+      }
+      if (raw.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1] || '')) {
+        const cells = (line) => line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim());
+        const table = h('table', { class:'copal-markdown-table' });
+        const header = h('tr'); for (const value of cells(raw)) { const cell = h('th'); inline(cell, value); header.append(cell); }
+        table.append(h('thead', {}, header)); index += 1;
+        const body = h('tbody');
+        while (lines[index + 1]?.includes('|')) {
+          const row = h('tr'); for (const value of cells(lines[++index])) { const cell = h('td'); inline(cell, value); row.append(cell); }
+          body.append(row);
+        }
+        table.append(body); appendBlock(table, blockStart, index); continue;
+      }
+      const heading = raw.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) { const node = h(`h${heading[1].length}`, { 'data-line':String(index + 1 + lineOffset) }); inline(node, heading[2]); appendBlock(node, blockStart, index); continue; }
+      const task = raw.match(/^(\s*)[-*+] \[([ xX])\]\s+(.*)$/);
+      if (task) { const checkbox = h('input', { type:'checkbox', disabled:true, 'aria-label':task[3] }); checkbox.checked = !!task[2].trim(); const node = h('p', { class:'copal-markdown-task', style:`--indent:${task[1].length}` }, checkbox); inline(node, task[3]); appendBlock(node, blockStart, index); continue; }
+      const bullet = raw.match(/^(\s*)[-*+]\s+(.*)$/);
+      if (bullet) { const node = h('p', { class:'copal-markdown-bullet', style:`--indent:${bullet[1].length}` }, '• '); inline(node, bullet[2]); appendBlock(node, blockStart, index); continue; }
+      const ordered = raw.match(/^(\s*)(\d+[.)])\s+(.*)$/);
+      if (ordered) { const node = h('p', { class:'copal-markdown-bullet ordered', style:`--indent:${ordered[1].length}` }, `${ordered[2]} `); inline(node, ordered[3]); appendBlock(node, blockStart, index); continue; }
+      const quote = raw.match(/^>\s?(.*)$/);
+      if (quote) { const node = h('blockquote'); inline(node, quote[1]); appendBlock(node, blockStart, index); continue; }
+      if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(raw)) { appendBlock(h('hr'), blockStart, index); continue; }
+      const footnote = raw.match(/^\s*\[\^([^\]]+)\]:\s*(.*)$/);
+      if (footnote) { const node = h('aside', { class:'copal-footnote' }, h('sup', { text:footnote[1] })); inline(node, footnote[2]); appendBlock(node, blockStart, index); continue; }
+      const para = h('p');
+      inline(para, raw);
+      appendBlock(para, blockStart, index);
+    }
+    if (codeBlock) appendBlock(codeBlock.wrapper, codeBlock.start, lines.length - 1);
+    return root;
+  }
+
+  function renderPreview(source, origin = null) {
+    const reference = findReferenceToken(String(source || ''));
+    return reference ? renderReference(reference, { origin, seen:new Set(origin?.id ? [origin.id] : []) }) : null;
+  }
+
+  // Comment regions contain complete prose, code samples and multiple references.
+  // Standalone embed widgets deliberately retain their smaller renderPreview path.
+  function renderComment(source, origin = null) {
+    const node = renderMarkdown(String(source || ''), new Set(origin?.id ? [origin.id] : []), origin);
+    node.classList.add('cm-rich-comment-prose');
+    return node;
+  }
+
+  return { renderMarkdown, renderPreview, renderComment, renderReference, appendMarkdownInline, extractReferenceSection };
+}
+
+export { extractReferenceSection, findReferenceToken };

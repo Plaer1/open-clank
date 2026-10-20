@@ -1,0 +1,1 @@
+Use 2a+2b=2(a+b) for arbitrary integers a,b; use prime 2 as counterexample.

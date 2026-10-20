@@ -1,0 +1,1 @@
+A can move right or down initially; B has at least one valid in-bounds empty neighbor; the rejected move identifies overlap or a board boundary.

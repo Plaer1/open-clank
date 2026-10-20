@@ -1,4 +1,5 @@
 import { afterEach, test, expect } from "bun:test"
+import { Flag } from "../../src/flag/flag"
 import { Question } from "../../src/question"
 import { Instance } from "../../src/project/instance"
 import { QuestionID } from "../../src/question/schema"
@@ -461,4 +462,21 @@ test("pending question rejects on instance reload", async () => {
   })
 
   expect(await result).toBeInstanceOf(Question.RejectedError)
+})
+
+
+test("never-ask startup policy is captured per instance without changing an older policy", async () => {
+  const previous = Flag.MIMOCODE_NEVER_ASK
+  await using oldGeneration = await tmpdir({ git: true })
+  await using newGeneration = await tmpdir({ git: true })
+  const effective = (directory: string) => Instance.provide({ directory, fn: () => AppRuntime.runPromise(Question.Service.use((service) => service.neverAsk())) })
+  try {
+    Flag.MIMOCODE_NEVER_ASK = true
+    expect(await effective(oldGeneration.path)).toBe(true)
+    Flag.MIMOCODE_NEVER_ASK = false
+    expect(await effective(newGeneration.path)).toBe(false)
+    expect(await effective(oldGeneration.path)).toBe(true)
+  } finally {
+    Flag.MIMOCODE_NEVER_ASK = previous
+  }
 })

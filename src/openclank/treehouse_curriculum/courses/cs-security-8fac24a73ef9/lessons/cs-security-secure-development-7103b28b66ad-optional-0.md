@@ -1,0 +1,1 @@
+State where each control runs, reject unauthorized writes, fail without granting access, and log a nonsecret useful event.

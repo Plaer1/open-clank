@@ -1,0 +1,1 @@
+A structure's name is not enough: name the operation whose cost matters.

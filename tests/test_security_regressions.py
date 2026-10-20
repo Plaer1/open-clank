@@ -116,10 +116,11 @@ def test_secret_storage_key_created_with_safe_mode(tmp_path, monkeypatch):
 
 # ── secure-by-default deployment + integration storage ─────────
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_docker_compose_binds_web_ui_to_loopback_by_default():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
-    assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000" in compose
-    assert '"${APP_PORT:-7000}:7000"' not in compose
+    assert "${APP_BIND:-127.0.0.1}:${APP_PORT:-7777}:7777" in compose
+    assert '"${APP_PORT:-7777}:7777"' not in compose
 
 
 def test_readme_native_quickstart_uses_loopback():
@@ -127,7 +128,7 @@ def test_readme_native_quickstart_uses_loopback():
     # so accept the loopback guidance from either the README or the setup guide.
     docs = Path("README.md").read_text(encoding="utf-8")
     docs += "\n" + Path("docs/setup.md").read_text(encoding="utf-8")
-    assert "python -m uvicorn app:app --host 127.0.0.1 --port 7000" in docs
+    assert "python -m uvicorn app:app --host 127.0.0.1 --port 7777" in docs
     assert "0.0.0.0` only when you intentionally want" in docs
 
 
@@ -998,7 +999,7 @@ def test_session_html_export_escapes_name():
 
 
 def test_mcp_oauth_page_escapes_reflected_values():
-    src = Path(__file__).resolve().parents[1] / "routes" / "mcp_routes.py"
+    src = Path(__file__).resolve().parents[1] / "routes" / "mcp" / "mcp_routes.py"
     text = src.read_text()
     body = text.split("def _oauth_authorize_page(", 1)[1].split("return f", 1)[0]
     for var in ("auth_url", "server_id", "host", "redirect_uri"):
@@ -1114,14 +1115,6 @@ def _import_session_routes_for_filename():
     return importlib.import_module("routes.session_routes")
 
 
-def _import_gallery_routes_for_filename():
-    # Same rationale as the session route helper: import _sanitize_gallery_filename
-    # against the real core.database and leave a clean, real module cached.
-    _drop_route_module_cache("routes.gallery.gallery_routes")
-    _drop_route_module_cache("routes.gallery.gallery_helpers")
-    return importlib.import_module("routes.gallery.gallery_routes")
-
-
 def test_export_filename_sanitizer_blocks_header_and_path_chars():
     mod = _import_session_routes_for_filename()
 
@@ -1139,22 +1132,6 @@ def test_export_filename_sanitizer_preserves_safe_names():
     assert mod._sanitize_export_filename("conversation_20260602.md") == "conversation_20260602.md"
     assert mod._sanitize_export_filename("") == ""
 
-
-def test_gallery_replace_filename_sanitizer_uses_basename():
-    mod = _import_gallery_routes_for_filename()
-
-    out = mod._sanitize_gallery_filename("../../etc/cron.d/evil image.png")
-
-    assert out == "evil_image.png"
-    assert "/" not in out
-    assert "\\" not in out
-
-
-def test_gallery_replace_filename_sanitizer_falls_back_when_empty(monkeypatch):
-    mod = _import_gallery_routes_for_filename()
-    monkeypatch.setattr(mod.uuid, "uuid4", lambda: types.SimpleNamespace(hex="abcdef1234567890"))
-
-    assert mod._sanitize_gallery_filename("../") == "abcdef123456"
 
 def test_chat_active_document_lookup_is_owner_scoped():
     """The explicit `active_doc_id` path in /api/chat_stream must scope the

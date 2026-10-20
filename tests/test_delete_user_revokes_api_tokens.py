@@ -47,9 +47,30 @@ class _FakeApiToken:
     owner = _OwnerColumn()
 
 
+class _FakeModelEndpoint:
+    owner = _OwnerColumn()
+
+
+class _FakeProviderAuthSession:
+    owner = _OwnerColumn()
+
+
+class _FakeMimoAuthStore:
+    owner = _OwnerColumn()
+
+
+class _FakeMimoProjection:
+    owner = _OwnerColumn()
+
+
+class _FakeMimoProjectionState:
+    owner_id = _OwnerColumn()
+
+
 class _FakeQuery:
-    def __init__(self, recorder):
+    def __init__(self, recorder, model):
         self._recorder = recorder
+        self._model = model
         self._conds = []
 
     def filter(self, *conds):
@@ -57,7 +78,7 @@ class _FakeQuery:
         return self
 
     def delete(self, *args, **kwargs):
-        self._recorder.append(list(self._conds))
+        self._recorder.append((self._model, list(self._conds)))
         return len(self._conds)
 
 
@@ -66,8 +87,7 @@ class _FakeSession:
         self._recorder = recorder
 
     def query(self, model):
-        assert model is _FakeApiToken
-        return _FakeQuery(self._recorder)
+        return _FakeQuery(self._recorder, model)
 
 
 @pytest.fixture
@@ -94,6 +114,11 @@ def db_calls(monkeypatch):
     db_stub = types.ModuleType("core.database")
     db_stub.get_db_session = _fake_db_session
     db_stub.ApiToken = _FakeApiToken
+    db_stub.ModelEndpoint = _FakeModelEndpoint
+    db_stub.ProviderAuthSession = _FakeProviderAuthSession
+    db_stub.MimoAuthStore = _FakeMimoAuthStore
+    db_stub.MimoProjection = _FakeMimoProjection
+    db_stub.MimoProjectionState = _FakeMimoProjectionState
     monkeypatch.setitem(sys.modules, "core.database", db_stub)
     return calls
 
@@ -102,7 +127,15 @@ def test_delete_user_revokes_api_tokens(manager, db_calls):
     assert manager.delete_user("bob", "admin") is True
     assert "bob" not in manager.users
     assert db_calls, "delete_user never purged ApiToken rows for the deleted user"
-    assert [("owner ==", "bob")] in db_calls
+    assert {model for model, _conditions in db_calls} == {
+        _FakeApiToken,
+        _FakeModelEndpoint,
+        _FakeProviderAuthSession,
+        _FakeMimoAuthStore,
+        _FakeMimoProjection,
+        _FakeMimoProjectionState,
+    }
+    assert all([("owner ==", "bob")] == conditions for _, conditions in db_calls)
 
 
 def test_refused_delete_leaves_tokens_alone(manager, db_calls):

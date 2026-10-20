@@ -1,0 +1,191 @@
+{
+  "id": "batch-063",
+  "group": "treehouse.class",
+  "surface": "treehouse",
+  "entry_count": 15,
+  "character_count": 3050,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "treehouse.class.house-collaborate.description",
+      "source": "Open Clank assumes you already know how to talk to an assistant. These lessons cover what is distinctive here: account-aware models, chats that keep their identity across workspaces, inspectable tool activity, durable goals with evidence, scheduled work that answers in its own task chat, and two different kinds of memory.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:212"
+      ],
+      "context": "description",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.class.house-collaborate.summary",
+      "source": "Models, chat identity, tool authority, goals, schedules and the difference between Menmery and Lore.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:212"
+      ],
+      "context": "summary",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-collaborate.title",
+      "source": "Work With Your Clanker",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:212"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-connections.description",
+      "source": "The value of a document grows with what it is connected to. These lessons cover link navigation, the Graph's two document modes, programmatic filters, Bases over typed content, tasks and timeline entries that point back at their source, and research notes that keep their sources.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:655"
+      ],
+      "context": "description",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.class.house-connections.summary",
+      "source": "Links, Graph modes, filters and camera, Bases, source-backed tasks and Timeline, and attributable research.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:655"
+      ],
+      "context": "summary",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-connections.title",
+      "source": "Follow the Threads",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:655"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-documents.description",
+      "source": "Documents in Open Clank are not a notepad. They hold template sections, linked Wiki pages, typed tables with real formulas, comment regions over programming source, and images that stay attached to the document that references them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:425"
+      ],
+      "context": "description",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.class.house-documents.summary",
+      "source": "Documents, templates, splits, rich source comments, typed tables, Wiki pages and attached images.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:425"
+      ],
+      "context": "summary",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-documents.title",
+      "source": "Documents With Teeth",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:425"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-making.description",
+      "source": "Making things in Open Clank means files you can move, images you can edit without losing the original, exports you can hand to someone else, and recovery that actually restores. These lessons are the workshop.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:876"
+      ],
+      "context": "description",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.class.house-making.summary",
+      "source": "Files and workspaces, clipboard media, Imps editing, project export, Lore restore and scoped exports.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:876"
+      ],
+      "context": "summary",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-making.title",
+      "source": "Make, Move, Recover",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:876"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-stewardship.description",
+      "source": "The house works better when it fits you. These lessons cover the maintained handbook, appearance and accessibility controls that live in Settings, app links that take you where the text points, local drafts for email and calendar, making a Class to teach someone else, and reading your own progress honestly.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1081"
+      ],
+      "context": "description",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.class.house-stewardship.summary",
+      "source": "Official docs, theme and accessibility, app links, local drafts, authoring a Class, and reading your progress.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1081"
+      ],
+      "context": "summary",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.class.house-stewardship.title",
+      "source": "Make the House Yours",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1081"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import { BusEvent } from "@/bus/bus-event"
 import { SessionID } from "@/session/schema"
-import { ActorStatus, ActorOutcome, SpawnMode } from "./schema"
+import { ActorStatus, ActorOutcome, SpawnMode, ActorHostContext, ActorModel } from "./schema"
 import z from "zod"
 
 export const ActorRegistered = BusEvent.define(
@@ -13,6 +13,9 @@ export const ActorRegistered = BusEvent.define(
     description: z.string(),
     agent: z.string(),
     background: z.boolean(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
   }),
 )
 
@@ -26,6 +29,9 @@ export const ActorStatusChanged = BusEvent.define(
     turnCount: z.number(),
     lastTurnTime: z.number(),
     error: z.string().optional(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
   }),
 )
 
@@ -37,6 +43,28 @@ export const ActorStuck = BusEvent.define(
     description: z.string(),
     lastTurnTime: z.number(),
     stuckDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
+  }),
+)
+
+// Emitted by the T40 stall watchdog when a background peer/subagent transitions
+// into `stalled` liveness (running/pending but no turn advance past the stall
+// window) and the one-shot parent notification is pushed. Fires once per stall
+// episode — re-arms only after the child resumes (turnCount advances) or reaches
+// terminal. Observability hook for tests + TUI.
+export const ActorStalled = BusEvent.define(
+  "actor.stalled",
+  z.object({
+    sessionID: SessionID.zod,
+    actorID: z.string(),
+    description: z.string(),
+    lastTurnTime: z.number(),
+    stalledDuration: z.number(),
+    requestedModel: z.string().min(1).optional(),
+    effectiveModel: ActorModel.optional(),
+    hostContext: ActorHostContext.optional(),
   }),
 )
 

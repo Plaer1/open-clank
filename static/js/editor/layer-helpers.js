@@ -1,8 +1,9 @@
+import { uiIcon } from '../uiIcons.js';
 /**
  * Pure helpers + constants for layers and adjustment sub-layers.
  *
  * Everything in this module is stateless — feed in a layer object and
- * get back a value. The legacy gallery editor's module-level helpers
+ * get back a value. Imps module-level helpers
  * re-export from here so existing call sites keep working unchanged.
  */
 
@@ -82,15 +83,15 @@ export function adjLayerLabel(type) {
  * shows up everywhere a given adjustment type appears.
  */
 export const ADJ_ICONS = {
-  'brightness-contrast': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor" stroke="none"/></svg>',
-  'hue-saturation': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="12" r="4"/><circle cx="15" cy="9.5" r="4"/><circle cx="15" cy="14.5" r="4"/></svg>',
-  'levels': '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="14" width="3" height="6" rx="0.5"/><rect x="8" y="9" width="3" height="11" rx="0.5"/><rect x="13" y="11" width="3" height="9" rx="0.5"/><rect x="18" y="6" width="3" height="14" rx="0.5"/></svg>',
-  'color-balance': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12a9 9 0 0 1 9-9v18a9 9 0 0 1-9-9z" fill="currentColor" stroke="none"/></svg>',
+  'brightness-contrast': uiIcon('brightness', 14),
+  'hue-saturation': uiIcon('hue', 14),
+  levels: uiIcon('levels', 14),
+  'color-balance': uiIcon('balance', 14),
 };
 
 
 /** SVG used in the topbar/history button glyphs. */
-export const HISTORY_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/><polyline points="12 7 12 12 16 14"/></svg>';
+export const HISTORY_ICON = uiIcon('restore', 14);
 
 
 /** Quick downsampled-alpha check: are there any opaque pixels on this canvas? */

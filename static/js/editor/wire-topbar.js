@@ -7,7 +7,7 @@
  *   #ge-save-menu-btn + #ge-save-menu  (Save / Save as / Download /
  *                                       Save project / Load project)
  *   #ge-zoom-out / #ge-zoom-in / #ge-zoom-fit / #ge-zoom-100
- *   #ge-export-gallery / #ge-download
+ *   #ge-export-gallery / #ge-retry-save-copy / #ge-download
  *   #ge-save-project / #ge-load-project
  *   #ge-edge-menu-btn + #ge-edge-menu (Width input + Feather / Delete
  *                                      action buttons)
@@ -23,6 +23,7 @@
  *   fitZoom:              () => void,
  *   applyZoom:            () => void,
  *   exportToGallery:      () => void,
+ *   retryPendingSaveCopy:  () => Promise<void>,
  *   downloadPNG:          () => void,
  *   saveProject:          () => void,
  *   loadProjectPrompt:    () => void,
@@ -56,7 +57,7 @@ export function wireTopbar(deps) {
   const {
     undo, redo, toggleHistoryPanel,
     fitZoom, applyZoom,
-    exportToGallery, downloadPNG, saveProject, loadProjectPrompt,
+    exportToGallery, retryPendingSaveCopy, downloadPNG, saveProject, loadProjectPrompt,
     activeLayer, saveState, applyEdgeFeather, composite,
     registerDocClickAway, uiModule,
   } = deps;
@@ -71,12 +72,17 @@ export function wireTopbar(deps) {
   // original IDs so the standalone handlers below wire to them
   // unchanged.
   {
-    const saveBtn = document.getElementById('ge-save-menu-btn');
-    const saveMenu = document.getElementById('ge-save-menu');
+    const editorRoot = document.getElementById('imps-editor-container') || document;
+    const saveBtn = editorRoot.querySelector('#ge-save-menu-btn');
+    const saveWrap = saveBtn?.closest('.ge-save-wrap');
+    const saveMenu = saveWrap?.querySelector('#ge-save-menu');
     if (saveBtn && saveMenu) {
       const saveTopbar = saveBtn.closest('.ge-topbar');
+      document.querySelectorAll('body > #ge-save-menu').forEach((menu) => {
+        if (menu !== saveMenu) menu.remove();
+      });
       // Reparent the menu to <body>. Without this, the menu inherits
-      // the gallery modal's containing block (the modal applies a
+      // the editor overlay's containing block (the overlay applies a
       // `transform: scale(...)` for its enter animation — and any
       // non-`none` transform on an ancestor makes that ancestor the
       // containing block for `position: fixed` descendants, even after
@@ -105,7 +111,7 @@ export function wireTopbar(deps) {
       saveMenu.addEventListener('click', () => { setSaveMenuOpen(false); });
       window.addEventListener('resize', () => { if (!saveMenu.hidden) positionSaveMenu(); });
       registerDocClickAway((e) => {
-        if (!saveMenu.hidden && !saveMenu.contains(e.target) && e.target !== saveBtn) {
+        if (!saveMenu.hidden && !saveMenu.contains(e.target) && !saveBtn.contains(e.target)) {
           setSaveMenuOpen(false);
         }
       });
@@ -120,6 +126,19 @@ export function wireTopbar(deps) {
 
   // Export / Download / Project Save / Project Load.
   document.getElementById('ge-export-gallery')?.addEventListener('click', exportToGallery);
+  document.getElementById('ge-retry-save-copy')?.addEventListener('click', async () => {
+    const button = document.getElementById('ge-retry-save-copy');
+    if (button) button.disabled = true;
+    try {
+      await retryPendingSaveCopy();
+      if (button) button.hidden = true;
+      uiModule?.showToast?.('Saved copy binding completed.', 3500);
+    } catch (error) {
+      uiModule?.showToast?.(`Retry failed: ${error?.message || 'binding unavailable'}`, 5000);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
   document.getElementById('ge-download')?.addEventListener('click', downloadPNG);
   document.getElementById('ge-save-project')?.addEventListener('click', saveProject);
   document.getElementById('ge-load-project')?.addEventListener('click', loadProjectPrompt);

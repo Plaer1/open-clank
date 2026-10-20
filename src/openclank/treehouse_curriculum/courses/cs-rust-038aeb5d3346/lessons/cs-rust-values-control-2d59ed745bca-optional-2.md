@@ -1,0 +1,1 @@
+Edition 2024 selects language rules; the compiler version selects a toolchain. For bounded integers, choose checked arithmetic when overflow is an expected result to handle. Try doubling u32::MAX with a checked operation and explain why it returns absence rather than an exact u32.

@@ -1,0 +1,1 @@
+Drawing two boxes at the initial assignment invents a copy that did not happen.

@@ -1,0 +1,3 @@
+What is computed? Models. Who chooses actions? Harness/agents. How does software connect? Connections. What fits now? Context. What persists? Memory. What computation repeats? Cache. How can work split? Delegation. What counts as success? Evaluation.
+
+[Models](#treehouse-unit=ai%3Amodels%3Aidentity) · [Harness/agents](#treehouse-unit=ai%3Aagents%3Aharness) · [Connections](#treehouse-unit=ai%3Aconnections%3Aapi-subscription) · [Context](#treehouse-unit=ai%3Acontext%3Atokens) · [Memory](#treehouse-unit=ai%3Amemory%3Alayers) · [Cache](#treehouse-unit=ai%3Acache%3Akv-and-prefix) · [Delegation](#treehouse-unit=ai%3Adelegation%3Asystem-choice) · [Evaluation](#treehouse-unit=ai%3Aevaluation%3Acriteria)

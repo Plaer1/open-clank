@@ -4,6 +4,32 @@
 
 let _syncRailSideFn = null;
 
+export const MOBILE_CONTROL_SIDES = Object.freeze(['left', 'right', 'system']);
+const MOBILE_BREAKPOINT = 768;
+const isMobileViewport = () => window.innerWidth <= MOBILE_BREAKPOINT;
+
+/**
+ * The physical handedness recorded in Memory is deliberately not consulted
+ * here. Mobile control placement is an explicit, owner-scoped UI preference.
+ */
+export function normalizeMobileControlSide(value) {
+  if (typeof value !== 'string') return 'system';
+  const normalized = value.trim().toLowerCase();
+  return MOBILE_CONTROL_SIDES.includes(normalized) ? normalized : 'system';
+}
+
+/**
+ * Resolve an owner preference without throwing away the old per-device side.
+ * `system` means "leave the old device preference in charge". Historical
+ * installs with no stored device side opened mobile controls on the right, so
+ * retain that as the final fallback rather than silently changing their UI.
+ */
+export function resolveMobileControlSide(value, legacySide) {
+  const preference = normalizeMobileControlSide(value);
+  if (preference !== 'system') return preference;
+  return legacySide === 'left' || legacySide === 'right' ? legacySide : 'right';
+}
+
 /**
  * Get the current syncRailSide function reference.
  * Needed because it gets patched after initial setup.
@@ -34,6 +60,93 @@ export function initSidebarLayout(Storage, opts) {
   // ── Icon rail + sidebar toggle ──
   const iconRail = document.getElementById('icon-rail');
   const hamburgerBtn = document.getElementById('hamburger-btn');
+  const SIDEBAR_MODE_KEY = 'odysseus-sidebar-mode';
+  let mobileControlSide = 'system';
+
+  function _legacySidebarSide() {
+    return Storage.get(Storage.KEYS.SIDEBAR_SIDE);
+  }
+
+  function _resolvedMobileControlSide() {
+    return resolveMobileControlSide(mobileControlSide, _legacySidebarSide());
+  }
+
+  function _setSidebarSide(side, { persist = false } = {}) {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    const wantRight = side === 'right';
+    if (sidebar.classList.contains('right-side') !== wantRight) {
+      sidebar.classList.toggle('right-side', wantRight);
+      if (documentModule && documentModule.swapSide) {
+        try { documentModule.swapSide(); } catch (_) {}
+      }
+    }
+    if (persist) {
+      try { Storage.set(Storage.KEYS.SIDEBAR_SIDE, side); } catch (_) {}
+    }
+  }
+
+  function _applyMobileControlSide() {
+    if (!isMobileViewport()) return;
+    _setSidebarSide(_resolvedMobileControlSide());
+    syncRailSide();
+  }
+
+  async function _loadMobileControlSide() {
+    try {
+      const response = await fetch('/api/prefs/mobile_control_side', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`mobile_control_side_get_${response.status}`);
+      const payload = await response.json();
+      mobileControlSide = normalizeMobileControlSide(payload && payload.value);
+    } catch (_) {
+      // Server trouble must not strand the controls: use the device-local
+      // preference (or the historic right-side fallback) for this page load.
+      mobileControlSide = 'system';
+    }
+    _applyMobileControlSide();
+  }
+
+  function _setSidebarModeClasses(mode) {
+    document.documentElement.classList.remove('ody-mobile-startup-sidebar-hidden');
+    document.documentElement.classList.toggle('ody-sidebar-mini', mode === 'mini');
+    document.documentElement.classList.toggle('ody-sidebar-off', mode === 'off');
+  }
+
+  function _saveSidebarMode(mode) {
+    try { localStorage.setItem(SIDEBAR_MODE_KEY, mode); } catch (_) {}
+    _setSidebarModeClasses(mode);
+  }
+
+  function _applyStoredSidebarMode() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    if (isMobileViewport() && document.getElementById('app-loader')) {
+      sidebar.classList.add('hidden');
+      if (iconRail) {
+        iconRail.classList.add('rail-hidden');
+        iconRail.classList.remove('mobile-mini');
+        iconRail.style.cssText = '';
+      }
+      _setSidebarModeClasses('off');
+      return;
+    }
+    let mode = 'full';
+    try { mode = localStorage.getItem(SIDEBAR_MODE_KEY) || 'full'; } catch (_) {}
+    if (mode === 'mini') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    } else if (mode === 'off') {
+      sidebar.classList.add('hidden');
+      if (iconRail) iconRail.classList.add('rail-hidden');
+    } else {
+      sidebar.classList.remove('hidden');
+      if (iconRail) iconRail.classList.remove('rail-hidden');
+    }
+    _setSidebarModeClasses(mode);
+  }
 
   function _syncRailSideCore() {
     const sidebar = document.getElementById('sidebar');
@@ -56,12 +169,17 @@ export function initSidebarLayout(Storage, opts) {
     } else {
       iconRail.style.display = (sidebarHidden && !railHidden) ? '' : 'none';
     }
-    // Hamburger is always visible — just update body classes for CSS layout adjustments
+    // One persistent hamburger follows the sidebar edge in every mode.
     if (hamburgerBtn) {
+      const label = sidebarHidden ? 'Show sidebar' : 'Collapse sidebar';
+      hamburgerBtn.setAttribute('aria-expanded', String(!sidebarHidden));
+      hamburgerBtn.setAttribute('aria-label', label);
+      hamburgerBtn.title = label;
       document.body.classList.toggle('hamburger-right', isRight);
       document.body.classList.toggle('hamburger-left', !isRight);
       document.body.classList.toggle('hamburger-only', sidebarHidden && railHidden);
       document.body.classList.toggle('sidebar-collapsed', sidebarHidden);
+      _setSidebarModeClasses(!sidebarHidden ? 'full' : (railHidden ? 'off' : 'mini'));
     }
     // Keep incognito button clear of hamburger
     const incogBtn = document.getElementById('incognito-btn');
@@ -82,15 +200,9 @@ export function initSidebarLayout(Storage, opts) {
   if (Storage.get(Storage.KEYS.SIDEBAR_SIDE) === 'right') {
     document.getElementById('sidebar').classList.add('right-side');
   }
+  _applyStoredSidebarMode();
   syncRailSide();
-
-  // In-sidebar toggle button — same behavior as hamburger
-  const sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
-  if (sidebarToggleBtn) {
-    sidebarToggleBtn.addEventListener('click', (e) => {
-      if (hamburgerBtn) hamburgerBtn.click();
-    });
-  }
+  void _loadMobileControlSide();
 
   // Header-only new-chat aliases. #sidebar-new-chat-btn is wired in app.js
   // because it needs the full default-model/pending-chat flow; wiring it here
@@ -119,22 +231,24 @@ export function initSidebarLayout(Storage, opts) {
     // own the screen and stray gestures (swipe, dragging a dock chip to the X)
     // were popping it open. Blocking the open helper covers every path.
     const cc = document.getElementById('chat-container');
-    if (window.innerWidth < 768 && cc && cc.classList.contains('compare-active')) return;
+    if (isMobileViewport() && cc && cc.classList.contains('compare-active')) return;
     _userToggledSidebar = true;
-    // Optionally place the sidebar on a specific edge (the swipe gesture passes
-    // the direction). Persist it + re-anchor the doc panel.
-    if (side === 'left' || side === 'right') {
-      const wantRight = side === 'right';
-      if (sidebar.classList.contains('right-side') !== wantRight) {
-        sidebar.classList.toggle('right-side', wantRight);
-        try { Storage.set(Storage.KEYS.SIDEBAR_SIDE, side); } catch (_) {}
-        if (documentModule && documentModule.swapSide) { try { documentModule.swapSide(); } catch (_) {} }
-      }
+    // An explicit owner preference wins over a swipe direction. `system`
+    // retains the existing gesture + per-device persistence behavior.
+    if (isMobileViewport()) {
+      const explicit = normalizeMobileControlSide(mobileControlSide);
+      const requested = side === 'left' || side === 'right' ? side : null;
+      const resolved = explicit === 'system'
+        ? (requested || _resolvedMobileControlSide())
+        : explicit;
+      _setSidebarSide(resolved, { persist: explicit === 'system' && Boolean(requested) });
+    } else if (side === 'left' || side === 'right') {
+      _setSidebarSide(side, { persist: true });
     }
     const backdrop = document.getElementById('sidebar-backdrop');
-    if (window.innerWidth < 768 && iconRail) { iconRail.classList.remove('mobile-mini'); iconRail.style.cssText = ''; }
+    if (isMobileViewport() && iconRail) { iconRail.classList.remove('mobile-mini'); iconRail.style.cssText = ''; }
     sidebar.classList.remove('hidden');
-    if (backdrop && window.innerWidth < 768) backdrop.classList.add('visible');
+    if (backdrop && isMobileViewport()) backdrop.classList.add('visible');
     syncRailSide();
   };
 
@@ -146,7 +260,7 @@ export function initSidebarLayout(Storage, opts) {
       _userToggledSidebar = true;
       const isSidebarVisible = !sidebar.classList.contains('hidden');
 
-      if (window.innerWidth < 768) {
+      if (isMobileViewport()) {
         // Mobile: full sidebar ↔ hidden — simple toggle, no mini rail
         const backdrop = document.getElementById('sidebar-backdrop');
         if (iconRail) { iconRail.classList.remove('mobile-mini'); iconRail.style.cssText = ''; }
@@ -154,14 +268,12 @@ export function initSidebarLayout(Storage, opts) {
         if (isSidebarVisible) {
           // Closing sidebar
           sidebar.classList.add('hidden');
+          _saveSidebarMode('off');
           if (backdrop) backdrop.classList.remove('visible');
         } else {
-          // Mobile: the hamburger always opens the sidebar from the RIGHT.
-          // (Not persisted — keeps the desktop side preference untouched.)
-          if (!sidebar.classList.contains('right-side')) {
-            sidebar.classList.add('right-side');
-            if (documentModule && documentModule.swapSide) { try { documentModule.swapSide(); } catch (_) {} }
-          }
+          // Mobile placement is an explicit owner preference when configured;
+          // otherwise preserve this device's legacy side preference.
+          _applyMobileControlSide();
           // Opening sidebar — blur keyboard first, then open after layout settles
           if (document.activeElement && document.activeElement !== document.body
               && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
@@ -169,11 +281,13 @@ export function initSidebarLayout(Storage, opts) {
             // Wait for keyboard dismiss to settle, then open
             setTimeout(() => {
               sidebar.classList.remove('hidden');
+              _saveSidebarMode('full');
               if (backdrop) backdrop.classList.add('visible');
               syncRailSide();
             }, 250);
           } else {
             sidebar.classList.remove('hidden');
+            _saveSidebarMode('full');
             if (backdrop) backdrop.classList.add('visible');
           }
         }
@@ -184,10 +298,13 @@ export function initSidebarLayout(Storage, opts) {
       // Desktop: full sidebar ↔ mini (icon rail) — simple toggle
       if (isSidebarVisible) {
         sidebar.classList.add('hidden');
+        if (iconRail) iconRail.classList.remove('rail-hidden');
+        _saveSidebarMode('mini');
       } else {
         _wasAutoCollapsed = false;
         iconRail.classList.remove('rail-hidden');
         sidebar.classList.remove('hidden');
+        _saveSidebarMode('full');
       }
       syncRailSide();
     });
@@ -272,7 +389,7 @@ export function initSidebarLayout(Storage, opts) {
   document.body.appendChild(mobileBackdrop);
 
   function updateMobileBackdrop() {
-    if (window.innerWidth >= 768) { mobileBackdrop.classList.remove('visible'); return; }
+    if (!isMobileViewport()) { mobileBackdrop.classList.remove('visible'); return; }
     const sb = document.getElementById('sidebar');
     const rail = document.getElementById('icon-rail');
     const sidebarOpen = sb && !sb.classList.contains('hidden');
@@ -338,7 +455,7 @@ export function initSidebarLayout(Storage, opts) {
 
   // ── Click outside sidebar / icon rail to close (mobile only) ──
   document.addEventListener('click', (e) => {
-    if (window.innerWidth >= 700) return; // desktop keeps sidebar open
+    if (!isMobileViewport()) return; // desktop keeps sidebar open
     const sb = document.getElementById('sidebar');
     const rail = document.getElementById('icon-rail');
     // Ignore clicks on elements removed from DOM (e.g. session list re-render during folder toggle)
@@ -380,7 +497,7 @@ export function initSidebarLayout(Storage, opts) {
   let _sidebarWasOpenBeforeTool = false;
   let _railWasOpenBeforeTool = false;
   document.addEventListener('click', (e) => {
-    if (window.innerWidth >= 700) return;
+    if (!isMobileViewport()) return;
     const btn = e.target.closest('[id^="tool-"], [id^="rail-"]');
     if (!btn) return;
     setTimeout(() => {
@@ -418,7 +535,7 @@ export function initSidebarLayout(Storage, opts) {
   // whatever state it was in before the tool was opened. ──
   // We watch every .modal for the .hidden class going on, and if our
   // remembered "sidebar-was-open" flag is set, undo the auto-close.
-  if (window.innerWidth < 700) {
+  if (isMobileViewport()) {
     const _restoreSidebar = () => {
       const sb = document.getElementById('sidebar');
       const rail = document.getElementById('icon-rail');
@@ -484,7 +601,7 @@ function _initChatSwipeToOpenSidebar() {
 
   // Areas where a horizontal drag means something else (their own scroll/drag).
   const EXCLUDE = [
-    '#sidebar', '#icon-rail', '.modal', '.input-bar', '#message',
+    '#sidebar', '#icon-rail', '.modal', '.input-bar', '.chat-input-bar', '#message',
     '#minimized-dock', '.minimized-dock-chip', '#dock-trash-zone',
     'pre', 'table', '.agent-tool-output', '.agent-thread-cmd',
     'input', 'textarea', 'select',
@@ -496,7 +613,7 @@ function _initChatSwipeToOpenSidebar() {
 
   document.addEventListener('touchstart', (e) => {
     reset();
-    if (window.innerWidth >= 768) return;
+    if (!isMobileViewport()) return;
     if (!e.touches || e.touches.length !== 1) return;
     if (window._chipDragging) return;
     const sb = document.getElementById('sidebar');
@@ -558,8 +675,10 @@ function _initChatSwipeToOpenSidebar() {
   document.addEventListener('touchcancel', reset, { passive: true, capture: true });
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _initChatSwipeToOpenSidebar);
-} else {
-  _initChatSwipeToOpenSidebar();
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _initChatSwipeToOpenSidebar);
+  } else {
+    _initChatSwipeToOpenSidebar();
+  }
 }

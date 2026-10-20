@@ -1,0 +1,25 @@
+[package]
+name = "openclank-desktop-admission"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", default-features = false, features = ["config-json"] }
+
+[dependencies]
+getrandom = "0.3.4"
+hex = "0.4.3"
+hmac = "0.12.1"
+libc = "0.2.180"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+tauri = { version = "=2.11.5", default-features = false, features = ["wry"] }
+url = "2.5.7"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

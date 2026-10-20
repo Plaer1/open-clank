@@ -133,7 +133,7 @@ async function _runSynthForPane(modelToUse, synthPrompt, synthBody, spinner, his
     }
 
     // Final highlight
-    if (window.hljs) synthBody.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(synthBody);
 
     // Cleanup temp session
     fetch(`${state.API_BASE}/api/session/${createData.id}`, { method: 'DELETE' }).catch(() => {});
@@ -309,7 +309,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
               if (markdownModule) {
                 aiMsgEl._textEl.innerHTML = markdownModule.processWithThinking(
                   markdownModule.squashOutsideCode(accumulated));
-                if (window.hljs) aiMsgEl._textEl.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
+                if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(aiMsgEl._textEl);
               }
             }
             // Destroy spinner if still present
@@ -449,9 +449,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
         markdownModule.squashOutsideCode(accumulated)
       );
     }
-    if (window.hljs) {
-      finalTarget.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
-    }
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(finalTarget);
 
     // ── Show play button if response contains HTML ──
     if (_autoPreviewHtml) _autoPreviewHtml(paneIdx, accumulated);

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from core.session_manager import SessionManager
 import core.session_manager as SM
+from src import bg_jobs
 
 
 def _manager_with(sessions=None):
@@ -32,3 +33,30 @@ def test_cleanup_empty_sessions_archives_old_naive_last_accessed(monkeypatch):
     assert stats == {"deleted_empty": 0, "archived_old": 1, "total_checked": 1}
     db.commit.assert_called_once()
     db.rollback.assert_not_called()
+
+
+def test_cleanup_empty_sessions_purges_exact_owner_jobs(monkeypatch):
+    empty_session = SimpleNamespace(
+        id="empty-chat",
+        owner="alice",
+        created_at=None,
+        message_count=0,
+    )
+    db = MagicMock()
+    db.query.return_value.all.return_value = [empty_session]
+    cleanup_calls = []
+
+    monkeypatch.setattr(SM, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        bg_jobs,
+        "delete_for_session_owner",
+        lambda **scope: cleanup_calls.append(scope) or 1,
+    )
+
+    manager = _manager_with({"empty-chat": object()})
+    stats = manager.cleanup_empty_sessions()
+
+    assert cleanup_calls == [{"session_id": "empty-chat", "owner": "alice"}]
+    assert "empty-chat" not in manager.sessions
+    assert stats["deleted_empty"] == 1
+    db.delete.assert_called_once_with(empty_session)

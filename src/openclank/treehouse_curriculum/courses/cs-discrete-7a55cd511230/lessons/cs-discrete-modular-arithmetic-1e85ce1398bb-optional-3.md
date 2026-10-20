@@ -1,0 +1,5 @@
+- Addition modulo5 forms a group: the operation stays in the set, is associative, has identity0, and each residue has an additive inverse. Inverse of 2 is3.
+- For coprime moduli, the Chinese remainder theorem combines compatible residues into one residue modulo their product. Solve x≡1 mod 2 and x≡2 mod 3: x≡5 mod 6.
+- Fermat's theorem gives a^(p−1)≡1 modp for prime p and p not dividing a; Euler replaces p−1 by φ(m) when gcd(a,m)=1. The conditions matter.
+- RSA uses modular exponentiation and carefully related exponents; toy modular arithmetic omits padding, parameter sizes, side channels, and protocol protections. Secret sharing and error-correcting codes use further algebraic structures; they are not interchangeable with encryption.
+- Try the CRT example by listing residues0…5; explain why a toy theorem demonstration is not a secure encryption implementation.

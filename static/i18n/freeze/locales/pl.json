@@ -1,0 +1,19 @@
+{
+  "id": "pl",
+  "name": "Polski",
+  "dir": "ltr",
+  "catalog": "pl",
+  "html_lang": "pl",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4886,
+    "english_fallback": 4736
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

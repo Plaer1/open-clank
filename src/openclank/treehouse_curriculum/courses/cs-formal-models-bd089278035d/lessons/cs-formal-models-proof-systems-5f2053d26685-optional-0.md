@@ -1,0 +1,1 @@
+P=false,Q=true refutes the inference; modus ponens also requires P.

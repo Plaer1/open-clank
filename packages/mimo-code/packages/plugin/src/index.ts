@@ -572,6 +572,18 @@ export interface Hooks {
       assistantMessageID?: string
       /** Full raw agent slice: user text, synthetic reminders, tool calls/results, reasoning, etc. */
       trajectory: TrajectoryMessage[]
+      systemPrompt?: string[]
+    },
+    output: {},
+  ) => Promise<void>
+  /** Fires immediately before an agent request is sent to the model gateway. */
+  "session.llm.request"?: (
+    input: {
+      sessionID: string
+      providerID: string
+      modelID: string
+      trajectory: Array<{ role: string; content: unknown }>
+      systemPrompt: string[]
     },
     output: {},
   ) => Promise<void>
@@ -607,6 +619,7 @@ export interface Hooks {
       finalText?: string
       /** Raw messages through this step (includes synthetic reminders, tools, reasoning). */
       trajectory: TrajectoryMessage[]
+      systemPrompt?: string[]
     },
     output: {},
   ) => Promise<void>

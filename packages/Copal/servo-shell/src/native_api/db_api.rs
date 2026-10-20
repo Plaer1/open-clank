@@ -1,7 +1,7 @@
 //! DB-backed API surface + the one data stream.
 //!
 //! Everything here rides on `copal-db` (see
-//! `.futures/copal-jj-db-source-of-truth-metaplan.md`): docs/commits/ops
+//! `.clanker/futures/copal-jj-db-source-of-truth-metaplan.md`): docs/commits/ops
 //! endpoints, the `/api/events` SSE stream (the commit landing IS the sync
 //! event), and DB-mode adapters for the legacy vault endpoints so the
 //! existing UI keeps working over the database unchanged.

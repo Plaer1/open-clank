@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.dev/contracts/agent-supervisor-v1/semantic-event-v1.schema.json",
+  "title": "Open Clank semantic event v1",
+  "type": "object",
+  "required": ["schema_version", "owner_subject_id", "session_id", "runtime_id", "runtime_epoch", "runtime_generation", "run_id", "turn_id", "semantic_epoch", "seq", "emitted_unix_ms", "op", "entity_kind", "entity_id", "payload", "payload_sha256"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "owner_subject_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "runtime_epoch": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "runtime_generation": {"type": "integer", "minimum": 0},
+    "run_id": {"type": "string", "maxLength": 128},
+    "turn_id": {"type": "string", "maxLength": 128},
+    "semantic_epoch": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "seq": {"type": "integer", "minimum": 1},
+    "emitted_unix_ms": {"type": "integer", "minimum": 0},
+    "op": {"enum": ["snapshot_reset", "turn_upsert", "turn_remove", "message_upsert", "thought_upsert", "text_append", "tool_upsert", "tool_progress", "tool_result", "plan_upsert", "task_upsert", "interaction_upsert", "interaction_remove", "secret_request", "secret_resolved", "usage_merge", "metrics_merge", "commands_replace", "config_merge", "actor_upsert", "actor_remove", "session_merge", "error_upsert", "terminal_upsert", "terminal_remove", "run_completed", "run_cancelled", "resync_required", "filtered"]},
+    "entity_kind": {"type": "string", "maxLength": 64},
+    "entity_id": {"type": "string", "maxLength": 128},
+    "payload": {"type": "object", "maxProperties": 64},
+    "payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "append_offset_utf8_bytes": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

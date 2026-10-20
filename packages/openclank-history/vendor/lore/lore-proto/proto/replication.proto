@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package urc.rpc;
+
+import "model.proto";
+
+service ReplicationService {
+  rpc Put(stream urc.model.ReplicationPutRequest) returns (stream urc.model.PutResponse);
+}

@@ -1,0 +1,1 @@
+The predicted levels are 0.1,0.25,0.4; UV varies spatially while strength is a uniform.

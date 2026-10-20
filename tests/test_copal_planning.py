@@ -7,6 +7,7 @@ from src.openclank.copal_planning import (
     EVENT_KIND,
     EVENT_SCHEMA,
     MAX_RECURRENCE_EXPANSION,
+    TRACK_SCHEMA,
     PlanningValidationError,
     event_document_name,
     event_from_document,
@@ -14,9 +15,13 @@ from src.openclank.copal_planning import (
     legacy_inventory,
     merge_event,
     planning_projection,
+    reparent_track,
     serialize_event,
     serialize_track_registry,
+    track_preorder,
+    track_registry_from_document,
     validate_event,
+    validate_tracks,
 )
 
 
@@ -153,6 +158,190 @@ def test_fuzzy_and_track_validation_do_not_silently_coerce_semantics():
         validate_event({"title": "bad", "startDate": "FUZZY", "trackId": "home"}, TRACKS)
     with pytest.raises(PlanningValidationError, match="Unknown main track"):
         validate_event({"title": "bad", "startDate": "2026-07-10", "trackId": "missing"}, TRACKS)
+
+
+def test_schema_one_registry_reads_flat_without_mutating_its_document():
+    payload = {
+        "schemaVersion": 1,
+        "title": "Legacy",
+        "extension": {"keep": True},
+        "tracks": [
+            {**TRACKS[0], "parentTrackId": "car", "vendor": {"flag": 1}},
+            TRACKS[1],
+        ],
+    }
+    document = {
+        "id": "TRACKS",
+        "head": "legacy-head",
+        "kind": "copal-tracks",
+        "name": ".copal/tracks.json",
+        "text": json.dumps(payload),
+    }
+    original = dict(document)
+
+    registry = track_registry_from_document(document)
+    projection = planning_projection([document])
+
+    assert TRACK_SCHEMA == 2
+    assert registry["schemaVersion"] == 1
+    assert [track["parentTrackId"] for track in registry["tracks"]] == [None, None]
+    assert registry["tracks"][0]["vendor"] == {"flag": 1}
+    assert registry["extension"] == {"keep": True}
+    assert projection["schemaVersion"] == 2
+    assert projection["trackRegistry"] == {"id": "TRACKS", "head": "legacy-head"}
+    assert document == original
+
+
+def test_schema_two_registry_round_trips_stable_preorder_and_extensions():
+    tracks = [
+        {**TRACKS[0], "extension": {"root": True}},
+        {"id": "child-b", "name": "Child B", "color": "#ABCDEF", "icon": "b", "enabled": True, "parentTrackId": "home"},
+        TRACKS[1],
+        {"id": "child-a", "name": "Child A", "color": "#123456", "icon": "a", "enabled": False, "parentTrackId": "home"},
+        {"id": "grand", "name": "Grand", "color": "#654321", "icon": "g", "enabled": True, "parentTrackId": "child-a", "future": [1, 2]},
+    ]
+
+    serialized = serialize_track_registry(tracks, {"title": "Nested", "extension": {"keep": True}})
+    payload = json.loads(serialized)
+    restored = track_registry_from_document({"text": serialized})
+
+    assert payload["schemaVersion"] == 2
+    assert [track["id"] for track in payload["tracks"]] == ["home", "child-b", "child-a", "grand", "car"]
+    assert payload["tracks"][0]["parentTrackId"] is None
+    assert payload["tracks"][4]["parentTrackId"] is None
+    assert payload["tracks"][3]["future"] == [1, 2]
+    assert restored == payload
+
+
+@pytest.mark.parametrize("schema", [None, True, 0, -1, 1.0, 3, "2"])
+def test_track_registry_rejects_invalid_or_future_schema_versions(schema):
+    with pytest.raises(PlanningValidationError, match="schemaVersion must be 1 or 2"):
+        track_registry_from_document({"text": json.dumps({"schemaVersion": schema, "tracks": []})})
+
+
+@pytest.mark.parametrize("tracks", [None, False, 0, "", {}])
+def test_track_registry_rejects_explicit_falsey_nonlist_tracks(tracks):
+    with pytest.raises(PlanningValidationError, match="tracks must be a list"):
+        track_registry_from_document({"text": json.dumps({"schemaVersion": 2, "tracks": tracks})})
+
+
+def test_track_registry_allows_an_omitted_tracks_member_as_empty():
+    assert track_registry_from_document({"text": '{"schemaVersion":2}'})["tracks"] == []
+
+
+@pytest.mark.parametrize(
+    ("tracks", "message"),
+    [
+        ([{**TRACKS[0], "parentTrackId": 7}], "must be a string or null"),
+        ([{**TRACKS[0], "parentTrackId": "  "}], "cannot be blank"),
+        ([{**TRACKS[0], "parentTrackId": "missing"}], "unknown parent missing"),
+        ([{**TRACKS[0], "parentTrackId": "home"}], "cannot parent itself"),
+        ([{**TRACKS[0], "parentTrackId": "car"}, {**TRACKS[1], "parentTrackId": "home"}], "contains a cycle"),
+    ],
+)
+def test_track_hierarchy_rejects_invalid_parent_relationships(tracks, message):
+    with pytest.raises(PlanningValidationError, match=message):
+        validate_tracks(tracks)
+
+
+def test_track_preorder_handles_a_deep_tree_iteratively():
+    tracks = [
+        {
+            "id": f"track-{index}",
+            "name": f"Track {index}",
+            "color": "#14b8a6",
+            "icon": "•",
+            "enabled": True,
+            "parentTrackId": None if index == 0 else f"track-{index - 1}",
+        }
+        for index in reversed(range(2000))
+    ]
+
+    ordered = track_preorder(tracks)
+
+    assert len(ordered) == 2000
+    assert ordered[0]["id"] == "track-0"
+    assert ordered[-1]["id"] == "track-1999"
+
+
+def test_reparent_track_moves_whole_subtrees_to_last_child_or_root():
+    tracks = [
+        {**TRACKS[0], "extension": "root"},
+        {"id": "child", "name": "Child", "color": "#123456", "icon": "c", "enabled": True, "parentTrackId": "home", "extension": {"keep": True}},
+        {"id": "grand", "name": "Grand", "color": "#654321", "icon": "g", "enabled": True, "parentTrackId": "child"},
+        TRACKS[1],
+        {"id": "car-child", "name": "Car child", "color": "#abcdef", "icon": "d", "enabled": True, "parentTrackId": "car"},
+    ]
+    original = json.loads(json.dumps(tracks))
+
+    under_car = reparent_track(tracks, "child", "car")
+    at_root = reparent_track(tracks, "child", None)
+
+    assert [track["id"] for track in under_car] == ["home", "car", "car-child", "child", "grand"]
+    assert under_car[3]["parentTrackId"] == "car"
+    assert under_car[3]["extension"] == {"keep": True}
+    assert under_car[4]["parentTrackId"] == "child"
+    assert [track["id"] for track in at_root] == ["home", "car", "car-child", "child", "grand"]
+    assert at_root[3]["parentTrackId"] is None
+    assert tracks == original
+
+
+def test_reparent_same_parent_is_an_exact_nonmutating_no_op():
+    tracks = [
+        {"id": "child", "name": "Child", "color": "#123456", "icon": "c", "enabled": True, "parentTrackId": "home", "extension": {"shape": "keep"}},
+        {**TRACKS[1], "custom": [1, 2]},
+        {**TRACKS[0]},
+    ]
+    original = json.loads(json.dumps(tracks))
+
+    result = reparent_track(tracks, "child", "home")
+
+    assert result == original
+    assert tracks == original
+    assert result is not tracks
+    assert result[0] is not tracks[0]
+
+
+def test_reparent_rejects_self_descendant_and_missing_targets():
+    tracks = [
+        TRACKS[0],
+        {"id": "child", "name": "Child", "color": "#123456", "icon": "c", "enabled": True, "parentTrackId": "home"},
+        {"id": "grand", "name": "Grand", "color": "#654321", "icon": "g", "enabled": True, "parentTrackId": "child"},
+    ]
+
+    with pytest.raises(PlanningValidationError, match="cannot parent itself"):
+        reparent_track(tracks, "child", "child")
+    with pytest.raises(PlanningValidationError, match="cannot move beneath its descendant"):
+        reparent_track(tracks, "home", "grand")
+    with pytest.raises(PlanningValidationError, match="Unknown moved track"):
+        reparent_track(tracks, "missing", None)
+    with pytest.raises(PlanningValidationError, match="Unknown target parent"):
+        reparent_track(tracks, "child", "missing")
+
+
+def test_parent_events_do_not_roll_up_and_shared_membership_stays_explicit():
+    tracks = [
+        TRACKS[0],
+        {**TRACKS[1], "parentTrackId": "home"},
+    ]
+    registry = {
+        "id": "TRACKS",
+        "head": "track-head",
+        "kind": "copal-tracks",
+        "name": ".copal/tracks.json",
+        "text": serialize_track_registry(tracks),
+    }
+    event = event_doc({
+        "title": "Parent-owned",
+        "startDate": "2026-07-10",
+        "trackId": "home",
+        "sharedTrackIds": ["car"],
+    })
+
+    projection = planning_projection([registry, event])
+
+    assert projection["tracks"][0]["tasks"][0]["sharedTrackIds"] == ["car"]
+    assert projection["tracks"][1]["tasks"] == []
 
 
 # ── Schema v2 + Recurrence ─────────────────────────────────────────────

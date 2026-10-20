@@ -1,0 +1,2446 @@
+//! Internal typed operation DTOs and Lore reference construction.
+
+use crate::catalog::{
+    ActionRecord, ActionState, AfterResource, CaptureManifest, Catalog, CatalogConflict, CatalogResult,
+    LiveReceipt, LiveStatus, Locator, MutationBatch, MutationResource, PrepareReceipt,
+    ResourceExistence, ResourceKey, ResourceMetadata, ResourceOutcome, ResourceType, Revision,
+    VersionContent, VersionReceipt,
+};
+use crate::retention::{BudgetError, ExpiryRecord, ExpiryState, PersistedReservation, PolicySet};
+use crate::usage::{
+    add_external_storage, measure_root_with_reservations, HistoryUsage, RetainedVersionUsage,
+};
+use crate::{Context, HistoryStore, Partition};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(feature = "test_faults")]
+use std::sync::atomic::AtomicU8;
+
+static VERSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub const MAX_RESOURCE_VERSION_PAGE_SIZE: u16 = 100;
+pub const MAX_RESOURCE_VERSION_CHUNK_BYTES: u32 = 256 * 1024;
+const FILE_RESOURCE_PROVIDERS: [&str; 2] = ["filesystem", "odysseus-files"];
+
+/// Bounded metadata returned for one exact Files resource version. The opaque
+/// `id` binds an action and receipt version; callers still supply the resource
+/// id and the service rechecks that binding before every read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VersionDescriptor {
+    pub id: String,
+    pub source_provider: String,
+    pub action_id: String,
+    pub version_id: String,
+    pub phase: String,
+    pub operation: String,
+    pub timestamp_millis: u64,
+    pub display_name: Option<String>,
+    pub resource_type: String,
+    pub size_bytes: Option<u64>,
+    pub fingerprint: String,
+    pub action_state: String,
+    /// `available`, `absent`, `expiring`, or `expired`.
+    pub availability: String,
+    pub can_read: bool,
+    pub can_restore: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceVersionPage {
+    pub items: Vec<VersionDescriptor>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionLookupError {
+    InvalidCursor,
+    InvalidLimit,
+    InvalidVersionRef,
+    InvalidOffset,
+    AmbiguousVersionRef,
+    VersionNotFound,
+    VersionNotRestorable,
+    VersionExpiring,
+    VersionExpired,
+    Storage(String),
+}
+
+impl VersionLookupError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidCursor => "invalid_cursor",
+            Self::InvalidLimit => "invalid_limit",
+            Self::InvalidVersionRef => "invalid_version_ref",
+            Self::InvalidOffset => "invalid_offset",
+            Self::AmbiguousVersionRef => "ambiguous_version_ref",
+            Self::VersionNotFound => "version_not_found",
+            Self::VersionNotRestorable => "version_not_restorable",
+            Self::VersionExpiring => "version_expiring",
+            Self::VersionExpired => "version_expired",
+            Self::Storage(_) => "history_read_failed",
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::InvalidCursor => "history page cursor is invalid".into(),
+            Self::InvalidLimit => "history page size must be between 1 and 100".into(),
+            Self::InvalidVersionRef => "history version identity is invalid".into(),
+            Self::InvalidOffset => "history read offset is outside the selected version".into(),
+            Self::AmbiguousVersionRef => "the selected history version is ambiguous across source providers; reload the version list".into(),
+            Self::VersionNotFound => "the selected history version is missing or no longer belongs to this resource".into(),
+            Self::VersionNotRestorable => "the selected history version is not currently eligible for restore".into(),
+            Self::VersionExpiring => "the selected history version is being pruned".into(),
+            Self::VersionExpired => "the selected history version has been pruned".into(),
+            Self::Storage(error) => format!("history version read failed: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionIdentity {
+    action_id: String,
+    version_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_provider: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VersionPageCursor {
+    timestamp_millis: u64,
+    action_id: String,
+    version_id: String,
+    #[serde(default = "legacy_filesystem_provider")]
+    source_provider: String,
+}
+
+fn legacy_filesystem_provider() -> String {
+    "filesystem".into()
+}
+
+#[derive(Debug, Clone)]
+struct VersionCandidate {
+    phase: &'static str,
+    receipt: VersionReceipt,
+    metadata: Option<ResourceMetadata>,
+    resource_type: Option<ResourceType>,
+    locator: Option<Locator>,
+    byte_len: Option<u64>,
+}
+
+fn version_ref(action_id: &str, version_id: &str, source_provider: &str) -> String {
+    URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&VersionIdentity {
+            action_id: action_id.to_owned(),
+            version_id: version_id.to_owned(),
+            source_provider: Some(source_provider.to_owned()),
+        })
+        .expect("history version identity is serializable"),
+    )
+}
+
+fn decode_version_ref(value: &str) -> Result<VersionIdentity, VersionLookupError> {
+    if value.is_empty() || value.len() > 1024 {
+        return Err(VersionLookupError::InvalidVersionRef);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| VersionLookupError::InvalidVersionRef)?;
+    let identity: VersionIdentity =
+        serde_json::from_slice(&bytes).map_err(|_| VersionLookupError::InvalidVersionRef)?;
+    if identity.action_id.is_empty()
+        || identity.version_id.is_empty()
+        || identity
+            .source_provider
+            .as_deref()
+            .is_some_and(|provider| provider.is_empty() || provider.len() > 128)
+    {
+        return Err(VersionLookupError::InvalidVersionRef);
+    }
+    Ok(identity)
+}
+
+fn encode_page_cursor(cursor: &VersionPageCursor) -> String {
+    URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(cursor).expect("history page cursor is serializable"),
+    )
+}
+
+fn decode_page_cursor(value: &str) -> Result<VersionPageCursor, VersionLookupError> {
+    if value.is_empty() || value.len() > 2048 {
+        return Err(VersionLookupError::InvalidCursor);
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| VersionLookupError::InvalidCursor)?;
+    let cursor: VersionPageCursor =
+        serde_json::from_slice(&bytes).map_err(|_| VersionLookupError::InvalidCursor)?;
+    if cursor.action_id.is_empty()
+        || cursor.version_id.is_empty()
+        || cursor.source_provider.is_empty()
+        || cursor.source_provider.len() > 128
+    {
+        return Err(VersionLookupError::InvalidCursor);
+    }
+    Ok(cursor)
+}
+
+fn compare_page_cursor(left: &VersionPageCursor, right: &VersionPageCursor) -> std::cmp::Ordering {
+    left.timestamp_millis
+        .cmp(&right.timestamp_millis)
+        .then_with(|| left.action_id.cmp(&right.action_id))
+        .then_with(|| left.version_id.cmp(&right.version_id))
+        .then_with(|| left.source_provider.cmp(&right.source_provider))
+}
+
+fn resource_version_providers(key: &ResourceKey) -> Vec<&str> {
+    if FILE_RESOURCE_PROVIDERS.contains(&key.provider.as_str()) {
+        FILE_RESOURCE_PROVIDERS.to_vec()
+    } else {
+        vec![key.provider.as_str()]
+    }
+}
+
+fn resource_key_for_provider(key: &ResourceKey, provider: &str) -> ResourceKey {
+    ResourceKey {
+        account_id: key.account_id.clone(),
+        workspace_id: key.workspace_id.clone(),
+        provider: provider.to_owned(),
+        resource_id: key.resource_id.clone(),
+    }
+}
+
+fn version_candidates(record: &ActionRecord, key: &ResourceKey) -> Vec<VersionCandidate> {
+    let mut candidates = BTreeMap::<String, VersionCandidate>::new();
+    let mut insert = |candidate: VersionCandidate| {
+        candidates
+            .entry(candidate.receipt.version_id.clone())
+            .or_insert(candidate);
+    };
+
+    for resource in &record.before_resources {
+        if &resource.resource_key == key {
+            if let Some(receipt) = &resource.before {
+                insert(VersionCandidate {
+                    phase: "before",
+                    receipt: receipt.clone(),
+                    metadata: Some(resource.metadata.clone()),
+                    resource_type: Some(resource.resource_type.clone()),
+                    locator: resource.old_locator.clone(),
+                    byte_len: resource.coverage.byte_len,
+                });
+            }
+        }
+    }
+    if let Some(batch) = &record.mutation_batch {
+        for resource in &batch.resources {
+            if &resource.resource_key == key {
+                if let Some(receipt) = &resource.before {
+                    insert(VersionCandidate {
+                        phase: "before",
+                        receipt: receipt.clone(),
+                        metadata: Some(resource.metadata.clone()),
+                        resource_type: Some(resource.resource_type.clone()),
+                        locator: resource.old_locator.clone(),
+                        byte_len: resource.coverage.byte_len,
+                    });
+                }
+            }
+        }
+    }
+    for resource in &record.after_resources {
+        if &resource.resource_key == key {
+            insert(VersionCandidate {
+                phase: "after",
+                receipt: resource.after.clone(),
+                metadata: Some(resource.metadata.clone()),
+                resource_type: Some(resource.resource_type.clone()),
+                locator: resource.locator.clone(),
+                byte_len: resource.coverage.byte_len,
+            });
+        }
+    }
+
+    if &record.resource_key == key {
+        if let Some(receipt) = &record.before {
+            insert(VersionCandidate {
+                phase: "before",
+                receipt: receipt.clone(),
+                metadata: None,
+                resource_type: None,
+                locator: record.original_locator.clone(),
+                byte_len: record.coverage.as_ref().and_then(|value| value.byte_len),
+            });
+        }
+        if let Some(receipt) = &record.after {
+            insert(VersionCandidate {
+                phase: "after",
+                receipt: receipt.clone(),
+                metadata: None,
+                resource_type: None,
+                locator: record
+                    .destination_locator
+                    .clone()
+                    .or_else(|| record.original_locator.clone()),
+                byte_len: record.coverage.as_ref().and_then(|value| value.byte_len),
+            });
+        }
+    }
+
+    candidates.into_values().collect()
+}
+
+fn selected_version_candidate(
+    record: &ActionRecord,
+    key: &ResourceKey,
+    identity: &VersionIdentity,
+) -> Result<(String, VersionCandidate), VersionLookupError> {
+    let providers = resource_version_providers(key);
+    if let Some(selected_provider) = identity.source_provider.as_deref() {
+        if !providers.contains(&selected_provider) {
+            return Err(VersionLookupError::InvalidVersionRef);
+        }
+        let selected_key = resource_key_for_provider(key, selected_provider);
+        return version_candidates(record, &selected_key)
+            .into_iter()
+            .find(|candidate| candidate.receipt.version_id == identity.version_id)
+            .map(|candidate| (selected_provider.to_owned(), candidate))
+            .ok_or(VersionLookupError::VersionNotFound);
+    }
+
+    let mut matches = providers.into_iter().filter_map(|provider| {
+        let provider_key = resource_key_for_provider(key, provider);
+        version_candidates(record, &provider_key)
+            .into_iter()
+            .find(|candidate| candidate.receipt.version_id == identity.version_id)
+            .map(|candidate| (provider.to_owned(), candidate))
+    });
+    let Some(first) = matches.next() else {
+        return Err(VersionLookupError::VersionNotFound);
+    };
+    if matches.next().is_some() {
+        return Err(VersionLookupError::AmbiguousVersionRef);
+    }
+    Ok(first)
+}
+
+fn version_descriptor(
+    record: &ActionRecord,
+    candidate: &VersionCandidate,
+    expiry: Option<&ExpiryRecord>,
+    source_provider: &str,
+) -> VersionDescriptor {
+    let availability = match expiry.map(|value| &value.state) {
+        Some(ExpiryState::Expiring) => "expiring",
+        Some(ExpiryState::Expired) => "expired",
+        None if candidate.receipt.content == VersionContent::Tombstone => "absent",
+        None => "available",
+    }
+    .to_owned();
+    let can_read = availability == "available";
+    let can_restore = availability == "available"
+        && matches!(
+            &record.state,
+            ActionState::Complete | ActionState::AfterCaptureFailed
+        );
+    let resource_type = candidate
+        .resource_type
+        .as_ref()
+        .map(|value| format!("{value:?}").to_lowercase())
+        .unwrap_or_else(|| "file".into());
+    let fallback_locator = if candidate.phase == "after" {
+        record
+            .destination_locator
+            .as_ref()
+            .or(record.original_locator.as_ref())
+    } else {
+        record.original_locator.as_ref()
+    };
+    VersionDescriptor {
+        id: version_ref(
+            &record.action_id,
+            &candidate.receipt.version_id,
+            source_provider,
+        ),
+        source_provider: source_provider.to_owned(),
+        action_id: record.action_id.clone(),
+        version_id: candidate.receipt.version_id.clone(),
+        phase: candidate.phase.into(),
+        operation: record.operation.clone(),
+        timestamp_millis: record.timestamp_millis.unwrap_or(0),
+        display_name: candidate
+            .locator
+            .as_ref()
+            .map(|value| value.display_name.clone())
+            .or_else(|| fallback_locator.map(|value| value.display_name.clone())),
+        resource_type,
+        size_bytes: candidate
+            .metadata
+            .as_ref()
+            .and_then(|value| value.size)
+            .or(candidate.byte_len),
+        fingerprint: candidate.receipt.fingerprint.clone(),
+        action_state: format!("{:?}", record.state).to_lowercase(),
+        availability,
+        can_read,
+        can_restore,
+    }
+}
+
+#[cfg(feature = "test_faults")]
+static CAPTURE_FAULT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(feature = "test_faults")]
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureFault {
+    AfterMarker = 1,
+    AfterFlush = 2,
+    AfterLiveMarker = 3,
+}
+
+#[cfg(feature = "test_faults")]
+pub fn inject_capture_fault(fault: CaptureFault) {
+    CAPTURE_FAULT.store(fault as u8, Ordering::SeqCst);
+}
+
+#[cfg(feature = "test_faults")]
+fn take_capture_fault(fault: CaptureFault) -> bool {
+    CAPTURE_FAULT
+        .compare_exchange(fault as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+#[cfg(feature = "test_faults")]
+fn qualification_abort(stage: &str) {
+    if std::env::var("OPENCLANK_HISTORY_ABORT_STAGE")
+        .ok()
+        .as_deref()
+        == Some(stage)
+    {
+        std::process::abort();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionRequest {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub action_id: String,
+    pub actor_account_id: String,
+    pub resource_key: ResourceKey,
+    /// Populated only by a trusted server-side physical-resource resolver. The protocol skips
+    /// this field so client JSON cannot forge an alias used by the lease/read path.
+    #[serde(skip_serializing, skip_deserializing)]
+    pub physical_lease_keys: Vec<String>,
+    pub guard_resource_ids: Vec<ResourceKey>,
+    pub modified_resource_ids: Vec<ResourceKey>,
+    pub operation: String,
+    pub expected_revision: Option<Revision>,
+    pub actor_id: String,
+    #[serde(default)]
+    pub actor_kind: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub tool_id: Option<String>,
+    #[serde(default)]
+    pub before_revision: Option<Revision>,
+    #[serde(default)]
+    pub expected_after_revision: Option<Revision>,
+    #[serde(default)]
+    pub original_locator: Option<Locator>,
+    #[serde(default)]
+    pub destination_locator: Option<Locator>,
+    #[serde(default)]
+    pub timestamp_millis: Option<u64>,
+    #[serde(default)]
+    pub coverage: Option<CaptureManifest>,
+    #[serde(default)]
+    pub per_resource_outcomes: Option<Vec<ResourceOutcome>>,
+}
+
+/// One exact before-state supplied by a mutation owner. `None` content is
+/// meaningful only together with `ResourceExistence::Absent` (or a provider
+/// type such as a directory whose bytes are not representable); it is never
+/// inferred to mean an unobserved secondary target.
+#[derive(Debug, Clone)]
+pub struct BatchCaptureInput {
+    pub resource_key: ResourceKey,
+    pub old_locator: Option<Locator>,
+    pub new_locator: Option<Locator>,
+    pub expected_revision: Option<Revision>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub content: Option<Bytes>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+}
+
+/// One exact after-state supplied once a live owner has committed a batch.
+#[derive(Debug, Clone)]
+pub struct BatchAfterInput {
+    pub resource_key: ResourceKey,
+    pub locator: Option<Locator>,
+    pub existence: ResourceExistence,
+    pub resource_type: ResourceType,
+    pub metadata: ResourceMetadata,
+    pub content: Option<Bytes>,
+    pub fingerprint: String,
+    pub coverage: CaptureManifest,
+    pub outcome: ResourceOutcome,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+pub fn new_action_record(request: ActionRequest) -> ActionRecord {
+    let request_digest = normalized_digest(&request);
+    ActionRecord {
+        schema_version: request.schema_version,
+        action_id: request.action_id,
+        request_digest,
+        actor_account_id: request.actor_account_id,
+        resource_key: request.resource_key,
+        physical_lease_keys: request.physical_lease_keys,
+        guard_resource_ids: request.guard_resource_ids,
+        modified_resource_ids: request.modified_resource_ids,
+        operation: request.operation,
+        expected_revision: request.expected_revision,
+        actor_id: request.actor_id,
+        actor_kind: request.actor_kind,
+        session_id: request.session_id,
+        run_id: request.run_id,
+        task_id: request.task_id,
+        tool_id: request.tool_id,
+        before_revision: request.before_revision,
+        expected_after_revision: request.expected_after_revision,
+        original_locator: request.original_locator,
+        destination_locator: request.destination_locator,
+        timestamp_millis: request.timestamp_millis,
+        coverage: request.coverage,
+        per_resource_outcomes: request.per_resource_outcomes,
+        state: ActionState::Intent,
+        before: None,
+        before_resources: Vec::new(),
+        mutation_batch: None,
+        after: None,
+        after_resources: Vec::new(),
+        complete_request_digest: None,
+        live: None,
+        before_capture_digest: None,
+        after_capture_digest: None,
+        before_scope_id: None,
+        after_scope_id: None,
+        before_logical_bytes: 0,
+        after_logical_bytes: 0,
+        pinned: false,
+    }
+}
+
+pub fn unique_version_id(action_id: &str, phase: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = VERSION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{action_id}:{phase}:{now:x}:{sequence:x}")
+}
+
+pub fn unique_context(action_id: &str, version_id: &str) -> [u8; 16] {
+    let mut input = String::with_capacity(action_id.len() + version_id.len() + 1);
+    input.push_str(action_id);
+    input.push(':');
+    input.push_str(version_id);
+    let digest = blake3::hash(input.as_bytes());
+    let mut context = [0u8; 16];
+    context.copy_from_slice(&digest.as_bytes()[..16]);
+    if context == [0; 16] {
+        context[0] = 1;
+    }
+    context
+}
+
+pub fn tombstone_version(action_id: &str, fingerprint: impl Into<String>) -> VersionReceipt {
+    let version_id = unique_version_id(action_id, "tombstone");
+    VersionReceipt {
+        version_id,
+        content: VersionContent::Tombstone,
+        fingerprint: fingerprint.into(),
+    }
+}
+
+pub fn lore_version(
+    action_id: &str,
+    hash_hex: impl Into<String>,
+    fingerprint: impl Into<String>,
+) -> VersionReceipt {
+    lore_version_with_context(
+        action_id,
+        hash_hex,
+        fingerprint,
+        unique_context(action_id, "payload"),
+    )
+}
+
+fn lore_version_with_context(
+    action_id: &str,
+    hash_hex: impl Into<String>,
+    fingerprint: impl Into<String>,
+    context: [u8; 16],
+) -> VersionReceipt {
+    let version_id = unique_version_id(action_id, "bytes");
+    VersionReceipt {
+        version_id,
+        content: VersionContent::Bytes(crate::catalog::LoreRef {
+            context,
+            hash_hex: hash_hex.into(),
+        }),
+        fingerprint: fingerprint.into(),
+    }
+}
+
+pub fn begin(
+    catalog: &Catalog,
+    request: ActionRequest,
+) -> CatalogResult<crate::catalog::BeginResult> {
+    catalog.begin_action(new_action_record(request))
+}
+
+#[allow(dead_code)]
+pub(crate) fn apply_live_receipt(
+    catalog: &Catalog,
+    action_id: &str,
+    receipt: LiveReceipt,
+) -> CatalogResult<ActionRecord> {
+    catalog.record_live(action_id, receipt)
+}
+
+/// Internal coordinator that makes a checked Lore flush precede catalog publication.
+pub struct HistoryCoordinator {
+    pub(crate) catalog: Catalog,
+    store: HistoryStore,
+    held_leases: Mutex<BTreeMap<String, Vec<String>>>,
+}
+
+impl HistoryCoordinator {
+    pub async fn open(
+        catalog_path: impl AsRef<std::path::Path>,
+        lore_root: impl AsRef<std::path::Path>,
+        account_id: &str,
+    ) -> CatalogResult<Self> {
+        let catalog = Catalog::open(catalog_path, account_id)?;
+        catalog.reconcile_reservations()?;
+        let coordinator = Self {
+            catalog,
+            store: HistoryStore::open(lore_root).await?,
+            held_leases: Mutex::new(BTreeMap::new()),
+        };
+        for action_id in coordinator.catalog.expiring_actions()? {
+            let _ = coordinator
+                .reclaim_checked(
+                    &action_id,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                )
+                .await;
+        }
+        Ok(coordinator)
+    }
+
+    /// Explicit offline retained-reference inspection must not reclaim expired
+    /// payloads or reconcile pending writes while deciding coverage.
+    pub async fn open_for_inventory(
+        catalog_path: impl AsRef<std::path::Path>,
+        lore_root: impl AsRef<std::path::Path>,
+        account_id: &str,
+    ) -> CatalogResult<Self> {
+        Ok(Self {
+            catalog: Catalog::open(catalog_path, account_id)?,
+            store: HistoryStore::open(lore_root).await?,
+            held_leases: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Return one bounded page of versions for an exact account/workspace/
+    /// resource identity. Files resources span the two capture producer
+    /// namespaces; each descriptor and cursor retains its source provider.
+    pub fn list_resource_versions(
+        &self,
+        key: &ResourceKey,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<ResourceVersionPage, VersionLookupError> {
+        if !(1..=MAX_RESOURCE_VERSION_PAGE_SIZE).contains(&limit) {
+            return Err(VersionLookupError::InvalidLimit);
+        }
+        let providers = resource_version_providers(key);
+        let after = cursor.map(decode_page_cursor).transpose()?;
+        if after
+            .as_ref()
+            .is_some_and(|value| !providers.contains(&value.source_provider.as_str()))
+        {
+            return Err(VersionLookupError::InvalidCursor);
+        }
+        let actions = self
+            .catalog
+            .all_actions()
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let mut versions = Vec::<(VersionPageCursor, VersionDescriptor)>::new();
+        for action in actions {
+            let expiry = self
+                .catalog
+                .expiry(&action.action_id)
+                .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+            for provider in providers.iter().copied() {
+                let provider_key = resource_key_for_provider(key, provider);
+                for candidate in version_candidates(&action, &provider_key) {
+                    let descriptor =
+                        version_descriptor(&action, &candidate, expiry.as_ref(), provider);
+                    versions.push((
+                        VersionPageCursor {
+                            timestamp_millis: descriptor.timestamp_millis,
+                            action_id: descriptor.action_id.clone(),
+                            version_id: descriptor.version_id.clone(),
+                            source_provider: provider.to_owned(),
+                        },
+                        descriptor,
+                    ));
+                }
+            }
+        }
+        versions.sort_by(|left, right| compare_page_cursor(&right.0, &left.0));
+        let mut eligible = versions.into_iter().filter(|(position, _)| {
+            after
+                .as_ref()
+                .is_none_or(|cursor| compare_page_cursor(position, cursor).is_lt())
+        });
+        let page_size = usize::from(limit);
+        let mut page = Vec::with_capacity(page_size + 1);
+        for item in eligible.by_ref().take(page_size + 1) {
+            page.push(item);
+        }
+        let has_more = page.len() > page_size;
+        if has_more {
+            page.pop();
+        }
+        let next_cursor = if has_more {
+            page.last().map(|(position, _)| encode_page_cursor(position))
+        } else {
+            None
+        };
+        Ok(ResourceVersionPage {
+            items: page.into_iter().map(|(_, descriptor)| descriptor).collect(),
+            next_cursor,
+        })
+    }
+
+    /// Resolve a browser selection to the catalog-verified receipt consumed
+    /// by RestoreHost. The receipt stays inside the trusted service boundary.
+    pub fn resolve_resource_version(
+        &self,
+        key: &ResourceKey,
+        version_ref: &str,
+    ) -> Result<(VersionDescriptor, VersionReceipt), VersionLookupError> {
+        let identity = decode_version_ref(version_ref)?;
+        let action = self
+            .catalog
+            .get_action(&identity.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+            .ok_or(VersionLookupError::VersionNotFound)?;
+        let (source_provider, candidate) =
+            selected_version_candidate(&action, key, &identity)?;
+        let expiry = self
+            .catalog
+            .expiry(&action.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let descriptor = version_descriptor(
+            &action,
+            &candidate,
+            expiry.as_ref(),
+            &source_provider,
+        );
+        match descriptor.availability.as_str() {
+            "expiring" => return Err(VersionLookupError::VersionExpiring),
+            "expired" => return Err(VersionLookupError::VersionExpired),
+            _ => {}
+        }
+        if !descriptor.can_restore {
+            return Err(VersionLookupError::VersionNotRestorable);
+        }
+        Ok((descriptor, candidate.receipt))
+    }
+
+    /// Read one bounded chunk after resolving the opaque selection again
+    /// against the exact resource key. No host path or Lore address crosses
+    /// this API boundary.
+    pub async fn read_resource_version_chunk(
+        &self,
+        key: &ResourceKey,
+        version_ref: &str,
+        offset: u64,
+        length: u32,
+    ) -> Result<(VersionDescriptor, Option<Vec<u8>>, bool), VersionLookupError> {
+        if length == 0 || length > MAX_RESOURCE_VERSION_CHUNK_BYTES {
+            return Err(VersionLookupError::InvalidLimit);
+        }
+        let identity = decode_version_ref(version_ref)?;
+        let action = self
+            .catalog
+            .get_action(&identity.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+            .ok_or(VersionLookupError::VersionNotFound)?;
+        let (source_provider, candidate) =
+            selected_version_candidate(&action, key, &identity)?;
+        let expiry = self
+            .catalog
+            .expiry(&action.action_id)
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?;
+        let descriptor = version_descriptor(
+            &action,
+            &candidate,
+            expiry.as_ref(),
+            &source_provider,
+        );
+        match descriptor.availability.as_str() {
+            "expiring" => return Err(VersionLookupError::VersionExpiring),
+            "expired" => return Err(VersionLookupError::VersionExpired),
+            _ => {}
+        }
+        let Some(bytes) = self
+            .read_version(&action.action_id, &candidate.receipt)
+            .await
+            .map_err(|error| VersionLookupError::Storage(error.to_string()))?
+        else {
+            return Ok((descriptor, None, true));
+        };
+        let start = usize::try_from(offset).map_err(|_| VersionLookupError::InvalidOffset)?;
+        if start > bytes.len() {
+            return Err(VersionLookupError::InvalidOffset);
+        }
+        let end = start
+            .saturating_add(length as usize)
+            .min(bytes.len());
+        Ok((
+            descriptor,
+            Some(bytes.slice(start..end).to_vec()),
+            end == bytes.len(),
+        ))
+    }
+
+    pub fn policy_set(&self) -> CatalogResult<PolicySet> {
+        self.catalog.policy_set()
+    }
+
+    pub fn set_policy(
+        &self,
+        expected_revision: u64,
+        policy: PolicySet,
+    ) -> CatalogResult<PolicySet> {
+        self.catalog.set_policy(expected_revision, policy)
+    }
+
+    pub fn reserve_capture(
+        &self,
+        reservation: PersistedReservation,
+        usage: &HistoryUsage,
+    ) -> CatalogResult<()> {
+        self.catalog.reserve_capture_scoped(
+            reservation.clone(),
+            usage.physical_allocated_bytes,
+            usage
+                .scopes
+                .iter()
+                .find(|scope| scope.scope_id == reservation.scope_id)
+                .map_or(0, |scope| scope.logical_retained_bytes),
+        )
+    }
+
+    pub fn release_capture_reservation(&self, reservation_id: &str) -> CatalogResult<bool> {
+        self.catalog.release_capture_reservation(reservation_id)
+    }
+
+    pub fn reserved_inflight_bytes(&self) -> CatalogResult<u64> {
+        self.catalog.reserved_inflight_bytes()
+    }
+
+    /// Revoke the in-memory mutation leases held by an account that has been
+    /// removed from the supervisor credential snapshot. Durable action rows
+    /// remain available for audit/recovery, while a recreated account cannot
+    /// inherit a stale live worker lease from the deleted credential.
+    pub fn release_account_leases(&self, account_id: &str) -> CatalogResult<u64> {
+        let actions = self.catalog.all_actions()?;
+        let mut released = 0u64;
+        for action in actions {
+            if action.actor_account_id != account_id {
+                continue;
+            }
+            let leases = lease_ids(&action);
+            self.catalog.release_leases(&action.action_id, &leases)?;
+            self.held_leases
+                .lock()
+                .map_err(|_| "lease lock poisoned")?
+                .remove(&action.action_id);
+            released = released.saturating_add(leases.len() as u64);
+        }
+        Ok(released)
+    }
+
+    /// Measure the same store and durable reservation rows used by admission.  Settings and
+    /// live owners therefore observe one authoritative budget rather than a Python projection.
+    pub fn usage(&self) -> CatalogResult<HistoryUsage> {
+        let reserved = self.catalog.reserved_inflight_bytes()?;
+        let measured_at_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock before unix epoch")?
+            .as_millis() as u64;
+        let actions = self.catalog.all_actions()?;
+        let mut versions = Vec::new();
+        for action in actions {
+            if self
+                .catalog
+                .expiry(&action.action_id)?
+                .is_some_and(|record| record.state == ExpiryState::Expired)
+            {
+                continue;
+            }
+            let locator = action
+                .destination_locator
+                .as_ref()
+                .or(action.original_locator.as_ref())
+                .map(|value| std::path::Path::new(value.location_label.as_str()));
+            for (receipt, scope_id, logical_bytes) in [
+                (
+                    action.before.as_ref(),
+                    action.before_scope_id.as_ref(),
+                    action.before_logical_bytes,
+                ),
+                (
+                    action.after.as_ref(),
+                    action.after_scope_id.as_ref(),
+                    action.after_logical_bytes,
+                ),
+            ] {
+                let (Some(receipt), Some(scope_id)) = (receipt, scope_id) else {
+                    continue;
+                };
+                versions.push(RetainedVersionUsage {
+                    version_id: receipt.version_id.clone(),
+                    scope_id: scope_id.clone(),
+                    workspace_id: action.resource_key.workspace_id.clone(),
+                    locator: locator.map(|value| value.to_string_lossy().into_owned()),
+                    logical_bytes,
+                    physical_bytes: 0,
+                    created_millis: action.timestamp_millis.unwrap_or(0),
+                });
+            }
+        }
+        let mut usage = measure_root_with_reservations(
+            self.store.root(),
+            measured_at_millis,
+            reserved,
+            0,
+            &versions,
+        )?;
+        add_external_storage(&mut usage, self.catalog.catalog_path())?;
+        Ok(usage)
+    }
+
+    /// Return a truthful admission state consumed by Settings and IPC owners.
+    pub fn status(&self) -> CatalogResult<(String, Option<String>, bool)> {
+        let policy = self.catalog.policy_set()?;
+        let usage = self.usage()?;
+        if !policy.global.enabled {
+            return Ok((
+                "history_paused_disabled".into(),
+                Some("history policy is disabled".into()),
+                true,
+            ));
+        }
+        let used = usage
+            .physical_allocated_bytes
+            .saturating_add(usage.reserved_inflight_bytes);
+        if used >= policy.global.total_bytes {
+            return Ok((
+                "history_paused_budget".into(),
+                Some("history budget is full; ordinary saves continue".into()),
+                true,
+            ));
+        }
+        Ok(("ready".into(), None, false))
+    }
+
+    fn reserve_for_capture(
+        &self,
+        action: &ActionRecord,
+        phase: &str,
+        content_bytes: u64,
+    ) -> CatalogResult<(String, String)> {
+        let policy = self.catalog.policy_set()?;
+        let locator = action
+            .destination_locator
+            .as_ref()
+            .or(action.original_locator.as_ref())
+            .map(|value| std::path::Path::new(value.location_label.as_str()));
+        let effective = policy.effective_for_owner(
+            Some(action.actor_account_id.as_str()),
+            &action.resource_key.workspace_id,
+            locator,
+        );
+        let reservation_id = format!("{}:{phase}", action.action_id);
+        let metadata_bytes = serde_json::to_vec(action)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0)
+            .saturating_add(4096);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock before unix epoch")?
+            .as_millis() as u64;
+        let usage = self.usage()?;
+        self.reserve_capture(
+            PersistedReservation {
+                reservation_id: reservation_id.clone(),
+                scope_id: effective.scope_id.clone(),
+                bytes: content_bytes,
+                metadata_bytes,
+                policy_revision: policy.revision,
+                created_millis: now,
+            },
+            &usage,
+        )?;
+        Ok((reservation_id, effective.scope_id))
+    }
+
+    async fn reserve_with_reclaim(
+        &self,
+        action: &ActionRecord,
+        phase: &str,
+        content_bytes: u64,
+    ) -> CatalogResult<(String, String)> {
+        match self.reserve_for_capture(action, phase, content_bytes) {
+            Ok(reservation) => Ok(reservation),
+            Err(first_error) => {
+                let global_failure = first_error
+                    .downcast_ref::<BudgetError>()
+                    .is_some_and(|error| matches!(error, BudgetError::ExceedsGlobal { .. }));
+                let needed_bytes = first_error
+                    .downcast_ref::<BudgetError>()
+                    .map(|error| match error {
+                        BudgetError::ExceedsGlobal {
+                            requested,
+                            available,
+                        }
+                        | BudgetError::ExceedsScope {
+                            requested,
+                            available,
+                        }
+                        | BudgetError::ExceedsTarget {
+                            requested,
+                            available,
+                        } => requested.saturating_sub(*available),
+                        _ => 0,
+                    })
+                    .unwrap_or(0);
+                let reclaimable_failure =
+                    first_error
+                        .downcast_ref::<BudgetError>()
+                        .is_some_and(|error| {
+                            matches!(
+                                error,
+                                BudgetError::ExceedsGlobal { .. }
+                                    | BudgetError::ExceedsScope { .. }
+                                    | BudgetError::ExceedsTarget { .. }
+                            )
+                        });
+                if !reclaimable_failure {
+                    return Err(first_error);
+                }
+                let policy = self.catalog.policy_set()?;
+                let locator = action
+                    .destination_locator
+                    .as_ref()
+                    .or(action.original_locator.as_ref())
+                    .map(|value| std::path::Path::new(value.location_label.as_str()));
+                let target_scope = policy
+                    .effective_for_owner(
+                        Some(action.actor_account_id.as_str()),
+                        &action.resource_key.workspace_id,
+                        locator,
+                    )
+                    .scope_id;
+                let mut candidates = self
+                    .catalog
+                    .all_actions()?
+                    .into_iter()
+                    .filter(|candidate| {
+                        candidate.action_id != action.action_id
+                            && matches!(
+                                candidate.state,
+                                ActionState::Complete
+                                    | ActionState::Failed
+                                    | ActionState::Conflict
+                                    | ActionState::Partial
+                            )
+                            && !candidate.pinned
+                            && (global_failure
+                                || target_scope == "global"
+                                || candidate.before_scope_id.as_deref()
+                                    == Some(target_scope.as_str())
+                                || candidate.after_scope_id.as_deref()
+                                    == Some(target_scope.as_str()))
+                    })
+                    .collect::<Vec<_>>();
+                candidates.sort_by_key(|candidate| candidate.timestamp_millis.unwrap_or(0));
+                let mut reclaimed_bytes = 0u64;
+                for candidate in candidates {
+                    let candidate_bytes = candidate
+                        .before_logical_bytes
+                        .saturating_add(candidate.after_logical_bytes)
+                        .max(
+                            candidate
+                                .coverage
+                                .as_ref()
+                                .and_then(|coverage| coverage.byte_len)
+                                .unwrap_or(0),
+                        );
+                    if self
+                        .reclaim_checked(
+                            &candidate.action_id,
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        reclaimed_bytes = reclaimed_bytes.saturating_add(candidate_bytes);
+                    }
+                    if let Ok(reservation) = self.reserve_for_capture(action, phase, content_bytes)
+                    {
+                        return Ok(reservation);
+                    }
+                    if !global_failure && reclaimed_bytes >= needed_bytes {
+                        break;
+                    }
+                }
+                Err(first_error)
+            }
+        }
+    }
+
+    /// Expire all payload roots belonging to a completed action through the
+    /// checked Lore maintenance path. The durable `Expiring` row is written
+    /// before the first root is touched, so a restart can safely resume this
+    /// same action. Active capture/restore actions cannot acquire its leases.
+    pub async fn reclaim_checked(
+        &self,
+        action_id: &str,
+        now_millis: u64,
+    ) -> CatalogResult<ExpiryRecord> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if !matches!(
+            action.state,
+            ActionState::Complete
+                | ActionState::Failed
+                | ActionState::Conflict
+                | ActionState::Partial
+        ) {
+            return Err("active history action is protected".into());
+        }
+        if action.pinned {
+            return Err("pinned history action is protected".into());
+        }
+        let leases = lease_ids(&action);
+        self.catalog.acquire_leases(action_id, &leases)?;
+        let result = async {
+            let existing = self.catalog.begin_expiry(ExpiryRecord {
+                action_id: action_id.into(),
+                state: ExpiryState::Expiring,
+                bytes: action
+                    .coverage
+                    .as_ref()
+                    .and_then(|manifest| manifest.byte_len)
+                    .unwrap_or(0),
+                started_millis: now_millis,
+                finished_millis: None,
+                metadata_expired: false,
+            })?;
+            if existing.state == ExpiryState::Expired {
+                return Ok(existing);
+            }
+            let partition = self
+                .catalog
+                .owner_partition(&action.resource_key.account_id)?;
+            let mut expired_roots = BTreeSet::new();
+            let batch_before = action
+                .before_resources
+                .iter()
+                .filter_map(|resource| resource.before.as_ref());
+            for receipt in action
+                .before
+                .iter()
+                .chain(batch_before)
+                .chain(action.after.iter())
+                .chain(action.after_resources.iter().map(|resource| &resource.after))
+            {
+                let VersionContent::Bytes(reference) = &receipt.content else {
+                    continue;
+                };
+                let root_key = format!("{:?}:{}", reference.context, reference.hash_hex);
+                if !expired_roots.insert(root_key) {
+                    continue;
+                }
+                let hash = reference.hash_hex.parse()?;
+                self.store
+                    .expire(
+                        Partition::from(partition),
+                        lore_storage::Address {
+                            context: Context::from(reference.context),
+                            hash,
+                        },
+                    )
+                    .await?;
+            }
+            self.store.flush_checked().await?;
+            self.store.compact_checked().await?;
+            self.catalog.complete_expiry(action_id, now_millis, false)
+        }
+        .await;
+        self.catalog.release_leases(action_id, &leases)?;
+        result
+    }
+
+    pub fn record_live(
+        &self,
+        action_id: &str,
+        receipt: LiveReceipt,
+    ) -> CatalogResult<ActionRecord> {
+        if !self
+            .held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .contains_key(action_id)
+        {
+            return Err(CatalogConflict::LeaseConflict.into());
+        }
+        let release = !matches!(receipt.status, LiveStatus::Committed);
+        let result = self.catalog.record_live(action_id, receipt);
+        if release {
+            if let Some(lease) = self
+                .held_leases
+                .lock()
+                .map_err(|_| "lease lock poisoned")?
+                .remove(action_id)
+            {
+                self.catalog.release_leases(action_id, &lease)?;
+            }
+        }
+        result
+    }
+
+    pub fn begin_apply(&self, action_id: &str) -> CatalogResult<ActionRecord> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        let lease = lease_ids(&action);
+        let already_held = self
+            .held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .contains_key(action_id);
+        self.catalog.acquire_leases(action_id, &lease)?;
+        match self
+            .catalog
+            .transition(action_id, ActionState::BeforeDurable, ActionState::Applying)
+        {
+            Ok(record) => {
+                if !already_held {
+                    self.held_leases
+                        .lock()
+                        .map_err(|_| "lease lock poisoned")?
+                        .insert(action_id.to_owned(), lease);
+                }
+                Ok(record)
+            }
+            Err(error) => {
+                if !already_held {
+                    self.catalog.release_leases(action_id, &lease)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Atomically move an action's held lease from a provisional create key
+    /// to the provider's real document identity.  The new lease is acquired
+    /// before the catalog row changes; failure therefore leaves the original
+    /// action and lease intact.
+    pub fn rebind_resource(
+        &self,
+        action_id: &str,
+        resource_key: ResourceKey,
+    ) -> CatalogResult<ActionRecord> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if action.state != ActionState::BeforeDurable {
+            return Err("resource identity can only be rebound before live commit".into());
+        }
+        if action.resource_key.account_id != resource_key.account_id
+            || action.resource_key.workspace_id != resource_key.workspace_id
+            || action.resource_key.provider != resource_key.provider
+        {
+            return Err("resource rebind changed an immutable scope".into());
+        }
+        let old_leases = lease_ids(&action);
+        let mut rebound = action.clone();
+        rebound.resource_key = resource_key;
+        let new_leases = lease_ids(&rebound);
+        let added = new_leases
+            .iter()
+            .filter(|lease| !old_leases.contains(lease))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.catalog.acquire_leases(action_id, &added)?;
+        let updated = match self
+            .catalog
+            .rebind_resource_key(action_id, rebound.resource_key)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                let _ = self.catalog.release_leases(action_id, &added);
+                return Err(error);
+            }
+        };
+        let removed = old_leases
+            .iter()
+            .filter(|lease| !new_leases.contains(lease))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.catalog.release_leases(action_id, &removed)?;
+        self.held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .insert(action_id.to_owned(), new_leases);
+        Ok(updated)
+    }
+
+    pub fn reconcile<F>(&self, resolve: F) -> CatalogResult<Vec<ActionRecord>>
+    where
+        F: FnMut(&ActionRecord) -> CatalogResult<LiveReceipt>,
+    {
+        let changed = self.catalog.reconcile(resolve)?;
+        let mut held = self.held_leases.lock().map_err(|_| "lease lock poisoned")?;
+        for action in &changed {
+            held.remove(&action.action_id);
+        }
+        Ok(changed)
+    }
+
+    pub fn reconcile_one(
+        &self,
+        action_id: &str,
+        receipt: LiveReceipt,
+    ) -> CatalogResult<ActionRecord> {
+        let result = self.catalog.reconcile_one(action_id, receipt);
+        if result.is_ok() {
+            self.held_leases
+                .lock()
+                .map_err(|_| "lease lock poisoned")?
+                .remove(action_id);
+        }
+        result
+    }
+
+    pub async fn capture_before(
+        &self,
+        action_id: &str,
+        content: Option<Bytes>,
+        fingerprint: impl Into<String>,
+    ) -> CatalogResult<ActionRecord> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        let start_state = if action.state == ActionState::CaptureFailed {
+            ActionState::CaptureFailed
+        } else {
+            ActionState::Intent
+        };
+        let lease = lease_ids(&action);
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) =
+            self.catalog
+                .transition(action_id, start_state, ActionState::CapturingBefore)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        #[cfg(feature = "test_faults")]
+        if take_capture_fault(CaptureFault::AfterMarker) {
+            let _ = self.catalog.transition(
+                action_id,
+                ActionState::CapturingBefore,
+                ActionState::CaptureFailed,
+            );
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err("injected failure after CapturingBefore marker".into());
+        }
+        #[cfg(feature = "test_faults")]
+        qualification_abort("before_lore");
+        let fingerprint = fingerprint.into();
+        let capture_digest =
+            capture_input_digest(content.as_ref().map(|value| value.as_ref()), &fingerprint);
+        let logical_bytes = content.as_ref().map_or(0, |value| value.len() as u64);
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "before", logical_bytes)
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
+                self.catalog.release_leases(action_id, &lease)?;
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let receipt = match self
+            .capture(
+                action_id,
+                &action.resource_key.account_id,
+                content,
+                fingerprint,
+                "single-before",
+            )
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
+                let _ = self.release_capture_reservation(&reservation_id);
+                self.catalog.release_leases(action_id, &lease)?;
+                return Err(error);
+            }
+        };
+        match self.catalog.record_before_durable(
+            action_id,
+            receipt,
+            capture_digest,
+            scope_id,
+            logical_bytes,
+        ) {
+            Ok(record) => {
+                self.release_capture_reservation(&reservation_id)?;
+                self.held_leases
+                    .lock()
+                    .map_err(|_| "lease lock poisoned")?
+                    .insert(action_id.to_owned(), lease);
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = self.release_capture_reservation(&reservation_id);
+                self.catalog.release_leases(action_id, &lease)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Prepare every resource in a parent mutation before the live owner is
+    /// admitted. Each content payload uses the same Lore writer and durable
+    /// flush as the single-resource path; the catalog acknowledgement is
+    /// published only after all entries have receipts.
+    pub async fn capture_batch_before(
+        &self,
+        action_id: &str,
+        entries: Vec<BatchCaptureInput>,
+    ) -> CatalogResult<ActionRecord> {
+        if entries.is_empty() {
+            return Err("batch prepare requires at least one resource".into());
+        }
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        let mut declared = Vec::new();
+        for resource in action
+            .guard_resource_ids
+            .iter()
+            .chain(action.modified_resource_ids.iter())
+            .chain(std::iter::once(&action.resource_key))
+        {
+            if !declared.contains(resource) {
+                declared.push(resource.clone());
+            }
+        }
+        let mut seen_resources = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if seen_resources
+                .iter()
+                .any(|resource| *resource == entry.resource_key)
+            {
+                return Err(
+                    "history_prepare_duplicate_resource: batch entries must be unique".into(),
+                );
+            }
+            seen_resources.push(entry.resource_key.clone());
+            if entry.resource_key.account_id != action.resource_key.account_id
+                || entry.resource_key.workspace_id != action.resource_key.workspace_id
+                || entry.resource_key.provider != action.resource_key.provider
+            {
+                return Err(format!(
+                    "history_prepare_scope_conflict: {} is outside the parent resource scope",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if !declared
+                .iter()
+                .any(|resource| resource == &entry.resource_key)
+            {
+                return Err(format!(
+                    "history_prepare_undeclared_resource: {} is absent from guard/modified resources",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present
+                && !matches!(entry.resource_type, ResourceType::File)
+                && entry
+                    .coverage
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("exact_preimage"))
+                    != Some(&serde_json::Value::Bool(true))
+            {
+                return Err(format!(
+                    "history_prepare_inexact_preimage: {} requires exact_preimage coverage",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Absent && entry.content.is_some() {
+                return Err(
+                    "history_prepare_invalid_preimage: absent resources cannot carry content"
+                        .into(),
+                );
+            }
+            if entry.existence == ResourceExistence::Present && entry.content.is_none() {
+                return Err(
+                    "history_prepare_missing_preimage: present resources require content".into(),
+                );
+            }
+            if entry.existence == ResourceExistence::Present
+                && entry.resource_type == ResourceType::Directory
+            {
+                let content = entry
+                    .content
+                    .as_ref()
+                    .expect("present content checked above");
+                let content_digest = blake3::hash(content).to_hex().to_string();
+                let sha256_digest = format!("sha256:{:x}", Sha256::digest(content));
+                let digest_bound =
+                    entry.coverage.content_digest.as_deref() == Some(content_digest.as_str())
+                        || entry.coverage.content_digest.as_deref()
+                            == Some(sha256_digest.as_str());
+                let opaque_manifest = entry
+                    .metadata
+                    .opaque
+                    .as_ref()
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|value| value.get("manifest_digest"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|digest| {
+                        digest == content_digest || digest == sha256_digest
+                    });
+                if !digest_bound && !opaque_manifest {
+                    return Err(format!(
+                        "history_prepare_inexact_preimage: {} directory requires a content-bound manifest or opaque payload",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+        }
+        if seen_resources.len() != declared.len() {
+            return Err(
+                "history_prepare_missing_resource: every declared resource requires exactly one batch entry"
+                    .into(),
+            );
+        }
+        let logical_bytes = entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
+                .ok_or("batch preimage size overflow")
+        })?;
+        let start_state = if action.state == ActionState::CaptureFailed {
+            ActionState::CaptureFailed
+        } else {
+            ActionState::Intent
+        };
+        let mut lease = lease_ids(&action);
+        lease.sort();
+        lease.dedup();
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) =
+            self.catalog
+                .transition(action_id, start_state, ActionState::CapturingBefore)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "before", logical_bytes)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
+                self.catalog.release_leases(action_id, &lease)?;
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let mut resources = Vec::with_capacity(entries.len());
+        let digest = batch_capture_digest(&entries);
+        for (index, entry) in entries.into_iter().enumerate() {
+            let receipt = match self
+                .capture(
+                    action_id,
+                    &action.resource_key.account_id,
+                    entry.content,
+                    entry.fingerprint.clone(),
+                    &format!("batch-{index}-{}", entry.resource_key.resource_id),
+                )
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let _ = self.catalog.transition(
+                        action_id,
+                        ActionState::CapturingBefore,
+                        ActionState::CaptureFailed,
+                    );
+                    let _ = self.release_capture_reservation(&reservation_id);
+                    self.catalog.release_leases(action_id, &lease)?;
+                    return Err(format!("history_prepare_failed: {error}").into());
+                }
+            };
+            resources.push(MutationResource {
+                resource_key: entry.resource_key,
+                old_locator: entry.old_locator,
+                new_locator: entry.new_locator,
+                expected_revision: entry.expected_revision,
+                existence: entry.existence,
+                resource_type: entry.resource_type,
+                metadata: entry.metadata,
+                before: Some(receipt),
+                fingerprint: entry.fingerprint,
+                coverage: entry.coverage,
+            });
+        }
+        let batch = MutationBatch {
+            schema_version: 1,
+            parent_action_id: action_id.to_owned(),
+            prepare: PrepareReceipt {
+                batch_version: 1,
+                parent_action_id: action_id.to_owned(),
+                resource_count: resources.len() as u32,
+                logical_bytes,
+                acknowledged: true,
+            },
+            resources,
+        };
+        let result = self.catalog.record_batch_before_durable(
+            action_id,
+            batch,
+            digest,
+            scope_id,
+            logical_bytes,
+        );
+        let _ = self.release_capture_reservation(&reservation_id);
+        match result {
+            Ok(record) => {
+                self.held_leases
+                    .lock()
+                    .map_err(|_| "lease lock poisoned")?
+                    .insert(action_id.to_owned(), lease);
+                Ok(record)
+            }
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingBefore,
+                    ActionState::CaptureFailed,
+                );
+                self.catalog.release_leases(action_id, &lease)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn release_after_failure(&self, action_id: &str, lease: &[String]) {
+        if let Ok(mut held) = self.held_leases.lock() {
+            held.remove(action_id);
+        }
+        let _ = self.catalog.release_leases(action_id, lease);
+    }
+
+    /// Persist a capture gap without changing the authoritative committed live
+    /// receipt. This retries only recovery state, never the provider mutation.
+    pub fn after_unavailable(&self, action_id: &str) -> CatalogResult<ActionRecord> {
+        let action = self.catalog.get_action(action_id)?.ok_or("unknown action")?;
+        if action.live.as_ref().map(|live| &live.status) != Some(&LiveStatus::Committed) {
+            return Err("after-capture failure requires a committed live receipt".into());
+        }
+        if action.state == ActionState::AfterCaptureFailed {
+            return Ok(action);
+        }
+        if !matches!(action.state, ActionState::Applied | ActionState::CapturingAfter) {
+            return Err("after-capture failure has an invalid action state".into());
+        }
+        if action.state == ActionState::Applied {
+            self.catalog.transition(action_id, ActionState::Applied, ActionState::CapturingAfter)?;
+        }
+        let record = self.catalog.transition(action_id, ActionState::CapturingAfter, ActionState::AfterCaptureFailed)?;
+        self.release_after_failure(action_id, &lease_ids(&record));
+        Ok(record)
+    }
+
+    pub async fn capture_after(
+        &self,
+        action_id: &str,
+        content: Option<Bytes>,
+        fingerprint: impl Into<String>,
+    ) -> CatalogResult<ActionRecord> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if !matches!(
+            action.live.as_ref().map(|receipt| &receipt.status),
+            Some(LiveStatus::Committed)
+        ) {
+            return Err(CatalogConflict::InvalidTransition.into());
+        }
+        let start_state = if action.state == ActionState::AfterCaptureFailed {
+            ActionState::AfterCaptureFailed
+        } else {
+            ActionState::Applied
+        };
+        let lease = lease_ids(&action);
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) =
+            self.catalog
+                .transition(action_id, start_state, ActionState::CapturingAfter)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        self.held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .insert(action_id.to_owned(), lease.clone());
+        #[cfg(feature = "test_faults")]
+        if take_capture_fault(CaptureFault::AfterLiveMarker) {
+            let _ = self.catalog.transition(
+                action_id,
+                ActionState::CapturingAfter,
+                ActionState::AfterCaptureFailed,
+            );
+            self.release_after_failure(action_id, &lease);
+            return Err("injected failure after CapturingAfter marker".into());
+        }
+        #[cfg(feature = "test_faults")]
+        qualification_abort("committed_before_after");
+        let fingerprint = fingerprint.into();
+        let capture_digest =
+            capture_input_digest(content.as_ref().map(|value| value.as_ref()), &fingerprint);
+        let logical_bytes = content.as_ref().map_or(0, |value| value.len() as u64);
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "after", logical_bytes)
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                self.release_after_failure(action_id, &lease);
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let receipt = match self
+            .capture(
+                action_id,
+                &action.resource_key.account_id,
+                content,
+                fingerprint,
+                "single-after",
+            )
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                self.release_after_failure(action_id, &lease);
+                let _ = self.release_capture_reservation(&reservation_id);
+                return Err(error);
+            }
+        };
+        let result =
+            self.catalog
+                .record_after(action_id, receipt, capture_digest, scope_id, logical_bytes);
+        let _ = self.release_capture_reservation(&reservation_id);
+        if result.is_err() {
+            self.release_after_failure(action_id, &lease);
+        }
+        result
+    }
+
+    /// Persist every resource's after-state after a committed multi-resource
+    /// mutation. Each content receipt is written before the catalog advances
+    /// to `AfterDurable`; a retry therefore reuses the durable phase instead
+    /// of replaying the live owner.
+    pub async fn capture_after_batch(
+        &self,
+        action_id: &str,
+        entries: Vec<BatchAfterInput>,
+    ) -> CatalogResult<ActionRecord> {
+        if entries.is_empty() {
+            return Err("after-state batch cannot be empty".into());
+        }
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if !matches!(
+            action.live.as_ref().map(|receipt| &receipt.status),
+            Some(LiveStatus::Committed)
+        ) {
+            return Err(CatalogConflict::InvalidTransition.into());
+        }
+        let declared = action
+            .mutation_batch
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .resources
+                    .iter()
+                    .map(|resource| resource.resource_key.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_else(|| {
+                action
+                    .modified_resource_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            });
+        let supplied = entries
+            .iter()
+            .map(|entry| entry.resource_key.clone())
+            .collect::<BTreeSet<_>>();
+        if supplied != declared || supplied.len() != entries.len() {
+            return Err("after-state batch does not match prepared resources".into());
+        }
+        if let Some(live_fingerprint) = action.live.as_ref().and_then(|live| live.fingerprint.as_deref()) {
+            let primary = entries
+                .iter()
+                .find(|entry| entry.resource_key == action.resource_key)
+                .ok_or("after-state batch is missing the primary resource")?;
+            if primary.fingerprint != live_fingerprint {
+                return Err("primary live fingerprint does not match submitted after-state".into());
+            }
+        }
+        let prepared = action
+            .mutation_batch
+            .as_ref()
+            .map(|batch| {
+                batch
+                    .resources
+                    .iter()
+                    .map(|resource| (&resource.resource_key, resource))
+                    .collect::<BTreeMap<_, _>>()
+            });
+        for entry in &entries {
+            if entry.outcome.resource_id != entry.resource_key.resource_id
+                || entry.outcome.status != "Committed"
+                || entry.outcome.revision.is_none()
+            {
+                return Err(format!(
+                    "after-state outcome is not an authoritative committed result for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present && entry.content.is_none() {
+                return Err(format!(
+                    "after-state present resource {} has no exact content",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            let expected_fingerprint = entry
+                .content
+                .as_ref()
+                .map(|content| format!("sha256:{:x}:{}", Sha256::digest(content), content.len()))
+                .unwrap_or_else(|| "missing".into());
+            if entry.fingerprint != expected_fingerprint {
+                return Err(format!(
+                    "after-state fingerprint does not match exact payload for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            let outcome_revision = entry.outcome.revision.as_ref().ok_or_else(|| {
+                format!("after-state outcome is missing a revision for {}", entry.resource_key.resource_id)
+            })?;
+            let revision_matches = match outcome_revision {
+                Revision::Opaque { value, .. } if value == &entry.fingerprint => true,
+                Revision::Opaque { value, .. } => prepared
+                    .as_ref()
+                    .and_then(|resources| resources.get(&entry.resource_key))
+                    .and_then(|resource| resource.expected_revision.as_ref())
+                    .is_some_and(|expected| matches!(expected, Revision::Opaque { value: expected_value, .. } if expected_value == value)),
+            };
+            if !revision_matches {
+                return Err(format!(
+                    "after-state outcome revision is not bound to the payload or expected revision for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if entry.existence == ResourceExistence::Present {
+                match entry.resource_type {
+                    ResourceType::File | ResourceType::Symlink => {
+                        if entry.metadata.size != entry.content.as_ref().map(|content| content.len() as u64) {
+                            return Err(format!(
+                                "after-state file metadata size is invalid for {}",
+                                entry.resource_key.resource_id
+                            ).into());
+                        }
+                    }
+                    ResourceType::Directory => {
+                        if entry.metadata.size.is_some() {
+                            return Err(format!(
+                                "after-state directory metadata size is not a file size for {}",
+                                entry.resource_key.resource_id
+                            ).into());
+                        }
+                    }
+                    ResourceType::Other => {
+                        return Err(format!(
+                            "after-state resource type is unsupported for {}",
+                            entry.resource_key.resource_id
+                        ).into());
+                    }
+                }
+            }
+            if let Some(content_digest) = entry.coverage.content_digest.as_deref() {
+                let content = entry.content.as_ref().ok_or_else(|| {
+                    format!(
+                        "after-state content digest has no content for {}",
+                        entry.resource_key.resource_id
+                    )
+                })?;
+                let blake3_digest = blake3::hash(content).to_hex().to_string();
+                let sha256_digest = format!("sha256:{:x}", Sha256::digest(content));
+                let sized_sha256_digest = format!("{sha256_digest}:{}", content.len());
+                if content_digest != blake3_digest
+                    && content_digest != sha256_digest
+                    && content_digest != sized_sha256_digest
+                {
+                    return Err(format!(
+                        "after-state content digest mismatch for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+            if let Some(size) = entry.metadata.size {
+                if entry.existence == ResourceExistence::Present
+                    && matches!(entry.resource_type, ResourceType::File | ResourceType::Symlink)
+                    && entry.content.as_ref().map(|content| content.len() as u64) != Some(size)
+                {
+                    return Err(format!(
+                        "after-state metadata size mismatch for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+            let exact_after = entry
+                .coverage
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("exact_after"))
+                == Some(&serde_json::Value::Bool(true));
+            if !exact_after {
+                return Err(format!(
+                    "after-state coverage is not exact for {}",
+                    entry.resource_key.resource_id
+                )
+                .into());
+            }
+            if let Some(prepared) = prepared.as_ref().and_then(|resources| resources.get(&entry.resource_key)) {
+                if prepared.existence == ResourceExistence::Present
+                    && entry.existence == ResourceExistence::Present
+                    && prepared.resource_type != entry.resource_type
+                {
+                    return Err(format!(
+                        "after-state type changed unexpectedly for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+                if prepared.new_locator.is_some()
+                    && entry.locator.as_ref() != prepared.new_locator.as_ref()
+                {
+                    return Err(format!(
+                        "after-state locator does not match prepared destination for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+                if entry.existence == ResourceExistence::Present
+                    && prepared.metadata.mode.is_some()
+                    && entry.metadata.mode != prepared.metadata.mode
+                {
+                    return Err(format!(
+                        "after-state mode changed unexpectedly for {}",
+                        entry.resource_key.resource_id
+                    )
+                    .into());
+                }
+            }
+        }
+        if action.state == ActionState::AfterDurable {
+            let stored_outcomes = action.per_resource_outcomes.as_ref().ok_or(
+                "durable after-state is missing per-resource outcomes",
+            )?;
+            if action.after_resources.len() != entries.len() || stored_outcomes.len() != entries.len() {
+                return Err("durable after-state coverage does not match retry resources".into());
+            }
+            for ((entry, stored), outcome) in entries
+                .iter()
+                .zip(action.after_resources.iter())
+                .zip(stored_outcomes.iter())
+            {
+                if entry.resource_key != stored.resource_key
+                    || entry.locator != stored.locator
+                    || entry.existence != stored.existence
+                    || entry.resource_type != stored.resource_type
+                    || entry.metadata != stored.metadata
+                    || entry.fingerprint != stored.fingerprint
+                    || entry.coverage != stored.coverage
+                    || &entry.outcome != outcome
+                {
+                    return Err("durable after-state retry payload mismatch".into());
+                }
+            }
+            return Ok(action);
+        }
+        let start_state = if action.state == ActionState::AfterCaptureFailed {
+            ActionState::AfterCaptureFailed
+        } else {
+            ActionState::Applied
+        };
+        let lease = lease_ids(&action);
+        self.catalog.acquire_leases(action_id, &lease)?;
+        if let Err(error) = self
+            .catalog
+            .transition(action_id, start_state, ActionState::CapturingAfter)
+        {
+            self.catalog.release_leases(action_id, &lease)?;
+            return Err(error);
+        }
+        self.held_leases
+            .lock()
+            .map_err(|_| "lease lock poisoned")?
+            .insert(action_id.to_owned(), lease.clone());
+        let logical_bytes = match entries.iter().try_fold(0u64, |sum, entry| {
+            sum.checked_add(entry.content.as_ref().map_or(0, |bytes| bytes.len() as u64))
+                .ok_or("after-state byte size overflow")
+        }) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                self.release_after_failure(action_id, &lease);
+                return Err(error.into());
+            }
+        };
+        let (reservation_id, scope_id) = match self
+            .reserve_with_reclaim(&action, "after", logical_bytes)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = self.catalog.transition(
+                    action_id,
+                    ActionState::CapturingAfter,
+                    ActionState::AfterCaptureFailed,
+                );
+                self.release_after_failure(action_id, &lease);
+                return Err(format!("history_paused_budget: {error}").into());
+            }
+        };
+        let mut after_resources = Vec::with_capacity(entries.len());
+        let mut outcomes = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.into_iter().enumerate() {
+            let receipt = match self
+                .capture(
+                    action_id,
+                    &action.resource_key.account_id,
+                    entry.content,
+                    entry.fingerprint.clone(),
+                    &format!("batch-after-{index}-{}", entry.resource_key.resource_id),
+                )
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let _ = self.catalog.transition(
+                        action_id,
+                        ActionState::CapturingAfter,
+                        ActionState::AfterCaptureFailed,
+                    );
+                    self.release_after_failure(action_id, &lease);
+                    let _ = self.release_capture_reservation(&reservation_id);
+                    return Err(format!("history_after_failed: {error}").into());
+                }
+            };
+            outcomes.push(entry.outcome);
+            after_resources.push(AfterResource {
+                resource_key: entry.resource_key,
+                locator: entry.locator,
+                existence: entry.existence,
+                resource_type: entry.resource_type,
+                metadata: entry.metadata,
+                after: receipt,
+                fingerprint: entry.fingerprint,
+                coverage: entry.coverage,
+            });
+        }
+        let digest = batch_after_capture_digest(&after_resources, &outcomes);
+        let result = self.catalog.record_after_batch(
+            action_id,
+            after_resources,
+            outcomes,
+            digest,
+            scope_id,
+            logical_bytes,
+        );
+        let _ = self.release_capture_reservation(&reservation_id);
+        if result.is_err() {
+            self.release_after_failure(action_id, &lease);
+        }
+        result
+    }
+
+    pub fn complete(&self, action_id: &str) -> CatalogResult<ActionRecord> {
+        let result = self.catalog.complete(action_id);
+        if result.is_ok() {
+            if let Some(lease) = self
+                .held_leases
+                .lock()
+                .map_err(|_| "lease lock poisoned")?
+                .remove(action_id)
+            {
+                self.catalog.release_leases(action_id, &lease)?;
+            }
+        }
+        result
+    }
+
+    pub fn abort(&self, action_id: &str) -> CatalogResult<ActionRecord> {
+        let result = self.catalog.abort(action_id);
+        if result.is_ok() {
+            if let Some(lease) = self
+                .held_leases
+                .lock()
+                .map_err(|_| "lease lock poisoned")?
+                .remove(action_id)
+            {
+                self.catalog.release_leases(action_id, &lease)?;
+            }
+        }
+        result
+    }
+
+    pub async fn shutdown_checked(&self) -> CatalogResult<()> {
+        if !self.catalog.active_actions()?.is_empty() {
+            return Err("active actions prevent checked shutdown".into());
+        }
+        self.store.flush_checked().await?;
+        Ok(())
+    }
+
+    pub async fn read_version(
+        &self,
+        action_id: &str,
+        receipt: &VersionReceipt,
+    ) -> CatalogResult<Option<Bytes>> {
+        let action = self
+            .catalog
+            .get_action(action_id)?
+            .ok_or("unknown action")?;
+        if !action
+            .before
+            .as_ref()
+            .is_some_and(|stored| stored == receipt)
+            && !action
+                .before_resources
+                .iter()
+                .any(|resource| resource.before.as_ref() == Some(receipt))
+            && !action
+                .mutation_batch
+                .as_ref()
+                .is_some_and(|batch| {
+                    batch
+                        .resources
+                        .iter()
+                        .any(|resource| resource.before.as_ref() == Some(receipt))
+                })
+            && !action
+                .after
+                .as_ref()
+                .is_some_and(|stored| stored == receipt)
+            && !action
+                .after_resources
+                .iter()
+                .any(|resource| resource.after == *receipt)
+        {
+            return Err("version receipt is not recorded for action".into());
+        }
+        if self
+            .catalog
+            .expiry(action_id)?
+            .is_some_and(|expiry| expiry.state == ExpiryState::Expired)
+        {
+            return Err("history payload expired".into());
+        }
+        let VersionContent::Bytes(reference) = &receipt.content else {
+            return Ok((receipt.content == VersionContent::Empty).then(Bytes::new));
+        };
+        let hash = reference.hash_hex.parse()?;
+        let address = lore_storage::Address {
+            context: Context::from(reference.context),
+            hash,
+        };
+        Ok(Some(
+            self.store
+                .read(
+                    Partition::from(
+                        self.catalog
+                            .owner_partition(&action.resource_key.account_id)?,
+                    ),
+                    address,
+                )
+                .await?,
+        ))
+    }
+
+    async fn capture(
+        &self,
+        action_id: &str,
+        account_id: &str,
+        content: Option<Bytes>,
+        fingerprint: String,
+        identity: &str,
+    ) -> CatalogResult<VersionReceipt> {
+        let partition = self.catalog.ensure_owner_partition(account_id)?;
+        let phase = if content.is_some() {
+            format!("bytes:{identity}")
+        } else {
+            format!("tombstone:{identity}")
+        };
+        let version_id = unique_version_id(action_id, &phase);
+        let context = unique_context(action_id, &version_id);
+        let result = async {
+            let Some(content) = content else {
+                return Ok(VersionReceipt {
+                    version_id,
+                    content: VersionContent::Tombstone,
+                    fingerprint,
+                });
+            };
+            if content.is_empty() {
+                return Ok(VersionReceipt {
+                    version_id,
+                    content: VersionContent::Empty,
+                    fingerprint,
+                });
+            }
+            let address = self
+                .store
+                .write(Partition::from(partition), Context::from(context), content)
+                .await?;
+            self.store.flush_checked().await?;
+            #[cfg(feature = "test_faults")]
+            if take_capture_fault(CaptureFault::AfterFlush) {
+                return Err("injected failure after Lore flush before catalog publication".into());
+            }
+            #[cfg(feature = "test_faults")]
+            qualification_abort("after_lore_flush");
+            Ok(VersionReceipt {
+                version_id,
+                content: VersionContent::Bytes(crate::catalog::LoreRef {
+                    context,
+                    hash_hex: address.hash.to_string(),
+                }),
+                fingerprint,
+            })
+        }
+        .await;
+        result
+    }
+}
+
+fn lease_ids(action: &ActionRecord) -> Vec<String> {
+    let mut ids = action
+        .guard_resource_ids
+        .iter()
+        .chain(action.modified_resource_ids.iter())
+        .map(ResourceKey::scoped_lease_id)
+        .collect::<Vec<_>>();
+    ids.push(action.resource_key.scoped_lease_id());
+    ids.push(format!("history-action:{}", action.action_id));
+    ids.extend(
+        action
+            .physical_lease_keys
+            .iter()
+            .map(|key| format!("physical:{key}")),
+    );
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn normalized_digest(request: &ActionRequest) -> String {
+    let bytes = serde_json::to_vec(request).expect("action request is serializable");
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
+pub fn capture_input_digest(content: Option<&[u8]>, fingerprint: &str) -> String {
+    let mut data = fingerprint.as_bytes().to_vec();
+    data.push(0);
+    if let Some(bytes) = content {
+        data.extend_from_slice(bytes);
+    }
+    blake3::hash(&data).to_hex().to_string()
+}
+
+pub fn batch_capture_digest(entries: &[BatchCaptureInput]) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"openclank-mutation-batch-digest-v1");
+    for (index, entry) in entries.iter().enumerate() {
+        let metadata = serde_json::to_vec(&(
+            index,
+            &entry.resource_key,
+            &entry.old_locator,
+            &entry.new_locator,
+            &entry.expected_revision,
+            &entry.existence,
+            &entry.resource_type,
+            &entry.metadata,
+            &entry.coverage,
+            &entry.fingerprint,
+        ))
+        .expect("batch capture metadata is serializable");
+        append_digest_frame(&mut input, b"entry", &metadata);
+        if let Some(content) = entry.content.as_ref() {
+            let mut content_frame = Vec::with_capacity(8 + 32);
+            content_frame.extend_from_slice(&(content.len() as u64).to_be_bytes());
+            content_frame.extend_from_slice(blake3::hash(content).as_bytes());
+            append_digest_frame(&mut input, b"content", &content_frame);
+        } else {
+            append_digest_frame(&mut input, b"content-absent", &[]);
+        }
+    }
+    blake3::hash(&input).to_hex().to_string()
+}
+
+fn batch_after_capture_digest(entries: &[AfterResource], outcomes: &[ResourceOutcome]) -> String {
+    let mut input = Vec::new();
+    input.extend_from_slice(b"openclank-mutation-after-batch-digest-v1");
+    for (index, (entry, outcome)) in entries.iter().zip(outcomes.iter()).enumerate() {
+        let metadata = serde_json::to_vec(&(
+            index,
+            &entry.resource_key,
+            &entry.locator,
+            &entry.existence,
+            &entry.resource_type,
+            &entry.metadata,
+            &entry.coverage,
+            &entry.fingerprint,
+            &entry.after.version_id,
+            outcome,
+        ))
+        .expect("batch after metadata is serializable");
+        append_digest_frame(&mut input, b"entry", &metadata);
+        match &entry.after.content {
+            VersionContent::Bytes(reference) => {
+                append_digest_frame(&mut input, b"content-ref", reference.hash_hex.as_bytes())
+            }
+            VersionContent::Empty => append_digest_frame(&mut input, b"empty", &[]),
+            VersionContent::Tombstone => append_digest_frame(&mut input, b"tombstone", &[]),
+        }
+    }
+    blake3::hash(&input).to_hex().to_string()
+}
+
+fn append_digest_frame(input: &mut Vec<u8>, domain: &[u8], payload: &[u8]) {
+    input.extend_from_slice(&(domain.len() as u64).to_be_bytes());
+    input.extend_from_slice(domain);
+    input.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    input.extend_from_slice(payload);
+}
+
+pub fn request_digest(request: &ActionRequest) -> String {
+    normalized_digest(request)
+}

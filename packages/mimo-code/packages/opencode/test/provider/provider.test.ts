@@ -12,8 +12,11 @@ import { Env } from "../../src/env"
 import { Effect } from "effect"
 import { AppRuntime } from "../../src/effect/app-runtime"
 import { makeRuntime } from "../../src/effect/run-service"
-import { openSync, readFileSync } from "node:fs"
-import { consumeInheritedProviderCredentials } from "../../src/provider/provider"
+import { closeSync, openSync, readFileSync } from "node:fs"
+import {
+  consumeInheritedProviderCredentials,
+  MAX_INHERITED_PROVIDER_AUTH_BYTES,
+} from "../../src/provider/provider"
 
 const env = makeRuntime(Env.Service, Env.defaultLayer)
 const set = (k: string, v: string) => env.runSync((svc) => svc.set(k, v))
@@ -31,6 +34,66 @@ test("inherited provider credentials are consumed once and removed from env", as
   })
   expect(process.env["MIMOCODE_PROVIDER_AUTH_FD"]).toBeUndefined()
   expect(() => readFileSync(fd)).toThrow()
+})
+
+test("an absent inherited provider credential descriptor remains allowed", () => {
+  delete process.env["MIMOCODE_PROVIDER_AUTH_FD"]
+  expect(consumeInheritedProviderCredentials()).toEqual({})
+})
+
+test("a configured inherited provider credential descriptor fails closed", async () => {
+  await using tmp = await tmpdir()
+
+  process.env["MIMOCODE_PROVIDER_AUTH_FD"] = "not-a-descriptor"
+  expect(() => consumeInheritedProviderCredentials()).toThrow(
+    "Invalid inherited provider credential descriptor",
+  )
+
+  const closedPath = path.join(tmp.path, "closed-provider-auth")
+  await Bun.write(closedPath, JSON.stringify({ xiaomi: "secret" }))
+  const closedFD = openSync(closedPath, "r")
+  closeSync(closedFD)
+  process.env["MIMOCODE_PROVIDER_AUTH_FD"] = String(closedFD)
+  expect(() => consumeInheritedProviderCredentials()).toThrow(
+    "Unable to read inherited provider credential descriptor",
+  )
+
+  const emptyPath = path.join(tmp.path, "empty-provider-auth")
+  await Bun.write(emptyPath, "")
+  process.env["MIMOCODE_PROVIDER_AUTH_FD"] = String(openSync(emptyPath, "r"))
+  expect(() => consumeInheritedProviderCredentials()).toThrow(
+    "Inherited provider credential payload is empty",
+  )
+
+  const oversizedPath = path.join(tmp.path, "oversized-provider-auth")
+  await Bun.write(
+    oversizedPath,
+    new Uint8Array(MAX_INHERITED_PROVIDER_AUTH_BYTES + 1),
+  )
+  process.env["MIMOCODE_PROVIDER_AUTH_FD"] = String(openSync(oversizedPath, "r"))
+  expect(() => consumeInheritedProviderCredentials()).toThrow(
+    "Inherited provider credential payload is too large",
+  )
+  expect(process.env["MIMOCODE_PROVIDER_AUTH_FD"]).toBeUndefined()
+})
+
+test("invalid inherited provider credential payloads fail closed", async () => {
+  await using tmp = await tmpdir()
+  for (const [name, payload] of [
+    ["invalid-json", "{"],
+    ["array", "[]"],
+    ["empty-record", "{}"],
+    ["non-string", JSON.stringify({ xiaomi: 42 })],
+    ["empty-credential", JSON.stringify({ xiaomi: "" })],
+  ]) {
+    const authPath = path.join(tmp.path, name)
+    await Bun.write(authPath, payload)
+    process.env["MIMOCODE_PROVIDER_AUTH_FD"] = String(openSync(authPath, "r"))
+    expect(() => consumeInheritedProviderCredentials()).toThrow(
+      "Invalid inherited provider credential payload",
+    )
+  }
+  expect(process.env["MIMOCODE_PROVIDER_AUTH_FD"]).toBeUndefined()
 })
 
 test("public provider projection strips credentials and model headers", () => {
@@ -471,6 +534,10 @@ test("custom DeepSeek openai-compatible model defaults interleaved reasoning fie
                   name: "DeepSeek Details",
                   interleaved: { field: "reasoning_details" },
                 },
+                "deepseek-reasoning": {
+                  name: "DeepSeek Reasoning",
+                  interleaved: { field: "reasoning" },
+                },
                 "custom-model": {
                   name: "Custom Model",
                 },
@@ -504,6 +571,7 @@ test("custom DeepSeek openai-compatible model defaults interleaved reasoning fie
       const provider = providers[ProviderID.make("custom-provider")]
       expect(provider.models["deepseek-r1"].capabilities.interleaved).toEqual({ field: "reasoning_content" })
       expect(provider.models["deepseek-details"].capabilities.interleaved).toEqual({ field: "reasoning_details" })
+      expect(provider.models["deepseek-reasoning"].capabilities.interleaved).toEqual({ field: "reasoning" })
       expect(provider.models["custom-model"].capabilities.interleaved).toBe(false)
       expect(
         providers[ProviderID.make("custom-anthropic-provider")].models["deepseek-r1"].capabilities.interleaved,
@@ -671,6 +739,43 @@ test("defaultModel respects config model setting", async () => {
       const model = await defaultModel()
       expect(String(model.providerID)).toBe("anthropic")
       expect(String(model.modelID)).toBe("claude-sonnet-4-20250514")
+    },
+  })
+})
+
+test("defaultModel falls through when config model is missing from the registry", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Bun.write(
+        path.join(dir, "mimocode.json"),
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          model: "custom/does-not-exist",
+          provider: {
+            custom: {
+              name: "Custom",
+              npm: "@ai-sdk/openai-compatible",
+              env: [],
+              models: {
+                "aaa-plain": {
+                  name: "AAA",
+                  tool_call: true,
+                  limit: { context: 128000, output: 4096 },
+                },
+              },
+              options: { apiKey: "test-key", baseURL: "https://custom.example/v1" },
+            },
+          },
+        }),
+      )
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const model = await defaultModel()
+      expect(String(model.providerID)).toBe("custom")
+      expect(String(model.modelID)).toBe("aaa-plain")
     },
   })
 })

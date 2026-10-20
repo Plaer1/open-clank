@@ -151,7 +151,7 @@ def _shell_path(p: str) -> str:
 def _local_tooling_path_export(executable: str) -> str:
     """Bash line prepending the running interpreter's bin dir to PATH.
 
-    When Odysseus runs from a virtualenv, that bin dir holds the tools the
+    When Open Clank runs from a virtualenv, that bin dir holds the tools the
     cookbook runners shell out to (`hf`, `python`). tmux runners start from a
     fresh login shell with the venv NOT activated, so without this they can't
     find `hf` and downloads fail with "hf: command not found" — notably on
@@ -283,7 +283,7 @@ def _venv_safe_local_pip_install_cmd(cmd: str, *, local: bool, in_venv: bool) ->
 
     Cookbook dependency installs run through the model-serve task path so users
     can watch progress in the same log UI. For local POSIX runs, that task
-    prepends Odysseus' own interpreter directory to PATH. If Odysseus itself is
+    prepends Open Clank' own interpreter directory to PATH. If Open Clank itself is
     running from a venv, `python3` resolves to the venv Python and pip rejects
     `--user` with "User site-packages are not visible in this virtualenv".
 
@@ -463,14 +463,22 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "        if sz == 0 and os.path.isdir(snap):",
         "            sz2, nf2, ic2 = snapshot_size()",
         "            sz, nf, ic = sz2, nf2, ic or ic2",
-        "        is_diffusion = False; gguf_files = []",
+        "        is_video = bool(re.search(r'(?i)(^|/)Lightricks/LTX-|(^|/)LTX[-_/]|video|text-to-video|image-to-video', rid))",
+        "        is_diffusion = is_video; is_adapter = bool(re.search(r'(?i)(lora|adapter|peft|qlora|control[-_]?lora|diffusion[-_]?lora)', rid)); gguf_files = []",
         "        if os.path.isdir(snap):",
         "            for sd in os.listdir(snap):",
         "                sf = os.path.join(snap, sd)",
         "                if not os.path.isdir(sf): continue",
         "                if os.path.exists(os.path.join(sf, 'model_index.json')): is_diffusion = True",
+        "                if os.path.exists(os.path.join(sf, 'adapter_config.json')) or os.path.exists(os.path.join(sf, 'adapter_model.safetensors')): is_adapter = True",
+        "                for _root, _dirs, _fns in safe_walk(sf):",
+        "                    for _fn in _fns:",
+        "                        _lfn = _fn.lower()",
+        "                        if _lfn.endswith('.safetensors') and re.search(r'(?i)(ltx|video|upscaler)', _lfn): is_video = True; is_diffusion = True",
+        "                        if _lfn in ('adapter_config.json','adapter_model.safetensors','pytorch_lora_weights.safetensors') or 'lora' in _lfn:",
+        "                            is_adapter = True",
         "                for f in collect_ggufs(sf): f['rel_path'] = sd + '/' + f['rel_path']; gguf_files.append(f)",
-        "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
+        "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_video':is_video,'is_adapter':is_adapter,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
         "def hf_cache_paths():",
         "    candidates = []",
         "    def add(p):",
@@ -505,11 +513,12 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "        fp = os.path.join(p, d)",
         "        if not os.path.isdir(fp) or os.path.islink(fp) or not safe_path(fp): continue",
         "        if d in seen: continue",
-        "        is_model = False; gguf_files = []",
+        "        is_model = False; is_adapter = bool(re.search(r'(?i)(lora|adapter|peft|qlora|control[-_]?lora|diffusion[-_]?lora)', d)); gguf_files = []",
         "        for root, dirs, fns in safe_walk(fp):",
         "            for fn in fns:",
         "                if fn.lower().endswith('.gguf'): is_model = True",
         "                elif fn == 'config.json' or fn.endswith('.safetensors') or fn.endswith('.bin'): is_model = True",
+        "                if fn in ('adapter_config.json','adapter_model.safetensors','pytorch_lora_weights.safetensors') or 'lora' in fn.lower(): is_adapter = True",
         "            if is_model: break",
         "        if not is_model: continue",
         "        gguf_files = collect_ggufs(fp)",
@@ -520,7 +529,7 @@ def _cached_model_scan_script(model_dirs: list[str] | None = None, add_hf_cache:
         "                try: nf += 1; sz += os.path.getsize(os.path.join(dp, fn))",
         "                except Exception: pass",
         "        is_diff = os.path.exists(os.path.join(fp, 'model_index.json'))",
-        "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
+        "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_adapter':is_adapter,'is_gguf':bool(gguf_files),'gguf_files':gguf_files})",
         "def parse_size(num, unit):",
         "    try: n = float(num)",
         "    except Exception: return 0",
@@ -664,7 +673,7 @@ def _ollama_bind_from_cmd(cmd: str | None, *, default_host: str = "127.0.0.1") -
     """Return the Ollama bind host/port requested by a serve command.
 
     Plain local `ollama serve` defaults to loopback. Remote callers can pass a
-    wider default host so the resulting API is reachable by Odysseus.
+    wider default host so the resulting API is reachable by Open Clank.
     """
     if not cmd:
         return default_host, "11434"
@@ -800,7 +809,7 @@ def _append_serve_preflight_exit_lines(runner_lines: list[str], *, keep_shell_op
 
 def _append_vllm_linux_preflight_lines(runner_lines: list[str]) -> None:
     """Append Linux vLLM readiness lines that identify the runtime being used."""
-    # Keep the user install bin visible for Odysseus-managed `pip install --user`
+    # Keep the user install bin visible for Open Clank-managed `pip install --user`
     # installs, but then report the actual CLI path so external runtimes are clear.
     runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
     runner_lines.append('ODYSSEUS_VLLM_BIN="$(command -v vllm 2>/dev/null || true)"')
@@ -1142,7 +1151,7 @@ def _ssh(host, cmd, port=None):
     return f"ssh {pf}{host} '{cmd}'"
 
 
-def _safe_env_prefix(ep: str | None) -> str | None:
+def _safe_env_prefix(ep: str | None, *, bash_windows: bool = False) -> str | None:
     """Rewrite a `source <path>` env_prefix so it no-ops if the path is missing.
     Prevents `line N: <path>: No such file or directory` errors when a serve
     task is launched against a host that doesn't have the expected venv.
@@ -1151,7 +1160,31 @@ def _safe_env_prefix(ep: str | None) -> str | None:
     quotes (bash only tilde-expands unquoted tokens at word start)."""
     if not ep:
         return ep
-    import shlex
+    # PowerShell escapes an apostrophe by doubling it inside single quotes.
+    # POSIX shlex silently concatenates those quotes and changes the path.
+    ps_venv = re.fullmatch(r"&\s+'((?:[^']|'')*)'", ep)
+    if ps_venv:
+        path = ps_venv.group(1).replace("''", "'")
+        if any(c in path for c in "\r\n;&|`$<>"):
+            raise HTTPException(400, "Invalid env_prefix")
+        if bash_windows:
+            activation = path.replace("\\", "/")
+            if not activation.lower().endswith("/scripts/activate.ps1"):
+                raise HTTPException(400, "Windows Bash requires a venv Scripts/Activate.ps1 prefix")
+            activation = _git_bash_path(activation[:-len("Activate.ps1")] + "activate")
+            literal = shlex.quote(activation)
+            return f"[ -f {literal} ] && source {literal} || true"
+        return "& '" + path.replace("'", "''") + "'"
+    ps_conda = re.fullmatch(r"conda activate '((?:[^']|'')*)'", ep)
+    if ps_conda:
+        path = ps_conda.group(1).replace("''", "'")
+        if any(c in path for c in "\r\n;&|`$<>"):
+            raise HTTPException(400, "Invalid env_prefix")
+        if bash_windows:
+            return 'eval "$(conda shell.bash hook)" && conda activate ' + shlex.quote(_git_bash_path(path))
+        # Ordinary POSIX quoted prefixes also reach here. Preserve the literal
+        # verbatim; each producing caller already escaped its own shell syntax.
+        return ep
     try:
         parts = shlex.split(ep, posix=True)
     except ValueError:
@@ -1321,11 +1354,31 @@ def _diagnose_serve_output(text: str) -> dict | None:
             [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
         ),
         (
+            r"OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed",
+            "This image model uses a custom Diffusers pipeline that the launch environment does not know yet.",
+            [{"label": "update Diffusers image dependencies", "op": "dependency", "package": "diffusers transformers accelerate"}],
+        ),
+        (
+            r"mflux-generate-qwen.*not found|mflux-generate.*not found|MLX image serving requires mflux|No module named ['\"]?mflux",
+            "MLX image serving requires mflux on this Apple Silicon server.",
+            [{"label": "install mflux in Cookbook Dependencies", "op": "dependency", "package": "mflux"}],
+        ),
+        (
+            r"mlx-lama-swift|odysseus-mlx-inpaint|mlx-lama-serve|LaMa / MI-GAN MLX inpainting models require",
+            "LaMa / MI-GAN MLX inpainting requires an Odysseus-compatible mlx-lama-swift bridge on this Apple Silicon server.",
+            [{"label": "build mlx-lama-swift bridge and put odysseus-mlx-inpaint or mlx-lama-serve on PATH", "op": "dependency", "package": "mlx_lama_swift"}],
+        ),
+        (
+            r"mlx-ddcolor-swift|odysseus-mlx-colorize|mlx-ddcolor-serve|DDColor MLX models require",
+            "DDColor MLX colorization requires an Odysseus-compatible mlx-ddcolor-swift bridge on this Apple Silicon server.",
+            [{"label": "build mlx-ddcolor-swift bridge and put odysseus-mlx-colorize or mlx-ddcolor-serve on PATH", "op": "dependency", "package": "mlx_ddcolor_swift"}],
+        ),
+        (
             r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
             "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
             [
                 {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
+                {"label": "Open Clank now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
             ],
         ),
         # System build deps come BEFORE the generic llama.cpp catch-all so
@@ -1358,9 +1411,9 @@ def _diagnose_serve_output(text: str) -> dict | None:
             [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
         ),
         (
-            r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
-            "Diffusion serving requires PyTorch and diffusers.",
-            [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
+            r"No module named 'torch'|No module named torch|No module named 'torchvision'|No module named torchvision|No module named 'diffusers'|No module named diffusers|No module named 'scipy'|No module named scipy|install scipy if you want to use beta sigmas|requires the Torchvision library",
+            "Diffusion serving requires PyTorch, Torchvision, Diffusers, Accelerate, and SciPy.",
+            [{"label": "install Diffusers image deps in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch] torchvision accelerate scipy python-multipart"}],
         ),
         (
             r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",

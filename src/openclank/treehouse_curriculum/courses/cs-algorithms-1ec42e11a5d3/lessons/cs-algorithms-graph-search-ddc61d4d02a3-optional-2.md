@@ -1,0 +1,1 @@
+Dijkstra's algorithm chooses the smallest tentative distance and requires nonnegative edge weights for its usual correctness argument. A minimum spanning tree minimizes total connecting-edge cost in a connected undirected weighted graph; it is not a shortest-path tree. Topological sorting handles DAG dependencies; a cycle prevents a valid order.

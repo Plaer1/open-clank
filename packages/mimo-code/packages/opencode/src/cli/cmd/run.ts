@@ -35,6 +35,23 @@ type ToolProps<T> = {
   part: ToolPart
 }
 
+async function enableDangerousDeleteApproval(
+  sdk: Pick<OpencodeClient, "permission">,
+  enabled: boolean,
+) {
+  if (!enabled) return async () => {}
+  const previous = (await sdk.permission.autoApproveDelete(undefined, { throwOnError: true })).data === true
+  if (previous) return async () => {}
+
+  await sdk.permission.setAutoApproveDelete({ enabled: true }, { throwOnError: true })
+  const state = { restored: false }
+  return async () => {
+    if (state.restored) return
+    await sdk.permission.setAutoApproveDelete({ enabled: false }, { throwOnError: true })
+    state.restored = true
+  }
+}
+
 function props<T>(part: ToolPart): ToolProps<T> {
   const state = part.state
   return {
@@ -260,7 +277,7 @@ export const RunCommand = cmd({
       })
       .option("attach", {
         type: "string",
-        describe: "attach to a running mimocode server (e.g., http://localhost:4096)",
+        describe: "attach to a running mimocode server (use the URL printed by `mimo serve`)",
       })
       .option("password", {
         alias: ["p"],
@@ -290,6 +307,7 @@ export const RunCommand = cmd({
         describe: "role for the injected message (assistant injects text as model output then triggers continuation)",
       })
       .option("dangerously-skip-permissions", {
+        alias: ["yolo"],
         type: "boolean",
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
@@ -300,7 +318,7 @@ export const RunCommand = cmd({
       .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
       .join(" ")
 
-    const directory = (() => {
+    const directory = await (async () => {
       if (!args.dir) return undefined
       if (args.attach) return args.dir
       try {
@@ -308,7 +326,8 @@ export const RunCommand = cmd({
         return process.cwd()
       } catch {
         UI.error("Failed to change directory to " + args.dir)
-        process.exit(1)
+        await Log.exit(1)
+        throw new Error("Log.exit returned unexpectedly")
       }
     })()
 
@@ -320,7 +339,7 @@ export const RunCommand = cmd({
         const resolvedPath = path.resolve(process.cwd(), filePath)
         if (!(await Filesystem.exists(resolvedPath))) {
           UI.error(`File not found: ${filePath}`)
-          process.exit(1)
+          await Log.exit(1)
         }
 
         const mime = (await Filesystem.isDir(resolvedPath)) ? "application/x-directory" : "text/plain"
@@ -338,22 +357,17 @@ export const RunCommand = cmd({
 
     if (message.trim().length === 0 && !args.command) {
       UI.error("You must provide a message or a command")
-      process.exit(1)
+      await Log.exit(1)
     }
 
     if (args.fork && !args.continue && !args.session) {
       UI.error("--fork requires --continue or --session")
-      process.exit(1)
+      await Log.exit(1)
     }
 
     const rules: Permission.Ruleset = [
       {
         permission: "question",
-        action: "deny",
-        pattern: "*",
-      },
-      {
-        permission: "plan_enter",
         action: "deny",
         pattern: "*",
       },
@@ -433,7 +447,7 @@ export const RunCommand = cmd({
       const events = await sdk.event.subscribe()
       let error: string | undefined
 
-      async function loop(tracker: CompletionTracker) {
+      async function loop(tracker: CompletionTracker, restoreDangerousDeleteApproval: () => Promise<void>) {
         const toggles = new Map<string, boolean>()
         const log = Log.create({ service: "cli.run" })
 
@@ -564,6 +578,7 @@ export const RunCommand = cmd({
         } finally {
           tracker.stop()
           await iter.return?.(undefined).catch(() => {})
+          await restoreDangerousDeleteApproval()
         }
       }
 
@@ -633,7 +648,8 @@ export const RunCommand = cmd({
       const sessionID = await session(sdk)
       if (!sessionID) {
         UI.error("Session not found")
-        process.exit(1)
+        await Log.exit(1)
+        throw new Error("Log.exit returned unexpectedly")
       }
       await share(sdk, sessionID)
 
@@ -651,33 +667,43 @@ export const RunCommand = cmd({
         },
       })
 
-      loop(tracker).catch((e) => {
+      const restoreDangerousDeleteApproval = await enableDangerousDeleteApproval(
+        sdk,
+        args["dangerously-skip-permissions"],
+      )
+
+      loop(tracker, restoreDangerousDeleteApproval).catch(async (e) => {
         console.error(e)
-        process.exit(1)
+        await Log.exit(1)
       })
 
-      if (args.command) {
-        await sdk.session.command({
-          sessionID,
-          agent,
-          model: args.model,
-          command: args.command,
-          arguments: message,
-          variant: args.variant,
-        })
-      } else {
-        const model = args.model ? Provider.parseModel(args.model) : undefined
-        const params = {
-          sessionID,
-          agent,
-          model,
-          variant: args.variant,
-          role: args.role as "user" | "assistant" | undefined,
-          parts: [...files, { type: "text" as const, text: message }],
+      try {
+        if (args.command) {
+          await sdk.session.command({
+            sessionID,
+            agent,
+            model: args.model,
+            command: args.command,
+            arguments: message,
+            variant: args.variant,
+          })
+        } else {
+          const model = args.model ? Provider.parseModel(args.model) : undefined
+          const params = {
+            sessionID,
+            agent,
+            model,
+            variant: args.variant,
+            role: args.role as "user" | "assistant" | undefined,
+            parts: [...files, { type: "text" as const, text: message }],
+          }
+          await sdk.session.prompt(params as typeof params & Record<string, unknown>)
         }
-        await sdk.session.prompt(params as typeof params & Record<string, unknown>)
+        tracker.markStarted()
+      } catch (error) {
+        await restoreDangerousDeleteApproval()
+        throw error
       }
-      tracker.markStarted()
     }
 
     if (args.attach) {

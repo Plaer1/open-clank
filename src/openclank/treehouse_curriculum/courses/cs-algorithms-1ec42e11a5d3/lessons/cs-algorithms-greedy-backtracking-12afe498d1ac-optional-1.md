@@ -1,0 +1,1 @@
+A rule safe for one coin system is not a general theorem.

@@ -1,21 +1,72 @@
-import { Effect, Layer, Context, Schedule } from "effect"
+import { Effect, Layer, Context, Schedule, Semaphore } from "effect"
 import { Database, inArray, eq, and, lte, sql } from "@/storage"
 import { Bus } from "@/bus"
 import type { SessionID, MessageID } from "@/session/schema"
 import { ActorRegistryTable } from "./actor.sql"
-import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist } from "./schema"
+import type { Actor, ActorStatus, ActorOutcome, ContextMode, Lifecycle, SpawnMode, ToolWhitelist, Liveness, ActorModel, ActorHostContext } from "./schema"
+import { deriveLiveness } from "./schema"
 import * as Events from "./events"
 import { Log } from "@/util"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { randomUUID } from "node:crypto"
 
 const log = Log.create({ service: "actor.registry" })
 
 const STUCK_THRESHOLD_MS = 5 * 60 * 1000 // 5 minutes
 const SCAN_INTERVAL_MS = 60 * 1000 // every 60s
 
+// Process-level singleton instance ID for orphan recovery.
+// A unique token generated once at module load. Stable across layer rebuilds
+// within the same process; a fresh process gets a new token and correctly
+// reclaims dead rows.
+const PROCESS_INSTANCE_ID = randomUUID()
+
 type ActorRow = typeof ActorRegistryTable.$inferSelect
 
+export type RegisterInput = {
+  sessionID: SessionID
+  actorID: string
+  mode: SpawnMode
+  parentActorID?: string
+  agent: string
+  description: string
+  contextMode: ContextMode
+  contextWatermark?: MessageID
+  background: boolean
+  lifecycle: Lifecycle
+  tools?: ToolWhitelist
+  requestedModel?: string
+  effectiveModel?: ActorModel
+  hostContext?: ActorHostContext
+}
+
+function hostContextFromRow(row: ActorRow): ActorHostContext | undefined {
+  const hostContext = {
+    ...(row.host_account_id ? { accountID: row.host_account_id } : {}),
+    ...(row.provider_grant_id ? { grantID: row.provider_grant_id } : {}),
+    ...(row.grant_revision !== null && row.grant_revision !== undefined ? { grantRevision: row.grant_revision } : {}),
+    ...(row.credential_revision !== null && row.credential_revision !== undefined ? { credentialRevision: row.credential_revision } : {}),
+    ...(row.chat_id ? { chatID: row.chat_id } : {}),
+    ...(row.workspace_id ? { workspaceID: row.workspace_id } : {}),
+    ...(row.cwd ? { cwd: row.cwd } : {}),
+    ...(row.goal_id ? { goalID: row.goal_id } : {}),
+  }
+  return Object.keys(hostContext).length ? hostContext : undefined
+}
+
+function effectiveModelFromRow(row: ActorRow): ActorModel | undefined {
+  if (!row.effective_model) return undefined
+  try {
+    const parsed = JSON.parse(row.effective_model) as Partial<ActorModel>
+    return parsed.providerID && parsed.modelID ? { providerID: parsed.providerID, modelID: parsed.modelID } : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function fromRow(row: ActorRow): Actor {
+  const effectiveModel = effectiveModelFromRow(row)
+  const hostContext = hostContextFromRow(row)
   return {
     sessionID: row.session_id,
     actorID: row.actor_id,
@@ -23,6 +74,7 @@ function fromRow(row: ActorRow): Actor {
     parentActorID: row.parent_actor_id ?? undefined,
     status: row.status,
     lastOutcome: row.last_outcome ?? undefined,
+    executionRevision: row.execution_revision,
     lifecycle: row.lifecycle,
     agent: row.agent,
     description: row.description,
@@ -30,6 +82,9 @@ function fromRow(row: ActorRow): Actor {
     contextWatermark: row.context_watermark ?? undefined,
     background: Boolean(row.background),
     tools: row.tools ?? undefined,
+    requestedModel: row.requested_model ?? undefined,
+    effectiveModel,
+    ...(hostContext ? { hostContext } : {}),
     lastTurnTime: row.last_turn_time,
     turnCount: row.turn_count,
     lastError: row.last_error ?? undefined,
@@ -42,19 +97,9 @@ function fromRow(row: ActorRow): Actor {
 }
 
 export interface Interface {
-  readonly register: (input: {
-    sessionID: SessionID
-    actorID: string
-    mode: SpawnMode
-    parentActorID?: string
-    agent: string
-    description: string
-    contextMode: ContextMode
-    contextWatermark?: MessageID
-    background: boolean
-    lifecycle: Lifecycle
-    tools?: ToolWhitelist
-  }) => Effect.Effect<Actor>
+  readonly register: (input: RegisterInput) => Effect.Effect<Actor>
+  /** Allocate the next agent-N ID and insert its pending row under one writer transaction. */
+  readonly registerAllocated: (input: Omit<RegisterInput, "actorID">) => Effect.Effect<Actor>
 
   readonly updateStatus: (
     sessionID: SessionID,
@@ -65,9 +110,42 @@ export interface Interface {
       lastError?: string | undefined
     },
   ) => Effect.Effect<void>
+  /** Start one actor execution and return its durable revision. */
+  readonly beginExecution: (
+    sessionID: SessionID,
+    actorID: string,
+    expectedStatus?: "pending",
+  ) => Effect.Effect<number | undefined>
+  /** Cancel a never-started pending actor without creating an execution revision. */
+  readonly cancelPending: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
+  /** Settle one execution exactly once. Returns false when another contender won. */
+  readonly settleExecution: (
+    sessionID: SessionID,
+    actorID: string,
+    executionRevision: number,
+    outcome: ActorOutcome,
+    lastError?: string,
+  ) => Effect.Effect<boolean>
+  /** Claim the one terminal lifecycle notification for one settled execution. */
+  readonly claimTerminalNotification: (
+    sessionID: SessionID,
+    actorID: string,
+    executionRevision: number,
+    outcome: ActorOutcome,
+  ) => Effect.Effect<boolean>
   readonly updateTurn: (sessionID: SessionID, actorID: string) => Effect.Effect<void>
   readonly updateAgent: (sessionID: SessionID, actorID: string, agent: string) => Effect.Effect<void>
+  readonly updateModel: (sessionID: SessionID, actorID: string, requestedModel?: string, effectiveModel?: ActorModel) => Effect.Effect<void>
+  readonly updateHostContext: (sessionID: SessionID, actorID: string, context: ActorHostContext) => Effect.Effect<void>
   readonly get: (sessionID: SessionID, actorID: string) => Effect.Effect<Actor | undefined>
+  // Derived pull-side liveness for a single actor row (progressing/stalled/
+  // terminal), computed from honest registry fields. Returns undefined when the
+  // row is absent. Pass stallMs to override the default staleness window.
+  readonly liveness: (
+    sessionID: SessionID,
+    actorID: string,
+    stallMs?: number,
+  ) => Effect.Effect<{ liveness: Liveness; actor: Actor } | undefined>
   readonly listBySession: (sessionID: SessionID) => Effect.Effect<Actor[]>
   readonly listActive: () => Effect.Effect<Actor[]>
   readonly listByParent: (sessionID: SessionID, parentActorID: string) => Effect.Effect<Actor[]>
@@ -84,46 +162,52 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    const allocationLock = Semaphore.makeUnsafe(1)
+
+    // Use the process-level singleton for orphan recovery.
+    // This is stable across layer rebuilds within the same process.
+    const instanceID = PROCESS_INSTANCE_ID
 
     // --- CRUD methods ---
 
-    const register = Effect.fn("ActorRegistry.register")(function* (input: {
-      sessionID: SessionID
-      actorID: string
-      mode: SpawnMode
-      parentActorID?: string
-      agent: string
-      description: string
-      contextMode: ContextMode
-      contextWatermark?: MessageID
-      background: boolean
-      lifecycle: Lifecycle
-      tools?: ToolWhitelist
-    }) {
-      const now = Date.now()
-      const row = {
-        session_id: input.sessionID,
-        actor_id: input.actorID,
-        mode: input.mode,
-        parent_actor_id: input.parentActorID ?? null,
-        status: "pending" as const,
-        last_outcome: null,
-        lifecycle: input.lifecycle,
-        agent: input.agent,
-        description: input.description,
-        context_mode: input.contextMode,
-        context_watermark: input.contextWatermark ?? null,
-        background: input.background,
-        tools: input.tools ?? null,
-        last_turn_time: now,
-        turn_count: 0,
-        last_error: null,
-        time_completed: null,
-        time_created: now,
-        time_updated: now,
-      }
-      yield* Effect.sync(() => Database.use((db) => db.insert(ActorRegistryTable).values(row).run()))
-      yield* bus.publish(Events.ActorRegistered, {
+    const makeRow = (input: RegisterInput, now: number) => ({
+      session_id: input.sessionID,
+      actor_id: input.actorID,
+      mode: input.mode,
+      parent_actor_id: input.parentActorID ?? null,
+      status: "pending" as const,
+      last_outcome: null,
+      execution_revision: 0,
+      terminal_notification_revision: null,
+      terminal_notification_outcome: null,
+      lifecycle: input.lifecycle,
+      agent: input.agent,
+      description: input.description,
+      context_mode: input.contextMode,
+      context_watermark: input.contextWatermark ?? null,
+      background: input.background,
+      tools: input.tools ?? null,
+      requested_model: input.requestedModel ?? null,
+      effective_model: input.effectiveModel ? JSON.stringify(input.effectiveModel) : null,
+      host_account_id: input.hostContext?.accountID ?? null,
+      provider_grant_id: input.hostContext?.grantID ?? null,
+      grant_revision: input.hostContext?.grantRevision ?? null,
+      credential_revision: input.hostContext?.credentialRevision ?? null,
+      chat_id: input.hostContext?.chatID ?? null,
+      workspace_id: input.hostContext?.workspaceID ?? null,
+      cwd: input.hostContext?.cwd ?? null,
+      goal_id: input.hostContext?.goalID ?? null,
+      last_turn_time: now,
+      turn_count: 0,
+      last_error: null,
+      instance_id: instanceID,
+      time_completed: null,
+      time_created: now,
+      time_updated: now,
+    })
+
+    const publishRegistered = (input: RegisterInput) =>
+      bus.publish(Events.ActorRegistered, {
         sessionID: input.sessionID,
         actorID: input.actorID,
         mode: input.mode,
@@ -131,8 +215,196 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         description: input.description,
         agent: input.agent,
         background: input.background,
+        ...(input.requestedModel ? { requestedModel: input.requestedModel } : {}),
+        ...(input.effectiveModel ? { effectiveModel: input.effectiveModel } : {}),
+        ...(input.hostContext ? { hostContext: input.hostContext } : {}),
       })
+
+    const register = Effect.fn("ActorRegistry.register")(function* (input: RegisterInput) {
+      const now = Date.now()
+      const row = makeRow(input, now)
+      yield* Effect.sync(() => Database.use((db) => db.insert(ActorRegistryTable).values(row).run()))
+      yield* publishRegistered(input)
       return fromRow(row)
+    })
+
+    const registerAllocated = Effect.fn("ActorRegistry.registerAllocated")(function* (
+      input: Omit<RegisterInput, "actorID">,
+    ) {
+      const now = Date.now()
+      const result = yield* allocationLock.withPermits(1)(Effect.sync(() =>
+        Database.transaction((db) => {
+          const prefix = `${input.agent}-`
+          const existing = db
+            .select({ actor_id: ActorRegistryTable.actor_id })
+            .from(ActorRegistryTable)
+            .where(eq(ActorRegistryTable.session_id, input.sessionID))
+            .all()
+          let max = 0
+          for (const row of existing) {
+            if (!row.actor_id.startsWith(prefix)) continue
+            const suffix = row.actor_id.slice(prefix.length)
+            if (!/^[1-9]\d*$/.test(suffix)) continue
+            const n = Number(suffix)
+            if (Number.isSafeInteger(n) && n > max) max = n
+          }
+          const actorID = `${input.agent}-${max + 1}`
+          const full = { ...input, actorID } as RegisterInput
+          const row = makeRow(full, now)
+          db.insert(ActorRegistryTable).values(row).run()
+          return { actorID, row }
+        }, { behavior: "immediate" }),
+      ))
+      const full = { ...input, actorID: result.actorID } as RegisterInput
+      yield* publishRegistered(full)
+      return fromRow(result.row)
+    })
+
+    const beginExecution = Effect.fn("ActorRegistry.beginExecution")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      expectedStatus?: "pending",
+    ) {
+      const now = Date.now()
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "running",
+              execution_revision: sql`${ActorRegistryTable.execution_revision} + 1`,
+              last_outcome: null,
+              last_error: null,
+              time_completed: null,
+              time_updated: now,
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                expectedStatus
+                  ? eq(ActorRegistryTable.status, expectedStatus)
+                  : sql`${ActorRegistryTable.status} != 'running'`,
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (!row || row.status !== "running") return undefined
+      yield* publishSettledStatus(row, sessionID, actorID)
+      return row.execution_revision
+    })
+
+    const cancelPending = Effect.fn("ActorRegistry.cancelPending")(function* (
+      sessionID: SessionID,
+      actorID: string,
+    ) {
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "idle",
+              last_outcome: "cancelled",
+              last_error: null,
+              time_updated: Date.now(),
+              time_completed: Date.now(),
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.status, "pending"),
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (row) yield* publishSettledStatus(row, sessionID, actorID)
+      return row ? fromRow(row) : undefined
+    })
+
+    const publishSettledStatus = (row: ActorRow, sessionID: SessionID, actorID: string) =>
+      bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
+
+    const settleExecution = Effect.fn("ActorRegistry.settleExecution")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      executionRevision: number,
+      outcome: ActorOutcome,
+      lastError?: string,
+    ) {
+      const now = Date.now()
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              status: "idle",
+              last_outcome: outcome,
+              last_error: outcome === "failure" ? (lastError ?? null) : null,
+              time_completed: now,
+              time_updated: now,
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.execution_revision, executionRevision),
+                eq(ActorRegistryTable.status, "running"),
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      if (row) yield* publishSettledStatus(row, sessionID, actorID)
+      return row !== undefined
+    })
+
+    const claimTerminalNotification = Effect.fn("ActorRegistry.claimTerminalNotification")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      executionRevision: number,
+      outcome: ActorOutcome,
+    ) {
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              terminal_notification_revision: executionRevision,
+              terminal_notification_outcome: outcome,
+              time_updated: Date.now(),
+            })
+            .where(
+              and(
+                eq(ActorRegistryTable.session_id, sessionID),
+                eq(ActorRegistryTable.actor_id, actorID),
+                eq(ActorRegistryTable.execution_revision, executionRevision),
+                eq(ActorRegistryTable.status, "idle"),
+                eq(ActorRegistryTable.last_outcome, outcome),
+                sql`(${ActorRegistryTable.terminal_notification_revision} IS NULL OR ${ActorRegistryTable.terminal_notification_revision} != ${executionRevision})`,
+              ),
+            )
+            .returning()
+            .get(),
+        ),
+      )
+      return row !== undefined
     })
 
     const updateStatus = Effect.fn("ActorRegistry.updateStatus")(function* (
@@ -188,6 +460,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         turnCount: row.turn_count,
         lastTurnTime: row.last_turn_time,
         ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
       })
     })
 
@@ -205,7 +480,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
             .where(
               and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)),
             )
-            .run(),
+          .run(),
         ),
       )
     })
@@ -228,6 +503,97 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       )
     })
 
+    const updateModel = Effect.fn("ActorRegistry.updateModel")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      requestedModel?: string,
+      effectiveModel?: ActorModel,
+    ) {
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              ...(requestedModel !== undefined ? { requested_model: requestedModel } : {}),
+              ...(effectiveModel !== undefined ? { effective_model: JSON.stringify(effectiveModel) } : {}),
+              time_updated: Date.now(),
+            })
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .run(),
+        ),
+      )
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .select()
+            .from(ActorRegistryTable)
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .get(),
+        ),
+      )
+      if (!row) return
+      yield* bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
+    })
+
+    const updateHostContext = Effect.fn("ActorRegistry.updateHostContext")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      context: ActorHostContext,
+    ) {
+      yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .update(ActorRegistryTable)
+            .set({
+              host_account_id: context.accountID ?? null,
+              provider_grant_id: context.grantID ?? null,
+              grant_revision: context.grantRevision ?? null,
+              credential_revision: context.credentialRevision ?? null,
+              chat_id: context.chatID ?? null,
+              workspace_id: context.workspaceID ?? null,
+              cwd: context.cwd ?? null,
+              goal_id: context.goalID ?? null,
+              time_updated: Date.now(),
+            })
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .run(),
+        ),
+      )
+      const row = yield* Effect.sync(() =>
+        Database.use((db) =>
+          db
+            .select()
+            .from(ActorRegistryTable)
+            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.actor_id, actorID)))
+            .get(),
+        ),
+      )
+      if (!row) return
+      yield* bus.publish(Events.ActorStatusChanged, {
+        sessionID,
+        actorID,
+        status: row.status,
+        ...(row.last_outcome ? { lastOutcome: row.last_outcome } : {}),
+        turnCount: row.turn_count,
+        lastTurnTime: row.last_turn_time,
+        ...(row.last_error ? { error: row.last_error } : {}),
+        ...(row.requested_model ? { requestedModel: row.requested_model } : {}),
+        ...(effectiveModelFromRow(row) ? { effectiveModel: effectiveModelFromRow(row) } : {}),
+        ...(hostContextFromRow(row) ? { hostContext: hostContextFromRow(row) } : {}),
+      })
+    })
+
     const get = Effect.fn("ActorRegistry.get")(function* (sessionID: SessionID, actorID: string) {
       const row = yield* Effect.sync(() =>
         Database.use((db) =>
@@ -241,6 +607,16 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
         ),
       )
       return row ? fromRow(row) : undefined
+    })
+
+    const liveness = Effect.fn("ActorRegistry.liveness")(function* (
+      sessionID: SessionID,
+      actorID: string,
+      stallMs?: number,
+    ) {
+      const actor = yield* get(sessionID, actorID)
+      if (!actor) return undefined
+      return { liveness: deriveLiveness(actor, Date.now(), stallMs), actor }
     })
 
     const listBySession = Effect.fn("ActorRegistry.listBySession")(function* (sessionID: SessionID) {
@@ -354,49 +730,54 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
       return actor.mode !== "subagent"
     })
 
+    // Compatibility helper only computes a label. New subagent rows use
+    // registerAllocated, which chooses and inserts under BEGIN IMMEDIATE.
     const allocateActorID = Effect.fn("ActorRegistry.allocateActorID")(function* (
       sessionID: SessionID,
       agentType: string,
     ) {
-      const existing = yield* Effect.sync(() =>
-        Database.use((db) =>
+      return yield* Effect.sync(() => {
+        const existing = Database.use((db) =>
           db
             .select({ actor_id: ActorRegistryTable.actor_id })
             .from(ActorRegistryTable)
-            .where(and(eq(ActorRegistryTable.session_id, sessionID), eq(ActorRegistryTable.agent, agentType)))
+            .where(eq(ActorRegistryTable.session_id, sessionID))
             .all(),
-        ),
-      )
-      const prefix = `${agentType}-`
-      let max = 0
-      for (const row of existing) {
-        if (row.actor_id.startsWith(prefix)) {
-          const n = parseInt(row.actor_id.slice(prefix.length), 10)
-          if (Number.isFinite(n) && n > max) max = n
+        )
+        const prefix = `${agentType}-`
+        let max = 0
+        for (const row of existing) {
+          if (row.actor_id.startsWith(prefix)) {
+            const suffix = row.actor_id.slice(prefix.length)
+            if (!/^[1-9]\d*$/.test(suffix)) continue
+            const n = Number(suffix)
+            if (Number.isSafeInteger(n) && n > max) max = n
+          }
         }
-      }
-      return `${agentType}-${max + 1}`
+        return `${agentType}-${max + 1}`
+      })
     })
 
     // --- Orphan Recovery ---
-    // On init, mark all pending/running actors as idle with failure outcome.
-    // Per spec B6: don't auto-revive — they wake on next sender's send.
+    // On init, mark pending/running actors from a PREVIOUS process as idle
+    // with failure outcome. Actors from this very instance (same instanceID)
+    // are still alive and must NOT be touched.
     yield* Effect.sync(() =>
       Database.use((db) => {
         const now = Date.now()
-        db.update(ActorRegistryTable)
-          .set({
-            status: "idle",
-            last_outcome: "failure",
-            last_error: "orphaned: process restarted",
-            time_updated: now,
-            time_completed: now,
-          })
-          .where(inArray(ActorRegistryTable.status, ["pending", "running"]))
-          .run()
+        db.run(sql`
+          UPDATE actor_registry
+          SET status = 'idle',
+              last_outcome = 'failure',
+              last_error = 'orphaned: process restarted',
+              time_updated = ${now},
+              time_completed = ${now}
+          WHERE status IN ('pending', 'running')
+            AND instance_id != ${instanceID}
+        `)
       }),
     )
-    log.info("orphan recovery complete")
+    log.info("orphan recovery complete", { instanceID })
 
     // --- Stuck Detection ---
     const scanStuck = Effect.gen(function* () {
@@ -423,6 +804,9 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
           description: entry.description,
           lastTurnTime: entry.lastTurnTime,
           stuckDuration: Date.now() - entry.lastTurnTime,
+          ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+          ...(entry.effectiveModel ? { effectiveModel: entry.effectiveModel } : {}),
+          ...(entry.hostContext ? { hostContext: entry.hostContext } : {}),
         })
       }
     })
@@ -436,10 +820,18 @@ export const layer: Layer.Layer<Service, never, Bus.Service> = Layer.effect(
 
     return Service.of({
       register,
+      registerAllocated,
       updateStatus,
+      beginExecution,
+      cancelPending,
+      settleExecution,
+      claimTerminalNotification,
       updateTurn,
       updateAgent,
+      updateModel,
+      updateHostContext,
       get,
+      liveness,
       listBySession,
       listActive,
       listByParent,

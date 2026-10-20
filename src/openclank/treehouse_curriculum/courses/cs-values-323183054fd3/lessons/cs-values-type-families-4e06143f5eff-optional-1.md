@@ -1,0 +1,1 @@
+An operation can be legal in Python yet violate the meaning of the data. Truthiness alone is not a missing-value test.

@@ -5,8 +5,8 @@ out of src.ai_interaction as part of the tool -> registry migration (#3629), and
 their handler classes registered in TOOL_HANDLERS.
 
 The session manager is a runtime-set singleton in src.ai_interaction, so each
-function fetches it via get_session_manager() (imported here); _resolve_model and
-AI_CHAT_TIMEOUT are reused from there too.
+function fetches it via get_session_manager(). Model selection is resolved only
+through the normalized provider control plane.
 """
 import asyncio
 import json
@@ -14,7 +14,7 @@ import logging
 import uuid
 from typing import Dict, Optional
 
-from src.ai_interaction import get_session_manager, _resolve_model, _resolve_model_target, AI_CHAT_TIMEOUT
+from src.ai_interaction import get_session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,18 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
         return {"error": "Session name cannot be empty"}
 
     try:
-        target = await asyncio.to_thread(_resolve_model_target, model_spec, owner=owner)
-        url, model, headers = target.endpoint_url, target.model_id, dict(target.headers)
+        from src.openclank.chat_routing import (
+            MANAGED_ENGINE_PUBLIC_URL,
+            resolve_chat_model_spec,
+        )
+
+        route = await asyncio.to_thread(
+            resolve_chat_model_spec,
+            owner=owner,
+            model_spec=model_spec,
+        )
+        url = MANAGED_ENGINE_PUBLIC_URL
+        model = route.provider_model_id
     except ValueError as e:
         return {"error": str(e)}
 
@@ -55,12 +65,15 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
             model=model,
             rag=False,
             owner=owner,
-            endpoint_id=target.endpoint_id,
+            endpoint_id=route.public_endpoint_id,
+            provider_model_route_id=route.model_route_id,
         )
-        # Store headers on session for future calls
+        # The share grant is nonsecret capability metadata. Provider headers and
+        # credentials remain inside the managed engine boundary.
         sess = _session_manager.get_session(sid)
-        if sess and headers:
-            sess.headers = headers
+        if sess:
+            sess.headers = {}
+            sess.provider_grant_id = route.provider_grant_id
         try:
             from src.event_bus import fire_event
             fire_event("session_created", owner)
@@ -72,7 +85,8 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
             "name": name,
             "model": model,
             "endpoint_url": url,
-            "endpoint_id": target.endpoint_id,
+            "endpoint_id": route.public_endpoint_id,
+            "model_route_id": route.model_route_id,
         }
     except Exception as e:
         logger.error(f"create_session failed: {e}")
@@ -167,7 +181,12 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         logger.error(f"list_sessions failed: {e}")
         return {"error": str(e)}
 
-async def send_to_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def send_to_session(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+) -> Dict:
     """Send a message to an existing session and get a response.
 
     Content format:
@@ -175,8 +194,9 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
       Line 2+: message
     """
     _session_manager = get_session_manager()
-    from src.llm_core import llm_call_async
     from core.models import ChatMessage
+    from src.openclank.chat_routing import resolve_chat_route
+    from src.openclank.modality_facade import complete_text
 
     if not _session_manager:
         return {"error": "Session manager not available"}
@@ -227,12 +247,19 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         context.append({"role": "user", "content": message})
 
-        response = await llm_call_async(
-            sess.endpoint_url, sess.model, context,
-            headers=sess.headers,
-            timeout=AI_CHAT_TIMEOUT,
+        route = resolve_chat_route(
             owner=owner,
-            session_id=target_sid,
+            endpoint_id=getattr(sess, "endpoint_id", None),
+            model_id=getattr(sess, "model", None),
+            model_route_id=getattr(sess, "provider_model_route_id", None),
+        )
+        response = await complete_text(
+            owner=owner or "local-installation",
+            purpose="chat",
+            messages=context,
+            model_route_id=route.model_route_id,
+            grant_id=route.provider_grant_id,
+            root_operation_id=root_operation_id,
         )
 
         # Save both messages to session
@@ -360,40 +387,24 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             return {"action": "rename", "session_id": target_sid, "name": new_name,
                     "results": f"Session renamed to '{new_name}'"}
 
-        elif action == "archive":
+        elif action in ("archive", "unarchive", "delete"):
             db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = True
-            db.commit()
-            return {"action": "archive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' archived"}
-
-        elif action == "unarchive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
-            db_sess.archived = False
-            db.commit()
-            return {"action": "unarchive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' unarchived"}
-
-        elif action == "delete":
-            if target_sid == session_id:
-                return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first."}
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions."}
-            if db_sess and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting."}
+            if db_sess is None or not owner or db_sess.owner != owner:
+                return {"error": f"Session '{target_sid}' not found. Use the exact owned id from list_sessions."}
+            name = db_sess.name or target_sid
+            # Release this read transaction before the canonical owner opens
+            # its own SQL/external-store lifecycle transactions.
+            db.rollback()
+            from src.openclank.chat_lifecycle import ChatLifecycleService, ChatLifecycleError
+            service = ChatLifecycleService(session_manager=_session_manager)
             try:
-                ok = _session_manager.delete_session(target_sid)
-                if not ok:
-                    return {"error": f"Session '{target_sid}' was not deleted because it no longer exists."}
-                return {"action": "delete", "session_id": target_sid,
-                        "results": f"Session '{db_sess.name or target_sid}' deleted"}
-            except Exception as e:
-                return {"error": f"Failed to delete session: {e}"}
+                if action == "delete":
+                    await service.erase(owner=owner, session_id=target_sid)
+                else:
+                    await service.set_archived(owner=owner, session_id=target_sid, archived=action == "archive")
+            except ChatLifecycleError as exc:
+                return {"error": str(exc), "state": exc.code, "retryable": exc.code == "erasure_pending"}
+            return {"action": action, "session_id": target_sid, "results": f"Session '{name}' {action + 'd' if action != 'unarchive' else 'restored'}"}
 
         elif action in ("important", "unimportant"):
             is_important = action == "important"
@@ -449,6 +460,11 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                 rag=False,
                 owner=owner,
                 endpoint_id=getattr(source, "endpoint_id", None),
+                provider_model_route_id=getattr(
+                    source,
+                    "provider_model_route_id",
+                    None,
+                ),
             )
             # Copy messages
             history = source.get_context_messages()
@@ -493,7 +509,12 @@ class ListSessionsTool:
 
 class SendToSessionTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
-        return await send_to_session(content, ctx.get("session_id"), owner=ctx.get("owner"))
+        return await send_to_session(
+            content,
+            ctx.get("session_id"),
+            owner=ctx.get("owner"),
+            root_operation_id=ctx.get("root_operation_id"),
+        )
 
 
 class ManageSessionTool:

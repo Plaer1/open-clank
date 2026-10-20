@@ -1,0 +1,1 @@
+Memory layout diagrams are models, not a promise that every variable is physically stored on a stack.

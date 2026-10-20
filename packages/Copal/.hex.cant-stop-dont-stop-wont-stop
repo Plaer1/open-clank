@@ -1,0 +1,24 @@
+# Manual-only Open Clank Hexes contract. Do not import it from .hex.
+contract: open-clank-hexes/v1
+
+imports:
+  - .hexes/cant_stop_checks.py
+
+settings:
+  ask_me_before_staging: true
+  confirm_before_push: true
+  confirm_before_deleting:
+    over_lines: 5
+
+hexes:
+  - hex: "cant stop dont stop wont stop manual contract exists"
+    in: ./
+    required_files:
+      - .hexes/manual/cant-stop-dont-stop-wont-stop.md
+      - .hex.cant-stop-dont-stop-wont-stop
+      - .hexes/cant_stop_checks.py
+
+  - hex: "engaged recursive plans carry cant stop dont stop wont stop"
+    in: ./.futures/*
+    allowed_filetypes: .md
+    cant_stop_dont_stop_wont_stop: true

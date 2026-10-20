@@ -72,3 +72,54 @@ def test_extension_present_is_unchanged(tmp_path):
     content = dp.build_user_content("look", ["img"], str(tmp_path), _Handler(uploads, image=True), owner="t")
     imgs = _blocks(content, "image_url")
     assert imgs[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_native_media_source_cap_returns_typed_result_before_read(tmp_path, monkeypatch):
+    import src.document_processor as dp
+
+    monkeypatch.setattr(dp, "NATIVE_MEDIA_SOURCE_BYTES", 4)
+    p = tmp_path / "large.png"
+    p.write_bytes(b"12345")
+    uploads = {"img": {"path": str(p), "name": "large.png", "mime": "image/png"}}
+    content = dp.build_user_content("look", ["img"], str(tmp_path), _Handler(uploads, image=True), owner="t")
+    assert "source limit" in content
+    assert "image_url" not in content
+
+
+def test_no_extraction_keeps_original_document_resource(tmp_path):
+    import src.document_processor as dp
+
+    class DocumentHandler(_Handler):
+        def is_document_file(self, name, mime):
+            return True
+
+    p = tmp_path / "report.pdf"
+    p.write_bytes(b"%PDF-original")
+    uploads = {"doc": {"path": str(p), "name": "report.pdf", "mime": "application/pdf"}}
+    content = dp.build_user_content(
+        "inspect later", ["doc"], str(tmp_path), DocumentHandler(uploads), owner="t",
+        structured_resources=True, extract_attachments=False,
+    )
+    resources = _blocks(content, "resource")
+    assert resources and resources[0]["resource"]["mimeType"] == "application/pdf"
+    assert "PDF content" not in str(content)
+
+
+def test_native_source_cap_applies_to_arbitrary_structured_document(tmp_path, monkeypatch):
+    import src.document_processor as dp
+
+    class DocumentHandler(_Handler):
+        def is_document_file(self, name, mime):
+            return True
+
+    monkeypatch.setattr(dp, "NATIVE_MEDIA_SOURCE_BYTES", 4)
+    p = tmp_path / "archive.bin"
+    p.write_bytes(b"12345")
+    uploads = {"doc": {"path": str(p), "name": "archive.bin", "mime": "application/octet-stream"}}
+    content = dp.build_user_content(
+        "inspect", ["doc"], str(tmp_path), DocumentHandler(uploads),
+        structured_resources=True, extract_attachments=False,
+    )
+    assert "source limit" in content
+    assert "archive.bin" in content
+    assert not _blocks(content, "resource")

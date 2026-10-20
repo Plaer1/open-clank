@@ -1,55 +1,92 @@
+import { acknowledgeVisible } from './achievementProducer.js';
 // Odysseus UI — Initialization Scripts
 // ES6 module — extracted from index.html inline scripts
 
 import Storage from './storage.js';
+import { adoptAchievementAccount, startAchievementLifecycle, drainAchievementNotifications } from './achievementClient.js';
+import { bindModelStateOwner } from './modelCatalog.js';
+
+// Notification listening starts with the authenticated app, even when chat is hidden.
+startAchievementLifecycle();
+
+function markComposerUserEdited() {
+  const msgInput = document.getElementById('message');
+  if (!msgInput || msgInput.dataset.startupPreserveBound === '1') return;
+  msgInput.dataset.startupPreserveBound = '1';
+  msgInput.addEventListener('input', () => {
+    window.__odysseusComposerUserEdited = !!msgInput.value;
+  });
+}
 
 function clearFreshComposerRestore() {
   const msgInput = document.getElementById('message');
   if (!msgInput) return;
+  markComposerUserEdited();
   const hash = window.location.hash || '';
   const isEntityHash = /^#(?:document|note|image|email|event|task|skill|research)-/.test(hash)
     || /^#open=notes&note=/.test(hash);
-  const hasSessionTarget = !!((hash && !isEntityHash) || Storage.get('lastSessionId'));
+  const hasSessionTarget = !!(hash && !isEntityHash);
   if (hasSessionTarget) return;
+  if (window.__odysseusComposerUserEdited || document.activeElement === msgInput) return;
   if (msgInput.value) {
     msgInput.value = '';
     msgInput.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
 
+markComposerUserEdited();
 clearFreshComposerRestore();
 window.addEventListener('pageshow', clearFreshComposerRestore);
+document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: true });
 
 // SECURITY: defense-in-depth state wipe on user switch. If the authenticated
 // user is different from the one whose state is cached in this browser,
 // wipe unscoped localStorage + sessionStorage so the new account doesn't
 // inherit the previous user's last session id, last-used model, draft chat
-// input, or cached lists. Already namespaced Copal preferences are retained
+// input, or cached lists. Already namespaced owner preferences are retained
 // for their owning account. The settings-tab Logout button already wipes on
 // explicit logout; this catches the cases where a different user signs
 // in without the previous one logging out cleanly.
-(async () => {
+// theme.js awaits this shared boot lookup so it does not issue a second
+// auth-status request before these compatibility events are dispatched.
+window.__odysseusAuthContextPromise = (async () => {
   try {
     const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
-    if (!res.ok) return;
+    if (!res.ok) return null;
     const data = await res.json().catch(() => ({}));
     const liveUser = (data && data.username) || '';
-    if (!liveUser) return;
+    if (!liveUser) return null;
+    const accountId = String(data.account_id || '').trim();
+    if (accountId && document.body) document.body.dataset.accountId = accountId;
+    const userBarName = document.getElementById('user-bar-name');
+    if (userBarName) userBarName.textContent = liveUser;
     const KEY = 'odysseus-auth-user';
+    // Keep a non-secret stable owner hint for the pre-module first-paint
+    // script. Runtime preference namespaces remain keyed by account_id; the
+    // username fallback only covers loopback/auth providers without one.
+    const OWNER_KEY = 'odysseus-auth-owner';
     const cachedUser = localStorage.getItem(KEY);
+    bindModelStateOwner(liveUser, cachedUser || '');
     if (cachedUser && cachedUser !== liveUser) {
-      const _keepKeys = new Set(['odysseus-last-user', KEY]);
+      const _keepKeys = new Set(['odysseus-last-user', KEY, OWNER_KEY]);
       const toRemove = [];
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
-        const scopedCopalState = k?.startsWith('odysseus-') && k.includes(':scope:');
-        if (k && !_keepKeys.has(k) && !scopedCopalState) toRemove.push(k);
+        const scopedOwnerState = k?.includes(':scope:');
+        if (k && !_keepKeys.has(k) && !scopedOwnerState) toRemove.push(k);
       }
       toRemove.forEach(k => localStorage.removeItem(k));
       sessionStorage.clear();
       clearFreshComposerRestore();
     }
     localStorage.setItem(KEY, liveUser);
+    localStorage.setItem(OWNER_KEY, accountId || liveUser);
+    document.dispatchEvent(new CustomEvent('openclank:auth-user-ready', {
+      detail: { username: liveUser, accountId },
+    }));
+    document.dispatchEvent(new CustomEvent('openclank:auth-context-changed', {
+      detail: { username: liveUser, accountId },
+    }));
     // Apply per-user privilege gates to the UI. The backend enforces these
     // independently — this is purely cosmetic / "don't dangle controls the
     // user can't actually use." Privileges come from /api/auth/status; admins
@@ -77,8 +114,119 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
         });
       }
     } catch (_) { /* DOM not ready or unexpected shape — UI gates are non-fatal */ }
-  } catch (_) { /* anonymous / loopback mode — nothing to do */ }
+    return { username: liveUser, accountId };
+  } catch (_) { /* anonymous / loopback mode — nothing to do */ return null; }
 })();
+
+/* N01 first-use acknowledgement. The app bootstrap calls this only after its
+   session load succeeds and the loader has been removed. Server-side account
+   scope and the existing award ledger remain authoritative. */
+{
+  const MAX_ATTEMPTS = 3;
+  const RETRY_DELAYS = [750, 2000];
+  const SYSTEM_ACCOUNT = /^(?:local-installation|installer|maintenance|template[_-]seed|test[_-]fixture|import|background[_-]maintenance)$/i;
+  let accountId = '';
+  let shellMounted = false;
+  let attemptCount = 0;
+  let generation = 0;
+  let activeGeneration = -1;
+  let completedGeneration = -1;
+  let retryTimer = null;
+  let pendingEvent = null;
+
+  const shellIsUsable = () => {
+    const shell = document.getElementById('chat-container');
+    const composer = document.getElementById('message');
+    const loader = document.getElementById('app-loader');
+    if (!shell || !composer || loader?.isConnected || !document.body?.isConnected) return false;
+    const style = window.getComputedStyle(shell);
+    const bounds = shell.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && bounds.width > 0 && bounds.height > 0;
+  };
+
+  function resetAccount(nextId) {
+    if (nextId === accountId) return;
+    accountId = nextId;
+    generation += 1;
+    attemptCount = 0;
+    activeGeneration = -1;
+    completedGeneration = -1;
+    pendingEvent = null;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (shellMounted && accountId) void submitShellReady(generation);
+  }
+
+  function adoptAuthContext(context) {
+    adoptAchievementAccount(context);
+    const username = String(context?.username || '').trim();
+    const candidate = String(context?.accountId || '').trim();
+    const systemIdentity = SYSTEM_ACCOUNT.test(candidate) || SYSTEM_ACCOUNT.test(username);
+    resetAccount(username && candidate && !systemIdentity ? candidate : '');
+  }
+
+  function makeEvent() {
+    const id = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    return {
+      source_event_id: `shell.ready:${id}`,
+      event_family: 'shell.ready',
+      kind: 'U',
+      result: 'acknowledged',
+      actor_kind: 'user',
+      occurred_at: new Date().toISOString(),
+      facts: { accountResolved: true, visiblyMounted: true },
+    };
+  }
+
+  async function submitShellReady(expectedGeneration) {
+    if (!shellMounted || !accountId || !shellIsUsable()
+        || expectedGeneration !== generation
+        || activeGeneration === generation
+        || completedGeneration === generation
+        || attemptCount >= MAX_ATTEMPTS) return;
+    activeGeneration = generation;
+    attemptCount += 1;
+    pendingEvent ||= makeEvent();
+    try {
+      const response = await fetch('/api/copal/treehouse/achievements/events', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId, events: [pendingEvent] }),
+      });
+      if (!response.ok) throw new Error(`Achievement event failed (${response.status})`);
+      if (expectedGeneration === generation) {
+        completedGeneration = generation;
+        pendingEvent = null;
+        acknowledgeVisible(document.getElementById('chat-container'), 'surface.visited', { surface:'chat', visited:true }, { accountId });
+        void drainAchievementNotifications();
+      }
+    } catch (_) {
+      if (expectedGeneration === generation && attemptCount < MAX_ATTEMPTS) {
+        const delay = RETRY_DELAYS[Math.min(attemptCount - 1, RETRY_DELAYS.length - 1)];
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          void submitShellReady(expectedGeneration);
+        }, delay);
+      }
+    } finally {
+      if (activeGeneration === expectedGeneration) activeGeneration = -1;
+    }
+  }
+
+  document.addEventListener('openclank:auth-context-changed', (event) => {
+    adoptAuthContext(event.detail);
+  });
+  window.__odysseusAuthContextPromise?.then(adoptAuthContext, () => adoptAuthContext(null));
+  window.__openClankShellMounted = (sessionsLoaded) => {
+    if (sessionsLoaded !== true || !shellIsUsable()) return false;
+    shellMounted = true;
+    if (accountId) void submitShellReady(generation);
+    return true;
+  };
+}
 
 /* Sidebar section default-collapsed setup. The click-to-toggle handlers
    themselves live in js/section-management.js — attaching them in BOTH
@@ -169,39 +317,6 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
     new MutationObserver(_sync).observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
   }
   window.addEventListener('resize', _sync);
-}
-
-/* Keep minimized tool chips above the composer. Both the current modalManager
-   dock and the legacy fallback dock consume this root-level clearance. */
-{
-  const root = document.documentElement;
-  const chatBar = document.querySelector('.chat-input-bar');
-  const attachStrip = document.getElementById('attach-strip');
-  const chatContainer = document.getElementById('chat-container');
-  const _syncComposerClearance = () => {
-    let top = window.innerHeight;
-    for (const el of [attachStrip, chatBar]) {
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.height > 0) top = Math.min(top, rect.top);
-    }
-    const clearance = Math.max(12, Math.ceil(window.innerHeight - top + 8));
-    root.style.setProperty('--composer-clearance', clearance + 'px');
-  };
-  requestAnimationFrame(_syncComposerClearance);
-  if (typeof ResizeObserver !== 'undefined') {
-    const ro = new ResizeObserver(_syncComposerClearance);
-    if (chatBar) ro.observe(chatBar);
-    if (attachStrip) ro.observe(attachStrip);
-  }
-  if (chatContainer && typeof MutationObserver !== 'undefined') {
-    new MutationObserver(_syncComposerClearance).observe(chatContainer, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
-  }
-  if (chatBar) chatBar.addEventListener('transitionend', _syncComposerClearance);
-  window.addEventListener('resize', _syncComposerClearance);
 }
 
 /* ---- Resizable sidebar — drag edge to resize, collapse if small, drag rail edge to expand ---- */

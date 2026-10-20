@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import fs from "fs/promises"
 import path from "path"
 import { Cause, Effect, Exit, Layer } from "effect"
 import { GlobTool } from "../../src/tool/glob"
@@ -75,6 +76,35 @@ describe("tool.glob", () => {
           const err = Cause.squash(exit.cause)
           expect(err instanceof Error ? err.message : String(err)).toContain("glob path must be a directory")
         }
+      }),
+    ),
+  )
+
+  it.live("paginates without dropping paths", () =>
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        for (const name of ["a.ts", "b.ts", "c.ts"]) {
+          const file = path.join(dir, name)
+          yield* Effect.promise(() => Bun.write(file, name))
+          yield* Effect.promise(() => fs.utimes(file, 1_700_000_000, 1_700_000_000))
+        }
+        const info = yield* GlobTool
+        const glob = yield* info.init()
+        const first = yield* glob.execute({ pattern: "*.ts", path: dir, limit: 2 }, ctx)
+        const second = yield* glob.execute(
+          { pattern: "*.ts", path: dir, limit: 2, cursor: first.metadata.page.next_cursor },
+          ctx,
+        )
+
+        expect(first.metadata.page.has_more).toBe(true)
+        expect(first.metadata.file.contract).toBe("open-clank.file-result/v1")
+        expect(first.metadata.file.page.returned).toBe(2)
+        expect(first.metadata.file.truncation_reason).toBe("result_limit")
+        expect(second.metadata.page.has_more).toBe(false)
+        expect(new Set([...first.metadata.paths, ...second.metadata.paths]).size).toBe(3)
+        expect([...first.metadata.paths, ...second.metadata.paths]).toEqual(
+          ["a.ts", "b.ts", "c.ts"].map((name) => path.join(dir, name)),
+        )
       }),
     ),
   )

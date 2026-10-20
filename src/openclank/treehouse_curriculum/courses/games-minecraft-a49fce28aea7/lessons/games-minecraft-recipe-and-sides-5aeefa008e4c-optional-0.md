@@ -1,0 +1,1 @@
+Actual crafting accepts the intended ingredient and rejects the unrelated one; the response distinguishes client presentation from shared game rules.

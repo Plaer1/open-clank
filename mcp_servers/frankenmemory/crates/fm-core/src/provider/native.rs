@@ -1,14 +1,15 @@
 use async_trait::async_trait;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::FmConfig;
 use crate::curate;
 use crate::embed::EmbeddingClient;
+use crate::privacy::{content_hash, filter_json, filter_text};
 use crate::provider::*;
 use crate::record::*;
 use crate::retrieval;
-use crate::store::MemoryStore;
-use std::sync::Arc;
+use crate::store::{sqlite::SqliteStore, MemoryStore};
+use std::{sync::Arc, time::Duration};
 
 pub struct NativeProvider {
     store: Arc<dyn MemoryStore>,
@@ -113,30 +114,28 @@ impl NativeProvider {
             .as_sqlite()
             .ok_or_else(|| "authored ingest requires SQLite".to_string())?;
         let existing = sqlite.authored_records(owner, workspace_id, source_path)?;
-
-        let mut desired: std::collections::HashMap<String, (&str, &str)> =
-            std::collections::HashMap::new();
+        let existing_by_id: std::collections::HashMap<&str, &str> = existing
+            .iter()
+            .map(|(id, hash)| (id.as_str(), hash.as_str()))
+            .collect();
+        let mut filtered = Vec::new();
         for (anchor, content) in sections {
             let content = content.trim();
             if content.is_empty() {
                 continue;
             }
-            let hash = blake3::hash(content.as_bytes()).to_hex()[..24].to_string();
-            desired.entry(hash).or_insert((anchor.as_str(), content));
-        }
-
-        let existing_hashes: std::collections::HashSet<&str> =
-            existing.iter().map(|(_, hash)| hash.as_str()).collect();
-        let mut upserted = 0usize;
-        let mut unchanged = 0usize;
-        let mut unknowns_resolved: Vec<String> = Vec::new();
-        for (hash, (anchor, content)) in &desired {
-            if existing_hashes.contains(hash.as_str()) {
-                unchanged += 1;
+            let Some((content, _)) = filter_text(content) else {
                 continue;
-            }
-            let mut record = MemoryRecord::new(*content);
-            record.id = stable_id("authored", &[owner, workspace_id, source_path, hash]);
+            };
+            filtered.push((anchor.clone(), content));
+        }
+        let mut desired: Vec<MemoryRecord> = Vec::new();
+        let mut desired_index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (anchor, content) in filtered {
+            let hash = content_hash(&content);
+            let mut record = MemoryRecord::new(content);
+            record.id = stable_id("authored", &[owner, workspace_id, source_path, &anchor]);
             record.kind = MemoryKind::Wiki;
             record.owner = Some(owner.to_string());
             record.workspace_id = workspace_id.to_string();
@@ -146,33 +145,49 @@ impl NativeProvider {
             record.exempt_from_dedup = true;
             record.metadata = serde_json::json!({
                 "authored_path": source_path,
-                "anchor": anchor,
-                "content_hash": hash,
+                "anchor": anchor.clone(),
+                "content_hash": hash.clone(),
+                "source_uri": format!("file://{}#{}", source_path, anchor),
+                "source_type": "authored_file",
+                "source_revision": hash.clone(),
             });
-            self.store.upsert_curated(&record, None).await;
-            upserted += 1;
-            // Passive resolution (U7c): authored ingest is an admission
-            // site too.
-            unknowns_resolved.extend(curate::questions::resolve_against_open_unknowns(
-                self.store.as_ref(),
-                &record,
-            ));
-        }
-
-        let mut deleted = 0usize;
-        for (id, hash) in &existing {
-            if !desired.contains_key(hash) {
-                if self
-                    .delete_curated_record(id, Some(owner), Some(workspace_id))
-                    .await
-                {
-                    deleted += 1;
+            // One curated record per anchor: duplicate anchors in a single
+            // file collapse to one id, the last section winning — the same
+            // outcome the reconcile pass's sequential upserts would persist.
+            match desired_index.get(record.id.as_str()) {
+                Some(&index) => desired[index] = record,
+                None => {
+                    desired_index.insert(record.id.clone(), desired.len());
+                    desired.push(record);
                 }
             }
         }
+        let mut changed = Vec::new();
+        let mut unchanged = 0usize;
+        for record in &desired {
+            let hash = record
+                .metadata
+                .get("content_hash")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if existing_by_id.get(record.id.as_str()).copied() == Some(hash) {
+                unchanged += 1;
+            } else {
+                changed.push(record.clone());
+            }
+        }
+        let (_, deleted) =
+            sqlite.reconcile_authored_records(owner, workspace_id, source_path, &desired)?;
+        let mut unknowns_resolved: Vec<String> = Vec::new();
+        for record in &changed {
+            unknowns_resolved.extend(curate::questions::resolve_against_open_unknowns(
+                self.store.as_ref(),
+                record,
+            ));
+        }
 
         Ok(serde_json::json!({
-            "upserted": upserted,
+            "upserted": changed.len(),
             "unchanged": unchanged,
             "deleted": deleted,
             "total": desired.len(),
@@ -231,6 +246,35 @@ impl NativeProvider {
             .as_sqlite()
             .ok_or_else(|| "candidate inspection requires SQLite".to_string())?
             .list_candidates(owner, workspace_id, status, limit)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn update_candidate(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace_id: &str,
+        content: &str,
+        kind: Option<MemoryKind>,
+        reason: &str,
+    ) -> Result<Option<CandidateRecord>, String> {
+        self.store
+            .as_sqlite()
+            .ok_or_else(|| "candidate editing requires SQLite".to_string())?
+            .update_pending_candidate(id, owner, workspace_id, content, kind, reason)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn reopen_unknown(
+        &self,
+        id: &str,
+        owner: &str,
+        workspace_id: &str,
+    ) -> Result<bool, String> {
+        self.store
+            .as_sqlite()
+            .ok_or_else(|| "question reopening requires SQLite".to_string())?
+            .reopen_curated_unknown(id, owner, workspace_id)
             .map_err(|error| error.to_string())
     }
 
@@ -308,8 +352,8 @@ impl NativeProvider {
         if let Some(existing) = candidate.accepted_curated_id {
             return Ok(Some(existing));
         }
-        if prefilter_candidate(&candidate.content, &candidate.evidence_role).is_some() {
-            return Err("candidate still fails deterministic admission policy".into());
+        if candidate.status != CandidateStatus::Pending {
+            return Err("only pending candidates can be accepted".into());
         }
         let curated_id = stable_id("m", &[id]);
         let mut record = MemoryRecord::new(&candidate.content);
@@ -325,26 +369,23 @@ impl NativeProvider {
         record.session_id = candidate.session_id.clone();
         record.session_key = candidate.session_id.clone();
         record.metadata = serde_json::json!({
-            "candidate_id": candidate.id,
-            "turn_id": candidate.turn_id,
-            "raw_evidence_ids": candidate.raw_evidence_ids,
+            "candidate_id": candidate.id.clone(),
+            "turn_id": candidate.turn_id.clone(),
+            "raw_evidence_ids": candidate.raw_evidence_ids.clone(),
             "admission_reason": reason,
             "manually_reviewed": true,
+            "source_uri": candidate.source_uri.clone(),
+            "source_revision": candidate.source_revision,
+            "content_hash": candidate.content_hash.clone(),
         });
+        record.source_message_ids = candidate.source_message_ids.clone();
         let embedding = self.embed.embed(&candidate.content).await.ok();
-        if !self
-            .store
-            .upsert_curated(&record, embedding.as_deref())
-            .await
-        {
-            return Err("failed to persist accepted curated memory".into());
-        }
         sqlite
-            .set_candidate_status(
+            .accept_candidate_transaction(
                 id,
-                CandidateStatus::Accepted,
+                &record,
+                embedding.as_deref(),
                 reason,
-                Some(&curated_id),
                 owner,
                 workspace_id,
             )
@@ -517,6 +558,26 @@ fn metadata_strings(metadata: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn capture_source_type(turn: &CompletedTurn, capture_mode: &str) -> SourceType {
+    let declared = metadata_string(&turn.metadata, "source_type")
+        .trim()
+        .to_lowercase();
+    let source = turn.source.trim().to_lowercase();
+    match declared.as_str() {
+        "human" | "user" | "user_created" => SourceType::Human,
+        "ai" | "ai_agent" | "agent_explicit" => SourceType::Ai,
+        "procedural" => SourceType::Procedural,
+        "auto_extracted" | "odysseus" => SourceType::AutoExtracted,
+        _ => match source.as_str() {
+            "user" | "user_created" => SourceType::Human,
+            "ai_agent" | "agent_explicit" => SourceType::Ai,
+            "odysseus" | "auto_extracted" => SourceType::AutoExtracted,
+            _ if capture_mode == "manual" => SourceType::Human,
+            _ => SourceType::AutoExtracted,
+        },
+    }
+}
+
 #[async_trait]
 impl MemoryProvider for NativeProvider {
     fn id(&self) -> &str {
@@ -549,8 +610,30 @@ impl MemoryProvider for NativeProvider {
             };
         }
 
-        let has_user = !turn.user_text.trim().is_empty();
-        let has_assistant = !turn.assistant_text.trim().is_empty();
+        let filtered_user = filter_text(&turn.user_text);
+        let filtered_assistant = filter_text(&turn.assistant_text);
+        let user_text = filtered_user
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .unwrap_or_default();
+        let assistant_text = filtered_assistant
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .unwrap_or_default();
+        let has_user = !user_text.trim().is_empty();
+        let has_assistant = !assistant_text.trim().is_empty();
+        if let Some(sqlite) = self.store.as_sqlite() {
+            let redacted = filtered_user.as_ref().is_some_and(|(_, changed)| *changed)
+                || filtered_assistant
+                    .as_ref()
+                    .is_some_and(|(_, changed)| *changed);
+            if redacted {
+                sqlite.metric_add("privacy_values_redacted", 1);
+            }
+            if filtered_user.is_none() || filtered_assistant.is_none() {
+                sqlite.metric_add("privacy_values_not_stored", 1);
+            }
+        }
         if !has_user && !has_assistant {
             return CaptureResult {
                 records_captured: 0,
@@ -577,13 +660,18 @@ impl MemoryProvider for NativeProvider {
                     effective_owner,
                     effective_workspace,
                     &turn.session_id,
-                    &turn.user_text,
-                    &turn.assistant_text,
+                    user_text,
+                    assistant_text,
                 ],
             );
         }
         let turn_id = stable_id("turn", &[&source_event_id]);
-        let mut metadata = turn.metadata.clone();
+        let (mut metadata, metadata_redactions) = filter_json(&turn.metadata);
+        if metadata_redactions > 0 {
+            if let Some(sqlite) = self.store.as_sqlite() {
+                sqlite.metric_add("privacy_metadata_values_redacted", metadata_redactions);
+            }
+        }
         if !metadata.is_object() {
             metadata = serde_json::json!({});
         }
@@ -595,13 +683,49 @@ impl MemoryProvider for NativeProvider {
                 serde_json::json!(source_message_ids),
             );
         }
+        let extraction_holder = format!("capture:{}:{}", turn_id, generate_id());
+        let _extraction_lease = match self.store.as_sqlite() {
+            Some(sqlite) => match sqlite.acquire_memory_lease(
+                "extraction",
+                effective_owner,
+                effective_workspace,
+                &source_event_id,
+                &extraction_holder,
+                Duration::from_secs(300),
+            ) {
+                Ok(Some(lease)) => Some(lease),
+                Ok(None) => {
+                    sqlite.metric_add("extraction_lease_contention", 1);
+                    return CaptureResult {
+                        records_captured: 0,
+                        record_ids: vec![],
+                        vectors_written: 0,
+                        providers_succeeded: 1,
+                        providers_failed: 0,
+                        unknowns_resolved: Vec::new(),
+                    };
+                }
+                Err(error) => {
+                    warn!("memory extraction lease failed: {error}");
+                    return CaptureResult {
+                        records_captured: 0,
+                        record_ids: vec![],
+                        vectors_written: 0,
+                        providers_succeeded: 0,
+                        providers_failed: 1,
+                        unknowns_resolved: Vec::new(),
+                    };
+                }
+            },
+            None => None,
+        };
 
         let mut records_captured = 0usize;
         let mut record_ids = Vec::new();
-        let mut raw_ids = Vec::new();
+        let mut raw_ids_by_role = std::collections::HashMap::new();
         for (role, content, message_index) in [
-            ("user", turn.user_text.as_str(), 0usize),
-            ("assistant", turn.assistant_text.as_str(), 1usize),
+            ("user", user_text, 0usize),
+            ("assistant", assistant_text, 1usize),
         ] {
             if content.trim().is_empty() {
                 continue;
@@ -617,12 +741,27 @@ impl MemoryProvider for NativeProvider {
             if let Some(object) = raw.metadata.as_object_mut() {
                 if let Some(message_id) = source_message_ids.get(message_index) {
                     object.insert("source_message_id".into(), message_id.clone().into());
+                    object.insert(
+                        "source_uri".into(),
+                        format!(
+                            "message://{}/{}/{}",
+                            effective_owner, turn.session_id, message_id
+                        )
+                        .into(),
+                    );
+                } else {
+                    object.insert(
+                        "source_uri".into(),
+                        format!("event://{}/{}#{}", effective_owner, source_event_id, role).into(),
+                    );
                 }
+                object.insert("source_type".into(), "conversation_message".into());
+                object.insert("source_revision".into(), 1.into());
+                object.insert("content_hash".into(), content_hash(content).into());
             }
             let raw_id = raw.id.clone();
             if self.store.upsert_raw(&raw, None).await {
                 records_captured += 1;
-                raw_ids.push(raw_id.clone());
                 if let Some(sqlite) = self.store.as_sqlite() {
                     sqlite.metric_add("raw_rows_written", 1);
                     sqlite.metric_add("raw_embeddings_avoided", 1);
@@ -630,6 +769,7 @@ impl MemoryProvider for NativeProvider {
             } else if let Some(sqlite) = self.store.as_sqlite() {
                 sqlite.metric_add("dedup_hits", 1);
             }
+            raw_ids_by_role.insert(role, raw_id.clone());
             record_ids.push(raw_id);
         }
 
@@ -646,10 +786,30 @@ impl MemoryProvider for NativeProvider {
         }
 
         let (content, evidence_role) = if has_user {
-            (turn.user_text.trim(), "user")
+            (user_text.trim(), "user")
         } else {
-            (turn.assistant_text.trim(), "assistant")
+            (assistant_text.trim(), "assistant")
         };
+        let evidence_message_index = usize::from(evidence_role == "assistant");
+        let evidence_message_ids: Vec<String> = source_message_ids
+            .get(evidence_message_index)
+            .cloned()
+            .into_iter()
+            .collect();
+        let evidence_source_uri = evidence_message_ids
+            .first()
+            .map(|message_id| {
+                format!(
+                    "message://{}/{}/{}",
+                    effective_owner, turn.session_id, message_id
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "event://{}/{}#{}",
+                    effective_owner, source_event_id, evidence_role
+                )
+            });
         // Open questions (kind=unknown) are human-minted only: explicit
         // category plus manual admission, everything else rejected here.
         // The question is normalized BEFORE the dedup key so the stored
@@ -669,14 +829,17 @@ impl MemoryProvider for NativeProvider {
             content
         };
         let manual = capture_mode == "manual";
+        let review_only = capture_mode == "review_only";
         let rejection = if question {
             if content.is_empty() {
                 Some("empty_question")
-            } else if !manual {
+            } else if !manual && !review_only {
                 Some("unknown_kind_requires_manual")
             } else {
                 None
             }
+        } else if manual || (review_only && explicit_kind.is_some()) {
+            None
         } else {
             prefilter_candidate(content, evidence_role)
         };
@@ -692,6 +855,8 @@ impl MemoryProvider for NativeProvider {
             .unwrap_or(MemoryKind::Episodic);
         let admission_reason = if manual {
             Some("manual_admission")
+        } else if review_only {
+            None
         } else {
             auto_admission.map(|(reason, _, _, _)| reason)
         };
@@ -718,11 +883,19 @@ impl MemoryProvider for NativeProvider {
             workspace_path: turn.workspace_path.clone(),
             session_id: turn.session_id.clone(),
             turn_id: turn_id.clone(),
-            raw_evidence_ids: raw_ids,
+            raw_evidence_ids: raw_ids_by_role
+                .get(evidence_role)
+                .cloned()
+                .into_iter()
+                .collect(),
             evidence_role: evidence_role.to_string(),
             source: turn.source.clone(),
-            source_event_id,
+            source_event_id: source_event_id.clone(),
             dedup_key: dedup_key.clone(),
+            source_uri: evidence_source_uri.clone(),
+            source_revision: 1,
+            content_hash: content_hash(content),
+            source_message_ids: evidence_message_ids.clone(),
             status: if rejection.is_some() {
                 CandidateStatus::Rejected
             } else {
@@ -753,19 +926,36 @@ impl MemoryProvider for NativeProvider {
             }
             Ok(false) => {
                 sqlite.metric_add("dedup_hits", 1);
-                if let Ok(Some(existing)) = sqlite.candidate_by_dedup(&dedup_key) {
-                    if let Some(id) = existing.accepted_curated_id {
+                let existing = sqlite.candidate_by_dedup(&dedup_key).ok().flatten();
+                let mut resume_admission = false;
+                if let Some(found) = &existing {
+                    if let Some(id) = found.accepted_curated_id.clone() {
                         record_ids.insert(0, id);
+                    } else if review_only {
+                        // Candidate identity is deterministic, so a retry of an
+                        // interrupted review capture returns the same pending
+                        // candidate instead of an empty, undiagnosable result.
+                        record_ids.push(found.id.clone());
+                    } else if manual && found.status != CandidateStatus::Rejected {
+                        // A prior capture committed the candidate but died
+                        // before admission. Resume admission below instead of
+                        // dead-ending every retry on an empty result.
+                        resume_admission = true;
                     }
                 }
-                return CaptureResult {
-                    records_captured,
-                    record_ids,
-                    vectors_written: 0,
-                    providers_succeeded: 1,
-                    providers_failed: 0,
-                    unknowns_resolved: Vec::new(),
-                };
+                if !resume_admission {
+                    return CaptureResult {
+                        records_captured,
+                        record_ids,
+                        vectors_written: 0,
+                        providers_succeeded: 1,
+                        providers_failed: 0,
+                        unknowns_resolved: Vec::new(),
+                    };
+                }
+                if let Some(found) = existing {
+                    candidate = found;
+                }
             }
             Err(error) => {
                 tracing::warn!("candidate insert failed: {error}");
@@ -810,6 +1000,14 @@ impl MemoryProvider for NativeProvider {
         if let Some(object) = record.metadata.as_object_mut() {
             object.insert("candidate_id".into(), candidate_id.clone().into());
             object.insert("admission_reason".into(), admission_reason.into());
+            object.insert(
+                "raw_evidence_ids".into(),
+                serde_json::json!(candidate.raw_evidence_ids.clone()),
+            );
+            object.insert("source_uri".into(), evidence_source_uri.into());
+            object.insert("source_type".into(), "conversation_turn".into());
+            object.insert("source_revision".into(), 1.into());
+            object.insert("content_hash".into(), content_hash(content).into());
             if let Some((_, _, category, pinned)) = auto_admission {
                 object.entry("category").or_insert_with(|| category.into());
                 if pinned {
@@ -818,13 +1016,13 @@ impl MemoryProvider for NativeProvider {
             }
         }
         record.source = turn.source.clone();
-        record.source_type = SourceType::Human;
+        record.source_type = capture_source_type(turn, capture_mode);
         record.owner = Some(effective_owner.to_string());
         record.workspace_id = effective_workspace.to_string();
         record.workspace_path = turn.workspace_path.clone();
         record.session_key = turn.session_key.clone();
         record.session_id = turn.session_id.clone();
-        record.source_message_ids = source_message_ids;
+        record.source_message_ids = evidence_message_ids;
         record.confidence_score = candidate.confidence_score;
         record.importance_score = candidate.importance_score;
         if auto_admission.is_some_and(|(_, _, _, pinned)| pinned) {
@@ -834,30 +1032,28 @@ impl MemoryProvider for NativeProvider {
 
         let embedding = self.embed.embed(content).await.ok();
         let mut unknowns_resolved = Vec::new();
-        if self
-            .store
-            .upsert_curated(&record, embedding.as_deref())
-            .await
-        {
+        let accepted = sqlite.accept_candidate_transaction(
+            &candidate_id,
+            &record,
+            embedding.as_deref(),
+            admission_reason,
+            effective_owner,
+            effective_workspace,
+        );
+        if accepted.is_ok() {
             records_captured += 1;
             record_ids.insert(0, curated_id.clone());
             sqlite.metric_add("candidates_accepted", 1);
             if embedding.is_some() {
                 sqlite.metric_add("curated_embeddings_written", 1);
             }
-            let _ = sqlite.set_candidate_status(
-                &candidate_id,
-                CandidateStatus::Accepted,
-                admission_reason,
-                Some(&curated_id),
-                effective_owner,
-                effective_workspace,
-            );
             candidate.status = CandidateStatus::Accepted;
             // Passive resolution (U7c) fires at admission only — never
             // from maintenance passes.
             unknowns_resolved =
                 curate::questions::resolve_against_open_unknowns(self.store.as_ref(), &record);
+        } else if let Err(error) = accepted {
+            warn!("candidate admission transaction failed: {error}");
         }
 
         CaptureResult {
@@ -943,6 +1139,33 @@ impl MemoryProvider for NativeProvider {
                 || hit.record.workspace_id == "global";
             owner_ok && workspace_ok
         });
+        for hit in &mut results {
+            if !hit.record.metadata.is_object() {
+                hit.record.metadata = serde_json::json!({});
+            }
+            if let Some(metadata) = hit.record.metadata.as_object_mut() {
+                let explanation = metadata.entry("recall_explanation").or_insert_with(|| {
+                    serde_json::json!({
+                        "strategy": hit.source_label,
+                        "lexical_rrf": if hit.source_label.contains("fts") {
+                            Some(hit.score)
+                        } else {
+                            None
+                        },
+                        "vector_rrf": if hit.source_label.contains("vector") {
+                            Some(hit.score)
+                        } else {
+                            None
+                        },
+                        "graph": 0.0,
+                    })
+                });
+                if let Some(explanation) = explanation.as_object_mut() {
+                    explanation.insert("final_score".into(), hit.score.into());
+                    explanation.insert("source_label".into(), hit.source_label.clone().into());
+                }
+            }
+        }
 
         let (prepend_context, gt_preamble) =
             retrieval::ground_truth::format_recall_output(&results, &q.query);
@@ -1025,19 +1248,64 @@ impl MemoryProvider for NativeProvider {
     }
 
     async fn groom(&self, op: &GroomOpArgs) -> GroomResult {
+        let maintenance_scope = || -> Result<(&SqliteStore, &str, &str), String> {
+            let owner = op
+                .owner
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "authenticated owner is required".to_string())?;
+            let workspace_id = op
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "workspace_id is required".to_string())?;
+            let sqlite = self
+                .store
+                .as_sqlite()
+                .ok_or_else(|| "tenant-safe maintenance requires SQLite".to_string())?;
+            Ok((sqlite, owner, workspace_id))
+        };
+        let failed = |message: String| GroomResult {
+            op: op.op,
+            records_archived: 0,
+            records_merged: 0,
+            records_reflected: 0,
+            records_selected: 0,
+            records_changed: 0,
+            records_skipped: 0,
+            records_conflicted: 0,
+            alerts: vec![message],
+        };
+
         match op.op {
-            GroomOp::Decay => {
-                curate::decay::run_decay(
-                    self.store.as_ref(),
-                    &self.config.decay,
-                    op.workspace_id.as_deref(),
-                )
-                .await
-            }
-            GroomOp::Dedup => {
-                curate::dedup::run_dedup(self.store.as_ref(), &self.embed, op.dry_run).await
-            }
-            GroomOp::Reflect => curate::reflect::run_reflect(self.store.as_ref()).await,
+            GroomOp::Decay => match maintenance_scope() {
+                Ok((store, owner, workspace_id)) => {
+                    curate::decay::run_decay(
+                        store,
+                        &self.config.decay,
+                        owner,
+                        workspace_id,
+                        op.dry_run,
+                    )
+                    .await
+                }
+                Err(error) => failed(error),
+            },
+            GroomOp::Dedup => match maintenance_scope() {
+                Ok((store, owner, workspace_id)) => {
+                    curate::dedup::run_dedup(store, &self.embed, owner, workspace_id, op.dry_run)
+                        .await
+                }
+                Err(error) => failed(error),
+            },
+            GroomOp::Reflect => match maintenance_scope() {
+                Ok((store, owner, workspace_id)) => {
+                    curate::reflect::run_reflect(store, owner, workspace_id, op.dry_run).await
+                }
+                Err(error) => failed(error),
+            },
             GroomOp::PromoteUnknowns => {
                 curate::questions::run_promote_unknowns(
                     self.store.as_ref(),
@@ -1052,6 +1320,10 @@ impl MemoryProvider for NativeProvider {
                     records_archived: 0,
                     records_merged: 0,
                     records_reflected: 0,
+                    records_selected: 0,
+                    records_changed: 0,
+                    records_skipped: 0,
+                    records_conflicted: 0,
                     alerts: vec![],
                 };
                 match self.store.as_sqlite() {
@@ -1082,6 +1354,10 @@ impl MemoryProvider for NativeProvider {
                     records_archived: 0,
                     records_merged: 0,
                     records_reflected: 0,
+                    records_selected: 0,
+                    records_changed: 0,
+                    records_skipped: 0,
+                    records_conflicted: 0,
                     alerts: vec![],
                 };
                 match self.store.as_sqlite() {
@@ -1143,6 +1419,26 @@ mod tests {
 
     fn turn(user: &str, assistant: &str) -> CompletedTurn {
         turn_with_mode(user, assistant, "raw_only", "evt-default")
+    }
+
+    #[tokio::test]
+    async fn maintenance_without_authenticated_scope_fails_closed() {
+        let (provider, store) = provider();
+        let result = provider
+            .groom(&GroomOpArgs {
+                op: GroomOp::Decay,
+                owner: None,
+                workspace_id: Some("global".into()),
+                dry_run: false,
+            })
+            .await;
+
+        assert_eq!(result.records_archived, 0);
+        assert_eq!(result.alerts, vec!["authenticated owner is required"]);
+        assert!(store
+            .search_curated_fts_scoped("", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1270,6 +1566,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_capture_resumes_admission_for_pending_candidate() {
+        let (p, store) = provider();
+        // A review_only capture commits a pending candidate. If the process
+        // dies before admission (or the capture mode changes), the next
+        // manual capture of the same content dedup-hits that candidate.
+        let mut review = turn_with_mode("Saturn", "", "review_only", "evt-resume-review");
+        review.category = Some("fact".into());
+        let proposed = p.capture(&review).await;
+        assert!(proposed.record_ids.iter().any(|id| id.starts_with("candidate_")));
+
+        // The manual capture must resume admission of the pending candidate
+        // instead of dead-ending every retry on an empty result.
+        let manual = turn_with_mode("Saturn", "", "manual", "evt-resume-manual");
+        let admitted = p.capture(&manual).await;
+        let curated_id = admitted.record_ids.first().unwrap().clone();
+        assert!(curated_id.starts_with("m_"));
+        // One new raw row (new source event) plus the resumed admission.
+        assert_eq!(admitted.records_captured, 2);
+        assert_eq!(
+            store
+                .search_curated_fts_scoped("Saturn", 10, Some("alice"), Some("workspace-test"))
+                .await
+                .len(),
+            1
+        );
+
+        // A replay of the manual capture now adopts the accepted curated id.
+        let replay = p.capture(&manual).await;
+        assert_eq!(replay.records_captured, 0);
+        assert_eq!(replay.record_ids.first().unwrap(), &curated_id);
+    }
+
+    #[tokio::test]
+    async fn candidate_provenance_points_only_at_its_evidence_message() {
+        let (p, store) = provider();
+        let mut candidate_turn = turn_with_mode(
+            "Alice prefers the cobalt syntax theme",
+            "I will remember that preference.",
+            "review_only",
+            "evt-provenance",
+        );
+        candidate_turn.metadata["source_message_ids"] =
+            serde_json::json!(["message-user", "message-assistant"]);
+        p.capture(&candidate_turn).await;
+        let candidates = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.evidence_role, "user");
+        assert_eq!(candidate.raw_evidence_ids.len(), 1);
+        assert_eq!(
+            candidate.source_message_ids,
+            vec!["message-user".to_string()]
+        );
+        assert!(candidate.source_uri.ends_with("/message-user"));
+        assert_eq!(
+            candidate.content_hash,
+            crate::privacy::content_hash(&candidate.content)
+        );
+    }
+
+    #[tokio::test]
+    async fn short_manual_fact_returns_curated_id_and_is_recallable() {
+        let (p, _) = provider();
+        let mut manual = turn_with_mode("Saturn", "", "manual", "evt-manual-short-fact");
+        manual.category = Some("fact".into());
+        manual.source = "ai_agent".into();
+        manual.metadata["source_type"] = "ai".into();
+
+        let captured = p.capture(&manual).await;
+        let curated_id = captured.record_ids.first().unwrap().clone();
+        assert!(curated_id.starts_with("m_"));
+
+        let recalled = p
+            .recall(&RecallQuery {
+                query: "Saturn".into(),
+                workspace_id: Some("workspace-test".into()),
+                owner: Some("alice".into()),
+                ..RecallQuery::default()
+            })
+            .await;
+        let hit = recalled
+            .memories
+            .iter()
+            .find(|hit| hit.record.id == curated_id && hit.record.content == "Saturn")
+            .unwrap();
+        assert_eq!(hit.record.source_type, SourceType::Ai);
+    }
+
+    #[tokio::test]
+    async fn explicit_review_only_short_fact_is_pending_but_automatic_short_turn_is_rejected() {
+        let (p, store) = provider();
+        let mut deliberate = turn_with_mode("Saturn", "", "review_only", "evt-review-short-fact");
+        deliberate.category = Some("fact".into());
+        let proposed = p.capture(&deliberate).await;
+        assert!(proposed.record_ids.iter().all(|id| !id.starts_with("m_")));
+
+        let mut question = turn_with_mode(
+            "favorite color",
+            "",
+            "review_only",
+            "evt-review-short-question",
+        );
+        question.category = Some("unknown".into());
+        let proposed_question = p.capture(&question).await;
+        assert!(proposed_question
+            .record_ids
+            .iter()
+            .all(|id| !id.starts_with("m_")));
+
+        let automatic = turn_with_mode("Venus", "", "review_only", "evt-review-short-auto");
+        p.capture(&automatic).await;
+
+        let pending = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+            .unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|candidate| {
+            candidate.content == "Saturn" && candidate.reason == "awaiting_review"
+        }));
+        assert!(pending.iter().any(|candidate| {
+            candidate.content == "favorite color?"
+                && candidate.kind == MemoryKind::Unknown
+                && candidate.reason == "awaiting_review"
+        }));
+        let rejected = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("rejected"), 10)
+            .unwrap();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].content, "Venus");
+        assert_eq!(rejected[0].reason, "empty_or_short_acknowledgement");
+
+        let saturn = pending
+            .iter()
+            .find(|candidate| candidate.content == "Saturn")
+            .unwrap();
+        let curated_id = p
+            .review_candidate(
+                &saturn.id,
+                true,
+                "explicitly approved",
+                "alice",
+                "workspace-test",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(curated_id.starts_with("m_"));
+        let approved = store
+            .search_curated_fts_scoped("Saturn", 10, Some("alice"), Some("workspace-test"))
+            .await;
+        assert_eq!(approved.len(), 1);
+        assert_eq!(approved[0].record.source_type, SourceType::Human);
+
+        assert!(p
+            .review_candidate(
+                &rejected[0].id,
+                true,
+                "must remain rejected",
+                "alice",
+                "workspace-test",
+            )
+            .await
+            .is_err());
+        assert!(store
+            .search_curated_fts_scoped("Venus", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn manual_unknown_add_stores_normalized_question() {
         let (p, store) = provider();
         let mut add = turn_with_mode("users name", "", "manual", "evt-unknown-manual");
@@ -1361,10 +1829,7 @@ mod tests {
         let mut ask = turn_with_mode("users name??", "", "manual", "evt-q");
         ask.category = Some("unknown".into());
         p.capture(&ask).await;
-        assert_eq!(
-            store.list_open_unknowns("alice", None).unwrap().len(),
-            1
-        );
+        assert_eq!(store.list_open_unknowns("alice", None).unwrap().len(), 1);
 
         let answer = turn_with_mode(
             "my name is eliott; but when we're chatting like this you can probably just call me \"e\"",
@@ -1384,14 +1849,14 @@ mod tests {
     #[tokio::test]
     async fn safe_user_claim_auto_admits_and_identity_is_pinned() {
         let (p, store) = provider();
-        let result = p
-            .capture(&turn_with_mode(
-                "My name is Alice",
-                "Nice to meet you.",
-                "candidate",
-                "evt-identity",
-            ))
-            .await;
+        let mut automatic = turn_with_mode(
+            "My name is Alice",
+            "Nice to meet you.",
+            "candidate",
+            "evt-identity",
+        );
+        automatic.source = "odysseus".into();
+        let result = p.capture(&automatic).await;
         assert!(result
             .record_ids
             .first()
@@ -1402,6 +1867,7 @@ mod tests {
             .await;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].record.kind, MemoryKind::Persona);
+        assert_eq!(hits[0].record.source_type, SourceType::AutoExtracted);
         assert_eq!(hits[0].record.metadata["pinned"], true);
         assert!(hits[0].record.exempt_from_decay);
         assert_eq!(
@@ -1411,6 +1877,36 @@ mod tests {
                 .reason,
             "auto_identity_claim"
         );
+    }
+
+    #[tokio::test]
+    async fn review_only_capture_stays_pending_when_claim_would_auto_admit() {
+        let (p, store) = provider();
+        let result = p
+            .capture(&turn_with_mode(
+                "My name is Alice",
+                "Nice to meet you.",
+                "review_only",
+                "evt-review-only-identity",
+            ))
+            .await;
+
+        assert!(
+            result.record_ids.iter().all(|id| !id.starts_with("m_")),
+            "review-only capture must not create a curated record"
+        );
+        assert_eq!(result.vectors_written, 0);
+        assert!(store
+            .search_curated_fts_scoped("Alice", 10, Some("alice"), Some("workspace-test"))
+            .await
+            .is_empty());
+
+        let pending = store
+            .list_candidates(Some("alice"), Some("workspace-test"), Some("pending"), 10)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].reason, "awaiting_review");
+        assert_eq!(pending[0].kind, MemoryKind::Persona);
     }
 
     #[tokio::test]
@@ -1509,7 +2005,7 @@ mod tests {
         assert_eq!(hits[0].record.source, "authored");
         assert!(hits[0].record.exempt_from_decay);
 
-        // Edit one section → replaced (old gone, new present), other kept.
+        // Edit one section → stable source identity updates in place.
         let v2 = sections(&[
             ("Preferences", "e prefers oolong tea over coffee"),
             ("Build", "the build needs FM_DB_PATH set"),
@@ -1519,7 +2015,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(third["upserted"], 1);
-        assert_eq!(third["deleted"], 1);
+        assert_eq!(third["deleted"], 0);
         assert!(store
             .search_curated_fts_scoped("green", 10, Some("alice"), Some("global"))
             .await
@@ -1651,5 +2147,88 @@ mod tests {
         let (p, _store) = provider();
         let result = p.capture(&turn("", "  ")).await;
         assert_eq!(result.records_captured, 0);
+    }
+
+    #[tokio::test]
+    async fn authored_ingest_collapses_duplicate_anchors() {
+        let (p, store) = provider();
+        let path = "/data/memory/global/MEMORY.md";
+        // Two sections under the same anchor share one record id: the
+        // desired set must collapse them instead of double-counting.
+        let dupes = sections(&[
+            ("Preferences", "e prefers green tea over coffee"),
+            ("Build", "the build needs FM_DB_PATH set"),
+            ("Preferences", "e prefers oolong tea over coffee"),
+        ]);
+
+        let result = p.ingest_authored("alice", "global", path, &dupes).await.unwrap();
+        assert_eq!(result["total"], 2, "duplicate anchors collapse to one id");
+        assert_eq!(result["upserted"], 2);
+
+        // The last duplicate section wins, matching reconcile upsert order.
+        assert!(store
+            .search_curated_fts_scoped("green", 10, Some("alice"), Some("global"))
+            .await
+            .is_empty());
+        let hits = store
+            .search_curated_fts_scoped("oolong", 10, Some("alice"), Some("global"))
+            .await;
+        assert_eq!(hits.len(), 1, "exactly one record for the anchor");
+
+        // Re-ingest is idempotent against the collapsed projection.
+        let again = p.ingest_authored("alice", "global", path, &dupes).await.unwrap();
+        assert_eq!(again["upserted"], 0);
+        assert_eq!(again["unchanged"], 2);
+    }
+
+    #[tokio::test]
+    async fn capture_outcome_metrics_distinguish_privacy_block_from_lease_contention() {
+        let (p, store) = provider();
+
+        // Privacy-blocked turn: both sides carry a no-store marker, so the
+        // capture aborts before any lease is taken.
+        let blocked = p
+            .capture(&turn(
+                "[memory:no-store] do not persist",
+                "<no-memory> do not persist",
+            ))
+            .await;
+        assert_eq!(blocked.records_captured, 0);
+        let metrics = store.quality_status().unwrap();
+        assert_eq!(metrics["metrics"]["privacy_values_not_stored"], 1);
+        assert!(
+            metrics["metrics"].get("extraction_lease_contention").is_none(),
+            "a privacy block is not lease contention"
+        );
+
+        // Lease contention: another holder owns the extraction lease for
+        // this event, so the capture defers without privacy accounting.
+        let lease = store
+            .acquire_memory_lease(
+                "extraction",
+                "alice",
+                "workspace-test",
+                "evt-contended",
+                "other-holder",
+                Duration::from_secs(300),
+            )
+            .unwrap()
+            .expect("first holder acquires");
+        std::mem::forget(lease);
+        let contended = p
+            .capture(&turn_with_mode(
+                "the observatory logs a transit",
+                "recorded",
+                "raw_only",
+                "evt-contended",
+            ))
+            .await;
+        assert_eq!(contended.records_captured, 0);
+        let metrics = store.quality_status().unwrap();
+        assert_eq!(metrics["metrics"]["extraction_lease_contention"], 1);
+        assert_eq!(
+            metrics["metrics"]["privacy_values_not_stored"], 1,
+            "lease contention is not a privacy block"
+        );
     }
 }

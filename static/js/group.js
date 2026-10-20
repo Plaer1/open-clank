@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/group.js
 // Group Chat — multi-model conversations (parallel or round-robin)
 
@@ -9,6 +10,12 @@ import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js';
 import { sortModelObjects } from './modelSort.js';
 import Storage from './storage.js';
+import { catalogEntries } from './modelCatalog.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
 
 let API_BASE = '';
 let _active = false;
@@ -122,8 +129,8 @@ function _initGroupTab() {
 
   // Mode toggle — same style as Compare's parallel button
   if (modeBtn) {
-    const ICON_PAR = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
-    const ICON_SEQ = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor"/><circle cx="4" cy="12" r="1.5" fill="currentColor"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/></svg>';
+    const ICON_PAR = uiIcon("menu", 18);
+    const ICON_SEQ = uiIcon("list", 18);
     modeBtn.addEventListener('click', () => {
       _mode = _mode === 'parallel' ? 'round-robin' : 'parallel';
       modeBtn.classList.toggle('active', _mode === 'parallel');
@@ -464,11 +471,27 @@ export async function showModelPicker() {
       const seen = new Set();
       items.forEach(item => {
         if (item.offline) return;
-        (item.models || []).concat(item.models_extra || []).forEach((mid, i) => {
+        catalogEntries(item).forEach(entry => {
+          const mid = entry.mid;
           if (seen.has(mid)) return;
           seen.add(mid);
-          const display = ((item.models_display || []).concat(item.models_extra_display || []))[i] || mid;
-          result.push({ mid, display: display.split('/').pop(), url: item.url, endpointId: item.endpoint_id, epName: item.endpoint_name || '' });
+          const provider = providerDisplayName(
+            entry.providerDisplayName || item.provider_display_name || entry.family,
+          );
+          const secondary = sharedSecondaryLabel({
+            label: item.share_label,
+            owner: item.shared_by,
+          });
+          const epName = item.shared === true
+            ? [sharedProviderLabel(provider), secondary].filter(Boolean).join(' · ')
+            : (item.endpoint_name || '');
+          result.push({
+            mid,
+            display: (entry.displayName || mid).split('/').pop(),
+            url: item.url,
+            endpointId: item.endpoint_id,
+            epName,
+          });
         });
       });
       _cachedModels = sortModelObjects(result);
@@ -949,7 +972,7 @@ async function _streamToHolder(modelIdx, sessionId, msg, holderEl, abortCtrl) {
     bodyEl.innerHTML = markdownModule.processWithThinking(
       markdownModule.squashOutsideCode(accumulated)
     );
-    if (window.hljs) holderEl.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(holderEl);
     if (markdownModule.renderMermaid) markdownModule.renderMermaid(holderEl);
     holderEl.appendChild(chatRenderer.createMsgFooter(holderEl));
   } else if (!bodyEl.querySelector('.agent-tool-event') && !bodyEl.querySelector('img')) {

@@ -1,9 +1,7 @@
-"""Owner-scope tests for the remaining _resolve_model call sites.
+"""Owner-scope tests for normalized teacher and skill-audit routes.
 
-Both the teacher-escalation path and the skill-audit teacher resolution map a
-model spec to an endpoint (and its decrypted api_key). Like /presets/expand,
-that lookup must be scoped to the calling user, otherwise it can resolve another
-owner's ModelEndpoint in a multi-user deployment. See #2283.
+Both paths resolve stable catalog routes in the calling owner's scope. Provider
+URLs, headers, and credentials must not cross these application seams.
 """
 
 import asyncio
@@ -13,59 +11,73 @@ import src.teacher_escalation as teacher_escalation
 import routes.skills_routes as skills_routes
 
 
-def test_call_teacher_scopes_model_resolution_to_owner(monkeypatch):
+def _route(model="teacher-model", *, route_id="route-teacher", grant_id=None):
+    return SimpleNamespace(
+        model_route_id=route_id,
+        provider_grant_id=grant_id,
+        provider_model_id=model,
+        connection_id="connection-teacher",
+        runtime_model=f"connection-teacher/{model}",
+        capabilities={"tools": True},
+    )
+
+
+def test_call_teacher_scopes_normalized_route_to_owner(monkeypatch):
     seen = {}
 
-    def fake_resolve_model(spec, owner=None):
-        seen["spec"] = spec
-        seen["owner"] = owner
-        return SimpleNamespace(
-            endpoint_url="http://endpoint.local/v1",
-            model_id="teacher-model",
-            headers={},
-        )
+    def fake_resolve_model(*, owner=None, model_spec=None):
+        seen["spec"] = model_spec
+        seen["route_owner"] = owner
+        return _route(grant_id="grant-1")
 
-    async def fake_auxiliary(request):
+    async def fake_complete_text(**kwargs):
+        seen["completion"] = kwargs
         return "teacher reply"
 
-    monkeypatch.setattr("src.ai_interaction._resolve_model_target", fake_resolve_model)
-    monkeypatch.setattr("src.ai_interaction._TEACHER_SYSTEM_PROMPT", "sys", raising=False)
-    monkeypatch.setattr("src.model_dispatch.run_auxiliary_inference", fake_auxiliary)
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_model_spec", fake_resolve_model)
+    monkeypatch.setattr("src.openclank.modality_facade.complete_text", fake_complete_text)
 
     result = asyncio.run(
-        teacher_escalation._call_teacher("teacher-model", "prompt", owner="alice")
+        teacher_escalation._call_teacher(
+            "teacher-model", "prompt", owner="alice",
+            root_operation_id="turn-1",
+        )
     )
 
     assert result == "teacher reply"
-    assert seen["owner"] == "alice"
+    assert seen["route_owner"] == "alice"
     assert seen["spec"] == "teacher-model"
+    assert seen["completion"]["owner"] == "alice"
+    assert seen["completion"]["purpose"] == "utility"
+    assert seen["completion"]["model_route_id"] == "route-teacher"
+    assert seen["completion"]["grant_id"] == "grant-1"
+    assert seen["completion"]["root_operation_id"] == "turn-1"
+    assert "url" not in seen["completion"]
+    assert "headers" not in seen["completion"]
 
 
 def test_audit_teacher_resolution_scoped_to_owner(monkeypatch):
     seen = {}
-
-    def fake_resolve_endpoint(role, owner=None):
-        return ("http://worker.local/v1", "worker-model", {})
+    worker = _route(model="worker-model", route_id="route-worker")
+    teacher = _route()
 
     def fake_get_user_setting(key, owner, default=None):
         seen.setdefault("setting_owners", []).append(owner)
         return {"teacher_enabled": True, "teacher_model": "teacher-model"}.get(key, default)
 
-    def fake_resolve_model(spec, owner=None):
-        seen["spec"] = spec
+    def fake_resolve_model(*, owner=None, model_spec=None):
+        seen["spec"] = model_spec
         seen["owner"] = owner
-        return ("http://endpoint.local/v1", "teacher-model", {})
+        return teacher
 
-    monkeypatch.setattr("src.endpoint_resolver.resolve_endpoint", fake_resolve_endpoint)
+    monkeypatch.setattr(skills_routes, "_bound_skill_route", lambda owner, purpose: worker)
     monkeypatch.setattr("src.settings.get_user_setting", fake_get_user_setting)
-    monkeypatch.setattr("src.ai_interaction._resolve_model", fake_resolve_model)
-    # list_model_ids is best-effort; force it to no-op so the worker model passes through.
-    monkeypatch.setattr("src.llm_core.list_model_ids", lambda url, headers=None: [])
+    monkeypatch.setattr("src.openclank.chat_routing.resolve_chat_model_spec", fake_resolve_model)
 
-    url, model, headers, teacher = skills_routes._resolve_audit_models(owner="alice")
+    actual_worker, actual_teacher = skills_routes._resolve_audit_models(owner="alice")
 
-    assert (url, model) == ("http://worker.local/v1", "worker-model")
-    assert teacher == ("http://endpoint.local/v1", "teacher-model", {})
+    assert actual_worker is worker
+    assert actual_teacher is teacher
     assert seen["owner"] == "alice"
     assert seen["spec"] == "teacher-model"
     assert seen["setting_owners"] == ["alice", "alice"]

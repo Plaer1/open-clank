@@ -1,0 +1,1 @@
+Types: int, float, str, bool, NoneType. Addition yields 4, 4.5, TypeError, integer 1, TypeError. For a count, test None first; validate numeric values separately; parse text only under a declared grammar/error policy. `if not count` groups zero and absence and does not classify text `"0"` as zero.

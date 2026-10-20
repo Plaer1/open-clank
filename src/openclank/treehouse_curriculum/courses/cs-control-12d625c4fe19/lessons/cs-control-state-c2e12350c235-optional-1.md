@@ -1,0 +1,1 @@
+A copied integer value is not a live formula linking the two names.

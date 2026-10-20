@@ -10,6 +10,7 @@ Periodically audits all memories via LLM to consolidate duplicates,
 rewrite vague entries, and remove junk.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -18,6 +19,15 @@ import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+from services.memory.perspective import MEMORY_SELF_REFERENCE_RULES
+
+
+async def _complete_text(**kwargs) -> str:
+    """Lazy import keeps the lightweight extractor importable in isolation."""
+    from src.openclank.modality_facade import complete_text
+
+    return await complete_text(**kwargs)
 
 
 def _tidy_state_path(memory_manager) -> str:
@@ -80,6 +90,8 @@ EXTRACT_SYSTEM_PROMPT = (
     "- Each fact must be a single short sentence (under 15 words)\n"
     "- If a fact is similar to something likely already known, skip it\n"
     "- If nothing durable was revealed, return []\n\n"
+    + MEMORY_SELF_REFERENCE_RULES
+    + "\n"
     "Return a JSON array of objects with 'text' and 'category' fields.\n"
     "Categories: 'identity', 'preference', 'fact', 'contact', 'project', 'goal'\n\n"
     "Return ONLY valid JSON, no markdown fences."
@@ -91,7 +103,7 @@ CONTEXT_WINDOW = 6
 AUDIT_SYSTEM_PROMPT = (
     "You are a memory database curator. Be CONSERVATIVE: remove only TRUE "
     "duplicates and clearly useless entries. Every distinct fact must survive. "
-    "When in doubt, KEEP the entry. Return the cleaned list.\n\n"
+    "When in doubt, KEEP the entry. Account for every input entry exactly once.\n\n"
     "Rules:\n"
     "1. MERGE only entries that state the SAME fact in different words. If you "
     "are not sure two entries are the same fact, KEEP BOTH.\n"
@@ -104,8 +116,16 @@ AUDIT_SYSTEM_PROMPT = (
     "3. Keep the original wording. Only lightly trim obvious redundancy — do "
     "NOT aggressively rewrite or shorten.\n"
     "4. Preserve the 'id' of the entry you keep when merging.\n"
-    "5. Never invent facts. When unsure, KEEP.\n\n"
-    "Return a JSON array of objects with fields: id, text, category.\n"
+    "5. Never invent facts. When unsure, KEEP.\n"
+    "6. Every input id MUST appear once in `operations`. Omitting an id is "
+    "not a deletion instruction.\n"
+    "7. A deletion MUST use action `delete` and include a short `reason`. "
+    "For a merge, include `retained_id` for the kept record.\n\n"
+    "Return one JSON object with this exact shape:\n"
+    "{\"operations\":[\n"
+    "  {\"id\":\"input-id\",\"action\":\"keep\",\"text\":\"original or lightly edited text\",\"category\":\"original category\"},\n"
+    "  {\"id\":\"duplicate-id\",\"action\":\"delete\",\"reason\":\"exact duplicate\",\"retained_id\":\"input-id\"}\n"
+"]}\n"
     "Return ONLY valid JSON, no markdown fences."
 )
 
@@ -277,21 +297,24 @@ async def extract_and_store(
     session,
     memory_manager,
     memory_vector,
-    endpoint_url: str,
-    model: str,
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
     headers: Optional[dict] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ):
     """Extract facts from recent conversation and store them.
 
     Designed to run as a background task (asyncio.create_task).
     Errors are logged, never raised.
-    """
-    if not endpoint_url or not model:
-        logger.debug("[memory-extract] No model or URL provided, skipping")
-        return
 
+    ``endpoint_url``, ``model``, and ``headers`` remain compatibility-only;
+    execution is resolved by the owner's managed ``utility`` route.
+    """
     try:
-        from src.llm_core import llm_call_async
+        # The authenticated request owner is authoritative. Keep the session
+        # fallback for legacy/internal callers that predate explicit scoping.
+        _owner = owner if owner is not None else getattr(session, "owner", None)
 
         # Get last N messages from session
         messages = session.get_context_messages()
@@ -352,10 +375,11 @@ async def extract_and_store(
 
         facts = []
         try:
-            raw = await llm_call_async(
-                endpoint_url,
-                model,
-                extraction_messages,
+            raw = await _complete_text(
+                owner=_owner or "",
+                messages=extraction_messages,
+                purpose="memory",
+                root_operation_id=root_operation_id,
                 temperature=0.1,
                 # A reasoning model spends most of its budget on <think> tokens
                 # BEFORE emitting the JSON, so the old 500 truncated the response
@@ -363,8 +387,7 @@ async def extract_and_store(
                 # audit path hit the same wall and raised to 16384; extraction's
                 # output (a short facts list) is small, so an ample ceiling is
                 # enough once thinking has room.
-                max_tokens=4096,
-                headers=headers,
+                max_output_tokens=4096,
             )
 
             # Parse JSON, tolerating reasoning-model noise (<think> blocks, a
@@ -383,9 +406,6 @@ async def extract_and_store(
         if not facts:
             logger.info("Auto memory extraction ran: 0 candidates")
             return
-
-        # Get owner from session
-        _owner = getattr(session, 'owner', None)
 
         existing = memory_manager.load_all()
         added = 0
@@ -475,7 +495,13 @@ async def extract_and_store(
                 _extractions_since_audit = 0
                 logger.info("Audit threshold reached, running memory audit")
                 await audit_memories(
-                    memory_manager, memory_vector, endpoint_url, model, headers, owner=_owner
+                    memory_manager,
+                    memory_vector,
+                    endpoint_url,
+                    model,
+                    headers,
+                    owner=_owner,
+                    root_operation_id=root_operation_id,
                 )
         else:
             logger.info("Auto memory extraction ran: 0 added")
@@ -487,10 +513,11 @@ async def extract_and_store(
 async def audit_memories(
     memory_manager,
     memory_vector,
-    endpoint_url: str,
-    model: str,
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
     headers: Optional[dict] = None,
     owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ):
     """Send all memories to the LLM for deduplication and consolidation.
 
@@ -501,14 +528,22 @@ async def audit_memories(
 
     Safe to call manually or from the automatic trigger in extract_and_store.
     Errors are logged, never raised.
-    """
-    try:
-        from src.llm_core import llm_call_async
 
+    ``endpoint_url``, ``model``, and ``headers`` remain compatibility-only;
+    execution is resolved by the owner's managed ``utility`` route.
+    """
+    before_count = 0
+    try:
         existing = memory_manager.load(owner=owner)
         if not existing:
             logger.info("Memory audit: nothing to audit")
-            return {"before": 0, "after": 0}
+            return _audit_result(
+                ok=True,
+                status="unchanged",
+                before=0,
+                after=0,
+                already_tidy=True,
+            )
 
         before_count = len(existing)
 
@@ -522,16 +557,48 @@ async def audit_memories(
         last_state = _load_tidy_state(memory_manager).get(owner or "") or {}
         if last_state.get("fingerprint") == current_fp:
             logger.info("Memory audit: state unchanged since last tidy — skipping LLM")
-            return {
-                "before": before_count,
-                "after": before_count,
-                "already_tidy": True,
+            return _audit_result(
+                ok=True,
+                status="unchanged",
+                before=before_count,
+                after=before_count,
+                already_tidy=True,
+            )
+
+        originals = {}
+        for entry in existing:
+            if not isinstance(entry, dict):
+                return _audit_failure(
+                    before_count,
+                    "invalid_memory_store",
+                    "Memory Tidy found an invalid stored memory and did not change anything.",
+                )
+            memory_id = entry.get("id")
+            text = entry.get("text")
+            category = entry.get("category", "fact")
+            if (
+                not isinstance(memory_id, str)
+                or not memory_id.strip()
+                or memory_id in originals
+                or not isinstance(text, str)
+                or not isinstance(category, str)
+            ):
+                return _audit_failure(
+                    before_count,
+                    "invalid_memory_store",
+                    "Memory Tidy found an invalid stored memory and did not change anything.",
+                )
+            originals[memory_id] = {
+                "id": memory_id,
+                "text": text,
+                "category": category,
+                "entry": entry,
             }
 
         # Build payload: list of {id, text, category} for the LLM
         memory_payload = [
-            {"id": m["id"], "text": m["text"], "category": m.get("category", "fact")}
-            for m in existing
+            {"id": m["id"], "text": m["text"], "category": m["category"]}
+            for m in originals.values()
         ]
 
         audit_messages = [
@@ -539,66 +606,96 @@ async def audit_memories(
             {"role": "user", "content": json.dumps(memory_payload, ensure_ascii=False)},
         ]
 
-        raw = await llm_call_async(
-            endpoint_url,
-            model,
-            audit_messages,
-            temperature=0.1,
-            # 16384 (was 2000): the deduped list of all memories can be large,
-            # and a reasoning model spends tokens thinking first — 2000 truncated
-            # the JSON so it never parsed ("bad_json").
-            max_tokens=16384,
-            headers=headers,
-            # Bound the call so the Tidy whirlpool can't spin indefinitely on a
-            # slow/large generation.
-            timeout=120,
+        try:
+            raw = await asyncio.wait_for(
+                _complete_text(
+                    owner=owner or "",
+                    messages=audit_messages,
+                    purpose="memory",
+                    root_operation_id=root_operation_id,
+                    temperature=0.1,
+                    # 16384 (was 2000): the deduped list of all memories can be
+                    # large, and reasoning can otherwise consume the output budget
+                    # before emitting the JSON.
+                    max_output_tokens=16384,
+                ),
+                # Keep the legacy bounded-wait behavior at the application seam.
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Memory audit model call timed out")
+            return _audit_failure(
+                before_count,
+                "model_timeout",
+                "The memory model timed out. No memories were changed.",
+            )
+        except Exception:
+            logger.exception("Memory audit model call failed")
+            return _audit_failure(
+                before_count,
+                "model_request_failed",
+                "The memory model request failed. No memories were changed.",
+            )
+
+        if not isinstance(raw, str) or not raw.strip():
+            logger.warning("Memory audit model returned empty output")
+            return _audit_failure(
+                before_count,
+                "empty_model_output",
+                "The memory model returned no usable Tidy result. No memories were changed.",
+            )
+
+        parsed = _parse_audit_response(raw)
+        if parsed is None:
+            logger.warning("Memory audit returned non-JSON output (%s bytes)", len(raw))
+            return _audit_failure(
+                before_count,
+                "invalid_model_output",
+                "The memory model returned an unreadable Tidy result. No memories were changed.",
+            )
+
+        operations, validation_error = _validate_audit_operations(parsed, originals)
+        if validation_error is not None:
+            code, message = validation_error
+            logger.warning("Memory audit proposal rejected: %s", code)
+            return _audit_failure(before_count, code, message)
+
+        proposal = _build_audit_proposal(
+            operations,
+            originals,
+            source_fingerprint=current_fp,
         )
+        after_count = before_count - len(proposal["deletes"])
+        if _unsafe_audit_removal(before_count, after_count):
+            logger.warning(
+                "Memory audit would cut %s -> %s; refusing as unsafe",
+                before_count,
+                after_count,
+            )
+            return _audit_failure(
+                before_count,
+                "unsafe_removal",
+                "Memory Tidy proposed removing too many memories. No memories were changed.",
+            )
 
-        # Parse the JSON list, tolerating reasoning-model noise: <think> blocks,
-        # markdown fences, leading prose, and trailing commas.
-        cleaned = _parse_audit_json(raw)
-        if cleaned is None:
-            logger.error(f"Memory audit returned non-JSON: {(raw or '')[:300]}")
-            return {"before": before_count, "after": before_count, "error": "bad_json"}
-
-        # Build lookup of original entries by ID so we can preserve metadata
-        originals = {m["id"]: m for m in existing}
+        if not proposal["updates"] and not proposal["deletes"]:
+            _save_tidy_state(memory_manager, owner, current_fp)
+            return _audit_result(
+                ok=True,
+                status="unchanged",
+                before=before_count,
+                after=before_count,
+                already_tidy=True,
+            )
 
         final_entries = []
-        for item in cleaned:
-            if not isinstance(item, dict):
+        for operation in operations:
+            if operation["action"] == "delete":
                 continue
-            mid = item.get("id", "")
-            new_text = item.get("text", "").strip()
-            if not new_text:
-                continue
-
-            if mid in originals:
-                # Preserve original metadata, update text + category
-                entry = originals[mid].copy()
-                entry["text"] = new_text
-                if item.get("category"):
-                    entry["category"] = item["category"]
-            else:
-                # ID not found — skip to avoid inventing entries
-                logger.debug(f"Audit returned unknown id {mid}, skipping")
-                continue
-
+            entry = originals[operation["id"]]["entry"].copy()
+            entry["text"] = operation["text"]
+            entry["category"] = operation["category"]
             final_entries.append(entry)
-
-        after_count = len(final_entries)
-
-        # Safety net against catastrophic over-deletion. A conservative tidy
-        # should never wipe out half the store in one pass — if the model
-        # returned far fewer entries than it was given (over-consolidation, a
-        # dropped/truncated list, or it ignored ids), treat it as a misfire and
-        # DON'T save. Better to no-op than to silently lose memories.
-        if before_count >= 8 and after_count < before_count * 0.5:
-            logger.warning(
-                f"Memory audit would cut {before_count} -> {after_count} "
-                f"(>50% removed) — refusing as unsafe, keeping originals"
-            )
-            return {"before": before_count, "after": before_count, "error": "unsafe_removal"}
 
         # Merge audited entries back with other users' entries
         if owner:
@@ -628,19 +725,45 @@ async def audit_memories(
         # if nothing has changed in the meantime.
         _save_tidy_state(memory_manager, owner, _fingerprint_entries(final_entries))
 
-        return {"before": before_count, "after": after_count}
+        return _audit_result(
+            ok=True,
+            status="applied",
+            before=before_count,
+            after=after_count,
+            updated=len(proposal["updates"]),
+            applied=True,
+            proposal=proposal,
+        )
 
-    except Exception as e:
-        logger.error(f"Memory audit failed: {e}")
-        return {"error": str(e)}
+    except Exception:
+        logger.exception("Memory audit failed")
+        return _audit_failure(
+            before_count,
+            "native_mutation_failed",
+            "Memory Tidy failed before it could confirm the result.",
+        )
 
 
-def _parse_audit_json(raw: str):
-    """Return an audit list, or ``None`` when the model did not return one."""
-    text = (raw or "").strip()
-    text = re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", text, flags=re.I).strip()
+def _parse_audit_response(raw: str):
+    """Parse the one JSON container returned by the Tidy model.
 
-    def loads_list(value):
+    Reasoning models sometimes leave harmless prose or a fenced JSON payload
+    around the actual response.  We tolerate that presentation noise, but do
+    not turn an invalid response into an empty list: an empty or malformed
+    result must remain a typed failure at the caller.
+    """
+    if not isinstance(raw, str):
+        return None
+
+    text = raw.strip()
+    text = re.sub(
+        r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+
+    def loads_container(value):
         if not value:
             return None
         for candidate in (value, re.sub(r",(\s*[}\]])", r"\1", value)):
@@ -648,107 +771,635 @@ def _parse_audit_json(raw: str):
                 parsed = json.loads(candidate)
             except (TypeError, ValueError):
                 continue
-            if isinstance(parsed, list):
+            if isinstance(parsed, (list, dict)):
                 return parsed
         return None
 
-    parsed = loads_list(text)
+    parsed = loads_container(text)
     if parsed is not None:
         return parsed
+
     fenced = re.search(r"```(?:json)?\s*\n?([\s\S]*?)```", text, flags=re.I)
     if fenced:
-        parsed = loads_list(fenced.group(1).strip())
+        parsed = loads_container(fenced.group(1).strip())
     if parsed is not None:
         return parsed
-    start, end = text.find("["), text.rfind("]")
-    if start >= 0 and end > start:
-        return loads_list(text[start : end + 1])
+
+    starts = [
+        (index, closing)
+        for index, closing in ((text.find("{"), "}"), (text.find("["), "]"))
+        if index >= 0
+    ]
+    if starts:
+        start, closing = min(starts, key=lambda item: item[0])
+        end = text.rfind(closing)
+        if end > start:
+            return loads_container(text[start : end + 1])
     return None
+
+
+def _parse_audit_json(raw: str):
+    """Compatibility parser for the legacy JSON-list audit path."""
+    parsed = _parse_audit_response(raw)
+    return parsed if isinstance(parsed, list) else None
+
+
+def _audit_result(
+    *,
+    ok: bool,
+    status: str,
+    before: int,
+    after: Optional[int] = None,
+    updated: int = 0,
+    applied: bool = False,
+    already_tidy: bool = False,
+    proposal: Optional[dict] = None,
+    rollback: Optional[dict] = None,
+    error_code: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> dict:
+    """Build the stable Tidy outcome envelope used by provider callers.
+
+    Counts alone cannot distinguish a clean store from a failed model call;
+    every return value therefore carries an explicit success flag and state.
+    ``error`` is deliberately structured and does not include raw provider
+    output, which can be an unreadable HTML gateway page or sensitive text.
+    """
+    before = max(0, int(before or 0))
+    after = before if after is None else max(0, int(after or 0))
+    result = {
+        "ok": bool(ok),
+        "status": status,
+        "before": before,
+        "after": after,
+        "removed": max(0, before - after),
+        "updated": max(0, int(updated or 0)),
+        "applied": bool(applied),
+        "already_tidy": bool(already_tidy),
+    }
+    if proposal is not None:
+        result["proposal"] = proposal
+    if rollback is not None:
+        result["rollback"] = rollback
+    if error_code:
+        result["error"] = {
+            "code": error_code,
+            "message": error_message or "Memory Tidy failed without changing memories.",
+        }
+    return result
+
+
+def _audit_failure(
+    before: int,
+    code: str,
+    message: str,
+    *,
+    after: Optional[int] = None,
+    updated: int = 0,
+    applied: bool = False,
+    status: str = "failed",
+    proposal: Optional[dict] = None,
+    rollback: Optional[dict] = None,
+) -> dict:
+    return _audit_result(
+        ok=False,
+        status=status,
+        before=before,
+        after=after,
+        updated=updated,
+        applied=applied,
+        proposal=proposal,
+        rollback=rollback,
+        error_code=code,
+        error_message=message,
+    )
+
+
+def _validate_audit_operations(parsed, originals: dict[str, dict]):
+    """Return normalized, fully-accounted audit operations or a typed error.
+
+    A former list response used omission as a deletion signal.  That means a
+    truncated response can silently erase valid memories.  New object-shaped
+    responses require an explicit action for every source id.  We accept a
+    legacy list only when it accounts for all IDs, which allows safe edit-only
+    compatibility but never lets a missing list item become a deletion.
+    """
+    legacy_list = isinstance(parsed, list)
+    if legacy_list:
+        operations = parsed
+    elif isinstance(parsed, dict):
+        operations = parsed.get("operations")
+        if not isinstance(operations, list):
+            return None, (
+                "invalid_model_output",
+                "The memory model returned an invalid Tidy proposal. No memories were changed.",
+            )
+    else:
+        return None, (
+            "invalid_model_output",
+            "The memory model returned an invalid Tidy proposal. No memories were changed.",
+        )
+
+    if not operations and originals:
+        return None, (
+            "incomplete_model_output",
+            "The memory model did not account for every memory. No memories were changed.",
+        )
+
+    normalized = []
+    seen_ids = set()
+    for item in operations:
+        if not isinstance(item, dict):
+            return None, (
+                "invalid_model_output",
+                "The memory model returned a malformed Tidy proposal. No memories were changed.",
+            )
+        record_id = item.get("id")
+        if not isinstance(record_id, str) or not record_id.strip():
+            return None, (
+                "invalid_model_output",
+                "The memory model returned a memory without a valid id. No memories were changed.",
+            )
+        if record_id not in originals:
+            return None, (
+                "unknown_memory_id",
+                "The memory model referenced an unknown memory. No memories were changed.",
+            )
+        if record_id in seen_ids:
+            return None, (
+                "duplicate_memory_id",
+                "The memory model proposed more than one action for a memory. No memories were changed.",
+            )
+        seen_ids.add(record_id)
+
+        action = "keep" if legacy_list else item.get("action")
+        if not isinstance(action, str) or action not in {"keep", "delete"}:
+            return None, (
+                "invalid_model_output",
+                "The memory model returned an unsupported Tidy action. No memories were changed.",
+            )
+
+        if action == "keep":
+            text = item.get("text")
+            category = item.get("category")
+            if not isinstance(text, str) or not text.strip():
+                return None, (
+                    "invalid_model_output",
+                    "The memory model returned a memory without usable text. No memories were changed.",
+                )
+            if not isinstance(category, str) or not category.strip():
+                return None, (
+                    "invalid_model_output",
+                    "The memory model returned a memory without a category. No memories were changed.",
+                )
+            normalized.append({
+                "id": record_id,
+                "action": "keep",
+                "text": text.strip(),
+                "category": category.strip(),
+            })
+            continue
+
+        reason = item.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return None, (
+                "invalid_model_output",
+                "The memory model proposed a deletion without a reason. No memories were changed.",
+            )
+        retained_id = item.get("retained_id")
+        if retained_id is not None and (
+            not isinstance(retained_id, str) or retained_id not in originals
+        ):
+            return None, (
+                "invalid_model_output",
+                "The memory model proposed a deletion with an invalid retained memory. No memories were changed.",
+            )
+        normalized.append({
+            "id": record_id,
+            "action": "delete",
+            "reason": reason.strip(),
+            **({"retained_id": retained_id} if retained_id else {}),
+        })
+
+    if seen_ids != set(originals):
+        return None, (
+            "incomplete_model_output",
+            "The memory model did not account for every memory. No memories were changed.",
+        )
+    actions_by_id = {operation["id"]: operation["action"] for operation in normalized}
+    for operation in normalized:
+        retained_id = operation.get("retained_id")
+        if retained_id and actions_by_id.get(retained_id) != "keep":
+            return None, (
+                "invalid_model_output",
+                "The memory model proposed a deletion without a retained memory. No memories were changed.",
+            )
+    return normalized, None
+
+
+def _build_audit_proposal(
+    operations: list[dict],
+    originals: dict[str, dict],
+    *,
+    source_fingerprint: str,
+) -> dict:
+    updates = []
+    deletes = []
+    for operation in operations:
+        original = originals[operation["id"]]
+        if operation["action"] == "delete":
+            deletes.append({
+                "id": operation["id"],
+                "reason": operation["reason"],
+                **(
+                    {"retained_id": operation["retained_id"]}
+                    if operation.get("retained_id")
+                    else {}
+                ),
+            })
+        elif (
+            operation["text"] != original["text"]
+            or operation["category"] != original["category"]
+        ):
+            updates.append({
+                "id": operation["id"],
+                "text": operation["text"],
+                "category": operation["category"],
+            })
+    return {
+        "source_fingerprint": source_fingerprint,
+        "updates": updates,
+        "deletes": deletes,
+    }
+
+
+def _provider_fingerprint(records) -> str:
+    items = sorted(
+        (
+            str(getattr(record, "id", "")),
+            str(getattr(record, "text", "")),
+            str(getattr(record, "category", "")),
+        )
+        for record in records or []
+    )
+    digest = hashlib.sha256()
+    for item in items:
+        digest.update(("\x1f".join(item) + "\x1e").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _unsafe_audit_removal(before_count: int, after_count: int) -> bool:
+    """Reject a proposal that would erase a corpus or most of a large one."""
+    if before_count and after_count == 0:
+        return True
+    return before_count >= 8 and after_count < before_count * 0.5
+
+
+async def _rollback_provider_audit(
+    memory_provider,
+    memory_lifecycle,
+    *,
+    owner: Optional[str],
+    attempted_updates,
+    completed_deletes,
+) -> dict:
+    """Best-effort compensation after a provider audit apply failure.
+
+    Deletes travel through the lifecycle coordinator, which gives successful
+    deletes a recoverable tombstone.  Updates are compensated with their
+    original text/category.  The caller reports ``partial`` if either repair
+    step cannot be confirmed; it never converts an uncertain mutation into a
+    clean/no-op outcome.
+    """
+    rollback = {
+        "updates_restored": 0,
+        "deletes_restored": 0,
+        "errors": [],
+    }
+    for record, deletion in reversed(completed_deletes):
+        tombstone_id = (
+            deletion.get("tombstone_id")
+            if isinstance(deletion, dict)
+            else None
+        )
+        if not isinstance(tombstone_id, str) or not tombstone_id:
+            rollback["errors"].append("delete_restore_unavailable")
+            continue
+        try:
+            await memory_lifecycle.forget(
+                "restore",
+                owner=owner or "",
+                tombstone_id=tombstone_id,
+            )
+            rollback["deletes_restored"] += 1
+        except Exception:
+            logger.exception("Provider memory audit could not restore deleted memory")
+            rollback["errors"].append("delete_restore_failed")
+
+    for record, original_text, original_category in reversed(attempted_updates):
+        try:
+            restored = await memory_provider.update(
+                record.id,
+                text=original_text,
+                category=original_category,
+                owner=owner,
+            )
+            if restored is None or restored is False:
+                raise RuntimeError("provider refused update rollback")
+            rollback["updates_restored"] += 1
+        except Exception:
+            logger.exception("Provider memory audit could not restore edited memory")
+            rollback["errors"].append("update_restore_failed")
+    return rollback
 
 
 async def audit_provider_memories(
     memory_provider,
-    endpoint_url: str,
-    model: str,
+    endpoint_url: Optional[str] = None,
+    model: Optional[str] = None,
     headers: Optional[dict] = None,
     owner: Optional[str] = None,
+    memory_lifecycle=None,
+    root_operation_id: Optional[str] = None,
+    apply: bool = True,
 ):
     """Audit records through the active provider's mutation interface.
 
     The native audit above owns JSON/vector persistence. External providers
     must be changed through their contract so the UI never reports a tidy that
     only modified the unused ``memory.json`` store.
+
+    ``endpoint_url``, ``model``, and ``headers`` remain compatibility-only;
+    execution is resolved by the owner's managed ``utility`` route.
     """
+    before_count = 0
     try:
-        from src.llm_core import llm_call_async
-
         existing = await memory_provider.list_memories(owner=owner, limit=1000)
-        if not existing:
-            return {"before": 0, "after": 0}
+    except asyncio.TimeoutError:
+        logger.warning("Provider memory audit timed out while loading memories")
+        return _audit_failure(
+            0,
+            "provider_timeout",
+            "Memory Tidy timed out while loading memories. No memories were changed.",
+        )
+    except Exception:
+        logger.exception("Provider memory audit could not load memories")
+        return _audit_failure(
+            0,
+            "provider_read_failed",
+            "Memory Tidy could not read memories. No memories were changed.",
+        )
 
-        before_count = len(existing)
-        payload = [
-            {"id": record.id, "text": record.text, "category": record.category}
-            for record in existing
-        ]
-        raw = await llm_call_async(
-            endpoint_url,
-            model,
-            [
-                {"role": "system", "content": AUDIT_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.1,
-            max_tokens=16384,
-            headers=headers,
+    if not isinstance(existing, list):
+        return _audit_failure(
+            0,
+            "provider_read_failed",
+            "Memory Tidy received an invalid memory list. No memories were changed.",
+        )
+    before_count = len(existing)
+    if before_count >= 1000:
+        return _audit_failure(
+            before_count,
+            "audit_scope_limit_reached",
+            "Memory Tidy reached its safe memory limit and did not change anything.",
+        )
+    if not existing:
+        return _audit_result(
+            ok=True,
+            status="unchanged",
+            before=0,
+            after=0,
+            already_tidy=True,
+        )
+
+    originals = {}
+    for record in existing:
+        record_id = getattr(record, "id", None)
+        text = getattr(record, "text", None)
+        category = getattr(record, "category", None)
+        if (
+            not isinstance(record_id, str)
+            or not record_id.strip()
+            or record_id in originals
+            or not isinstance(text, str)
+            or not isinstance(category, str)
+        ):
+            return _audit_failure(
+                before_count,
+                "invalid_memory_store",
+                "Memory Tidy found an invalid stored memory and did not change anything.",
+            )
+        originals[record_id] = {
+            "id": record_id,
+            "text": text,
+            "category": category,
+            "record": record,
+        }
+
+    source_fingerprint = _provider_fingerprint(existing)
+    payload = [
+        {"id": record.id, "text": record.text, "category": record.category}
+        for record in existing
+    ]
+    try:
+        raw = await asyncio.wait_for(
+            _complete_text(
+                owner=owner or "",
+                messages=[
+                    {"role": "system", "content": AUDIT_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                purpose="memory",
+                root_operation_id=root_operation_id,
+                temperature=0.1,
+                max_output_tokens=16384,
+            ),
             timeout=120,
         )
-        cleaned = _parse_audit_json(raw)
-        if cleaned is None:
-            logger.error("Provider memory audit returned non-JSON: %s", (raw or "")[:300])
-            return {"before": before_count, "after": before_count, "error": "bad_json"}
+    except asyncio.TimeoutError:
+        logger.warning("Provider memory audit model call timed out")
+        return _audit_failure(
+            before_count,
+            "model_timeout",
+            "The memory model timed out. No memories were changed.",
+        )
+    except Exception:
+        logger.exception("Provider memory audit model call failed")
+        return _audit_failure(
+            before_count,
+            "model_request_failed",
+            "The memory model request failed. No memories were changed.",
+        )
 
-        originals = {record.id: record for record in existing}
-        final = []
-        seen_ids = set()
-        for item in cleaned:
-            if not isinstance(item, dict):
-                continue
-            record_id = item.get("id", "")
-            record = originals.get(record_id)
-            text = str(item.get("text", "")).strip()
-            if record is None or not text or record_id in seen_ids:
-                continue
-            seen_ids.add(record_id)
-            final.append((record, text, item.get("category") or record.category))
+    if not isinstance(raw, str) or not raw.strip():
+        logger.warning("Provider memory audit model returned empty output")
+        return _audit_failure(
+            before_count,
+            "empty_model_output",
+            "The memory model returned no usable Tidy result. No memories were changed.",
+        )
 
-        after_count = len(final)
-        if before_count >= 8 and after_count < before_count * 0.5:
-            logger.warning(
-                "Provider memory audit would cut %s -> %s; refusing as unsafe",
-                before_count,
-                after_count,
+    parsed = _parse_audit_response(raw)
+    if parsed is None:
+        logger.warning("Provider memory audit returned non-JSON output (%s bytes)", len(raw))
+        return _audit_failure(
+            before_count,
+            "invalid_model_output",
+            "The memory model returned an unreadable Tidy result. No memories were changed.",
+        )
+
+    operations, validation_error = _validate_audit_operations(parsed, originals)
+    if validation_error is not None:
+        code, message = validation_error
+        logger.warning("Provider memory audit proposal rejected: %s", code)
+        return _audit_failure(before_count, code, message)
+
+    proposal = _build_audit_proposal(
+        operations,
+        originals,
+        source_fingerprint=source_fingerprint,
+    )
+    after_count = before_count - len(proposal["deletes"])
+    if _unsafe_audit_removal(before_count, after_count):
+        logger.warning(
+            "Provider memory audit would cut %s -> %s; refusing as unsafe",
+            before_count,
+            after_count,
+        )
+        return _audit_failure(
+            before_count,
+            "unsafe_removal",
+            "Memory Tidy proposed removing too many memories. No memories were changed.",
+        )
+
+    if not proposal["updates"] and not proposal["deletes"]:
+        return _audit_result(
+            ok=True,
+            status="unchanged",
+            before=before_count,
+            after=before_count,
+            already_tidy=True,
+        )
+
+    if not apply:
+        return _audit_result(
+            ok=True,
+            status="preview",
+            before=before_count,
+            after=after_count,
+            updated=len(proposal["updates"]),
+            applied=False,
+            proposal=proposal,
+        )
+
+    if proposal["deletes"] and (
+        memory_lifecycle is None
+        or not callable(getattr(memory_lifecycle, "delete", None))
+        or not callable(getattr(memory_lifecycle, "forget", None))
+    ):
+        return _audit_failure(
+            before_count,
+            "coordinated_deletion_unavailable",
+            "Memory Tidy cannot safely apply deletions right now. No memories were changed.",
+            proposal=proposal,
+        )
+
+    # The model can take a long time. Re-read immediately before mutation so a
+    # changed store rejects this stale proposal rather than applying it to a
+    # different generation. Provider-level atomic CAS remains a future step,
+    # but this closes the normal concurrent-edit window without mutation.
+    try:
+        current = await memory_provider.list_memories(owner=owner, limit=1000)
+    except Exception:
+        logger.exception("Provider memory audit could not verify its snapshot")
+        return _audit_failure(
+            before_count,
+            "provider_preflight_failed",
+            "Memory Tidy could not verify the current memories. No memories were changed.",
+            proposal=proposal,
+        )
+    if not isinstance(current, list) or _provider_fingerprint(current) != source_fingerprint:
+        return _audit_failure(
+            before_count,
+            "stale_audit_snapshot",
+            "Memories changed while Tidy was running. No memories were changed.",
+            proposal=proposal,
+        )
+
+    attempted_updates = []
+    completed_deletes = []
+    try:
+        for update in proposal["updates"]:
+            record = originals[update["id"]]["record"]
+            attempted_updates.append((
+                record,
+                originals[update["id"]]["text"],
+                originals[update["id"]]["category"],
+            ))
+            updated = await memory_provider.update(
+                record.id,
+                text=update["text"],
+                category=update["category"],
+                owner=owner,
             )
-            return {"before": before_count, "after": before_count, "error": "unsafe_removal"}
+            if updated is None or updated is False:
+                raise RuntimeError("provider refused a Tidy update")
 
-        for record, text, category in final:
-            if text != record.text or category != record.category:
-                updated = await memory_provider.update(
-                    record.id,
-                    text=text,
-                    category=category,
-                    owner=owner,
-                )
-                if updated is None:
-                    raise RuntimeError(f"provider refused update for memory {record.id}")
+        for deletion in proposal["deletes"]:
+            record = originals[deletion["id"]]["record"]
+            deleted = await memory_lifecycle.delete(
+                record.id,
+                owner=owner or "",
+            )
+            if not deleted:
+                raise RuntimeError("provider refused a Tidy deletion")
+            completed_deletes.append((record, deleted))
+    except Exception:
+        logger.exception("Provider memory audit apply failed; attempting compensation")
+        rollback = await _rollback_provider_audit(
+            memory_provider,
+            memory_lifecycle,
+            owner=owner,
+            attempted_updates=attempted_updates,
+            completed_deletes=completed_deletes,
+        )
+        observed_after = before_count
+        recovered = False
+        try:
+            recovered_records = await memory_provider.list_memories(
+                owner=owner,
+                limit=1000,
+            )
+            if isinstance(recovered_records, list):
+                observed_after = len(recovered_records)
+                recovered = _provider_fingerprint(recovered_records) == source_fingerprint
+        except Exception:
+            logger.exception("Provider memory audit could not verify compensation")
+        rollback["verified"] = recovered
+        status = "failed" if recovered else "partial"
+        return _audit_failure(
+            before_count,
+            "provider_mutation_failed",
+            (
+                "Memory Tidy could not apply its proposal; no lasting changes were found."
+                if status == "failed"
+                else "Memory Tidy partially applied a proposal and could not fully restore it."
+            ),
+            after=before_count if status == "failed" else observed_after,
+            updated=0 if status == "failed" else len(attempted_updates),
+            applied=status == "partial",
+            status=status,
+            proposal=proposal,
+            rollback=rollback,
+        )
 
-        for record in existing:
-            if record.id not in seen_ids:
-                if not await memory_provider.delete(record.id, owner=owner):
-                    raise RuntimeError(f"provider refused delete for memory {record.id}")
-
-        logger.info("Provider memory audit complete: %s -> %s entries", before_count, after_count)
-        return {"before": before_count, "after": after_count}
-    except Exception as e:
-        logger.error("Provider memory audit failed: %s", e)
-        return {"error": str(e)}
+    logger.info("Provider memory audit complete: %s -> %s entries", before_count, after_count)
+    return _audit_result(
+        ok=True,
+        status="applied",
+        before=before_count,
+        after=after_count,
+        updated=len(proposal["updates"]),
+        applied=True,
+        proposal=proposal,
+    )

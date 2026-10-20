@@ -1,0 +1,1 @@
+Show (0,0), a valid middle state, (3,5), and explain preservation and decreasing n−i.

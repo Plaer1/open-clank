@@ -12,6 +12,8 @@ import { Instance } from "../../src/project/instance"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
+import { ManagedProvider } from "../../src/acp/managed-provider"
+import { installManagedSessionBinding } from "../../src/memory/session-scope"
 
 afterEach(async () => {
   Database.use((db) => {
@@ -22,6 +24,8 @@ afterEach(async () => {
     db.delete(ProjectTable).run()
   })
   await Instance.disposeAll()
+  ManagedProvider.resetForTest()
+  delete process.env.OPEN_CLANK_MANAGED
 })
 
 const it = testEffect(Layer.mergeAll(History.defaultLayer, Bus.defaultLayer, CrossSpawnSpawner.defaultLayer))
@@ -64,6 +68,51 @@ function seedSession() {
 }
 
 describe("History.Writer", () => {
+  it.live("managed updates and removals use host mutation callbacks without native FTS writes", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        process.env.OPEN_CLANK_MANAGED = "1"
+        installManagedSessionBinding("ses_t", {
+          owner: "alice",
+          stableChatID: "chat-t",
+          engineSessionID: "ses_t",
+          engineAliases: [],
+          memoryWorkspaceID: "global",
+          authorityWorkspaceID: "authority",
+          copalWorkspace: "copal",
+          physicalCwd: "/work",
+          bindingRevision: 1,
+          mapRevision: 1,
+          mappingRevision: 1,
+          memoryEnabled: true,
+          transition: null,
+        })
+        const calls: Array<{ operation: unknown; events: unknown }> = []
+        ManagedProvider.installHostConnection({
+          async extMethod(method: string, params: Record<string, unknown>) {
+            expect(method).toBe("_openclank/history/v1/mutate")
+            calls.push({ operation: params.operation, events: params.events })
+            return { ok: true, operation: params.operation, accepted: 1, duplicate: 0, enqueued: 1 }
+          },
+        } as any)
+        seedSession()
+        const writer = yield* Writer.Service
+        yield* writer.init()
+        const bus = yield* Bus.Service
+        yield* bus.publish(MessageV2.Event.PartUpdated, {
+          sessionID: "ses_t" as any,
+          part: { id: "prt_managed", sessionID: "ses_t", messageID: "msg_t", type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" } as any,
+          time: Date.now(),
+        })
+        yield* bus.publish(MessageV2.Event.PartRemoved, { sessionID: "ses_t" as any, messageID: "msg_t" as any, partID: "prt_managed" as any })
+        yield* Effect.sleep("200 millis")
+        expect(calls.map((call) => call.operation)).toEqual(["upsert", "tombstone"])
+        expect((calls[0]!.events as Array<{ content: { type: string; filename: string; mime: string; url: string } }>)[0]!.content).toMatchObject({ type: "file", filename: "capture.png", mime: "image/png", url: "https://example.test/capture.png" })
+        expect(Database.use((db) => db.select().from(HistoryFtsTable).where(eq(HistoryFtsTable.part_id, "prt_managed")).get())).toBeUndefined()
+      }),
+    ),
+  )
+
   it.live("PartUpdated for text part → writes one history_fts row", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {

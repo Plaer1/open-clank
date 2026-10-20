@@ -14,11 +14,20 @@ export const meta = {
   ],
 };
 
-// Sandbox exposes `args` as a JSON string — parse it first.
-const _a = typeof args === "string" ? JSON.parse(args) : args;
-const dir = _a.dir;
+// Sandbox exposes `args` as a JSON value — normalize bare strings gracefully.
+const _a = (() => {
+  if (args == null || args === undefined) return {};
+  if (typeof args === "string") {
+    try { const p = JSON.parse(args); return (typeof p === "object" && p !== null) ? p : { question: args }; }
+    catch { return { question: args }; }
+  }
+  return typeof args === "object" ? args : {};
+})();
 const question = _a.question;
-if (!dir || !question) throw new Error("args.dir and args.question are required");
+if (!question) throw new Error("args.question is required — pass {question: \"...\"} or a bare question string as args");
+const dir = _a.dir ?? ".";
+const today = _a.today;
+if (!today) throw new Error("args.today (YYYY-MM-DD) is required — the host auto-injects this for built-in runs; if calling from a user script, pass it manually");
 
 // Hard budgets per depth — enforced by script, not by LLM judgment.
 const DEPTH = {
@@ -27,9 +36,6 @@ const DEPTH = {
   deep: { angles: 8, queryBudget: 8, deltaAngles: 4, sources: 25 },
 }[_a.depth ?? "standard"];
 if (!DEPTH) throw new Error(`invalid depth: ${_a.depth}`);
-// Sandbox has no Date object — caller must pass today's date.
-const today = _a.today;
-if (!today) throw new Error("args.today (YYYY-MM-DD) is required — sandbox has no Date");
 
 // Locked sub-agent prompt template.
 const subagentPrompt = (n, angle, briefContext) => `You are a research sub-agent. Today is ${today}.
@@ -44,7 +50,7 @@ Rules:
 2. WebFetch the 3-6 most promising results to read actual content. Do not cite a page you did not fetch.
 3. Judge each source: official/primary > reputable media/peer-reviewed > forums/blogs > content farms. Discard low-quality sources rather than citing them.
 4. Extract findings as information-dense claims: include exact entities, numbers, dates, versions. One claim per finding.
-5. Write your findings to ${dir}/findings/F${n}.md in EXACTLY this format:
+5. Write your findings to findings/F${n}.md in EXACTLY this format:
 
 # F${n}: ${angle}
 
@@ -77,7 +83,7 @@ if (!(await exists("brief.md"))) {
     `You are the scoping step of a deep research run. Today is ${today}. No user is available — do NOT ask questions; write assumptions instead.
 Research question (verbatim from user): "${question}"
 ${_a.context ? `Additional context from the requester: ${_a.context}` : ""}
-Write ${dir}/brief.md with sections:
+Write brief.md with sections:
 # Research Brief
 **Date**: ${today} · **Depth**: ${_a.depth ?? "standard"}
 ## Question — the refined, unambiguous research question
@@ -104,7 +110,7 @@ if (await exists("plan.json")) {
   plan = JSON.parse(await readFile("plan.json"));
 } else {
   plan = await agent(
-    `You are the planning step of a deep research run. Read ${dir}/brief.md.
+    `You are the planning step of a deep research run. Read brief.md.
 Decompose it into 3-${DEPTH.angles} INDEPENDENT research angles (no overlap; each answerable alone). Draw from these lenses as applicable: core facts/definitions · recent developments · quantitative data/benchmarks · counter-arguments & failure cases · practitioner experience · academic work · key players/alternatives.
 Also compress the brief into a 2-3 line briefContext for sub-agents.`,
     { schema: anglesSchema }
@@ -134,7 +140,7 @@ log(`round 1 done: ${findingFiles.length} findings files`);
 phase("Reflect");
 if (DEPTH.deltaAngles > 0 && !(await exists("reflect.json"))) {
   const reflect = await agent(
-    `You are the reflection step of a deep research run. Read ${dir}/brief.md and EVERY file in ${dir}/findings/.
+    `You are the reflection step of a deep research run. Read brief.md and EVERY file in findings/.
 Against the brief, identify: (a) parts of the brief with no evidence; (b) major claims resting on a single source; (c) conflicts between sources worth resolving. Also consider the "Suggested follow-ups" sections in the findings.
 Output at most ${DEPTH.deltaAngles} delta-angles — narrow, targeted research questions that would close the most important gaps. If coverage is already sufficient, output an empty array. Also list unresolved gaps that should surface in the report's "Open questions" section.`,
     {
@@ -175,8 +181,8 @@ findingFiles = await glob("findings/F*.md");
 phase("Write");
 if (!(await exists("REPORT.md"))) {
   await agent(
-    `You are the SOLE writer of a deep research report. Read ${dir}/brief.md, ${dir}/reflect.json (openQuestions), and EVERY file in ${dir}/findings/.
-Write ${dir}/REPORT.md in one pass. Header: "> Generated ${today} · depth: ${_a.depth ?? "standard"} · workspace: ${dir}".
+    `You are the SOLE writer of a deep research report. Read brief.md, reflect.json (openQuestions), and EVERY file in findings/.
+Write REPORT.md in one pass. Header: "> Generated ${today} · depth: ${_a.depth ?? "standard"} · workspace: ${dir}".
 Report structure: Executive summary (5-10 bullet conclusions with [n] citations) → Background & scope → Body sections organized by THEME (not by findings file) → Open questions (seeded from reflect.json) → Sources (numbered, dedup URLs, access date ${today}).
 Hard rules: every non-obvious claim carries [n] resolving to a Sources entry whose URL appears in some findings file — never cite from memory; conflicts presented with both sides and dates; [single source] and [speculative] flags where applicable.
 Do NOT re-search. If a gap blocks a section, state the gap.`
@@ -189,9 +195,9 @@ log("REPORT.md ready");
 phase("Review");
 const review = await agent(
   `You are an independent reviewer with NO prior context — judge only from files.
-Read ${dir}/REPORT.md and every file in ${dir}/findings/.
+Read REPORT.md and every file in findings/.
 Check: (a) claims lacking citations that need one; (b) spot-check 5 random [n] citations — does the URL exist in some findings file and plausibly support the sentence?; (c) conclusions stronger than the evidence; (d) executive summary consistent with body.
-Write findings to ${dir}/REVIEW.md.`,
+Write findings to REVIEW.md.`,
   {
     schema: {
       type: "object",
@@ -208,7 +214,7 @@ log(`review: ${review ? review.summary : "reviewer failed"}`);
 if (review && review.critical > 0) {
   phase("Fix");
   await agent(
-    `Read ${dir}/REVIEW.md and fix ${dir}/REPORT.md accordingly: re-anchor citations to URLs actually present in ${dir}/findings/, otherwise weaken or remove unsupported claims. Never invent new sources.`
+    `Read REVIEW.md and fix REPORT.md accordingly: re-anchor citations to URLs actually present in findings/, otherwise weaken or remove unsupported claims. Never invent new sources.`
   );
 }
 

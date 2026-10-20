@@ -1,0 +1,1 @@
+An interface's FIFO rule is separate from how its storage is implemented.

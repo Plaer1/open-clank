@@ -1,0 +1,1 @@
+Use authenticated principal and server-side document permission; reject unauthorized access regardless of client owner claim.

@@ -64,7 +64,23 @@ import * as BashInteractive from "@/tool/bash-interactive"
 import { memoMap } from "./memo-map"
 
 // Wrapped in Layer.suspend so the cross-module `.defaultLayer` reads defer to
-// first use instead of running at module load — same TDZ fix as Actor.defaultLayer.
+// first use instead of running at module load — same TDZ fix as Actor.appLayer.
+//
+// Init order (tests and routes share this):
+//   1. Module graph loads. Every `defaultLayer` / `appLayer` in the Actor /
+//      SessionPrompt / Command / MCP chain is `Layer.suspend`, so no
+//      cross-module `.defaultLayer` read runs during init. Actor.appLayer and
+//      SessionPrompt.appLayer are defined at the bottom of their modules
+//      (after `layer`), which is "after bootstrap" for ESM purposes.
+//   2. First AppRuntime.run* call materialises ManagedRuntime.make(AppLayer)
+//      below. That is the true bootstrap point: the AppLayer thunk runs only
+//      once every module export is initialized, so `Actor.appLayer` cannot be
+//      in TDZ and combined test runs stop cross-polluting each other's
+//      half-initialized layers.
+//   3. AppLayer owns the chain once:
+//        Actor.appLayer ← SessionPrompt.appLayer ← Command.appLayer ← MCP default layer
+//      Each appLayer leaves its MCP-bearing dependency unmet (see
+//      test/effect/app-runtime-mcp-singleton.test.ts).
 export const AppLayer = Layer.suspend(() =>
   Layer.mergeAll(
     Npm.defaultLayer,
@@ -97,15 +113,12 @@ export const AppLayer = Layer.suspend(() =>
     SessionPrune.defaultLayer,
     SessionRevert.defaultLayer,
     SessionSummary.defaultLayer,
-    SessionPrompt.defaultLayer,
     CronBridgeDefaultLayer,
     SessionCheckpoint.defaultLayer,
     Instruction.defaultLayer,
     LLM.defaultLayer,
     LSP.defaultLayer,
-    MCP.defaultLayer,
     McpAuth.defaultLayer,
-    Command.defaultLayer,
     Truncate.defaultLayer,
     ToolRegistry.defaultLayer,
     Format.defaultLayer,
@@ -118,35 +131,55 @@ export const AppLayer = Layer.suspend(() =>
     SessionShare.defaultLayer,
     ActorRegistry.defaultLayer,
     ActorWaiter.defaultLayer,
-    Actor.defaultLayer,
     TaskRegistry.defaultLayer,
     WorkflowRuntime.defaultLayer,
     Memory.defaultLayer,
+    History.defaultLayer,
+    // InstanceBootstrap (middleware/httpapi/worker init) depends on these two.
+    // They sit on BootstrapLayer; AppLayer must own them too or every
+    // AppRuntime.runPromise(InstanceBootstrap) 500s with a missing service.
     MemoryCapture.defaultLayer,
     CompactionCapture.defaultLayer,
-    History.defaultLayer,
+    // MCP, Command, SessionPrompt, and Actor form one ownership chain. Their
+    // standalone default layers remain convenient for focused tests, while
+    // the application graph deliberately provides each stateful service once.
+    Actor.appLayer.pipe(
+      Layer.provideMerge(SessionPrompt.appLayer.pipe(
+        Layer.provideMerge(Command.appLayer.pipe(Layer.provideMerge(MCP.defaultLayer))),
+      )),
+    ),
   ).pipe(Layer.provideMerge(Observability.layer), Layer.provideMerge(BashInteractive.defaultLayer)),
 )
 
-const rt = ManagedRuntime.make(AppLayer, { memoMap })
-type Runtime = Pick<typeof rt, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">
-const wrap = (effect: Parameters<typeof rt.runSync>[0]) => attach(effect as never) as never
+// Lazy: constructing ManagedRuntime at module load would evaluate AppLayer
+// (and thus Actor.appLayer) during the import graph's init, which is exactly
+// the TDZ window. First use is after bootstrap — see init-order comment above.
+const makeRuntime = () => ManagedRuntime.make(AppLayer, { memoMap })
+type RuntimeInstance = ReturnType<typeof makeRuntime>
+type Runtime = Pick<RuntimeInstance, "runSync" | "runPromise" | "runPromiseExit" | "runFork" | "runCallback" | "dispose">
+let rt: RuntimeInstance | undefined
+const activeRuntime = () => (rt ??= makeRuntime())
+const wrap = (effect: Parameters<RuntimeInstance["runSync"]>[0]) => attach(effect as never) as never
 
 export const AppRuntime: Runtime = {
   runSync(effect) {
-    return rt.runSync(wrap(effect))
+    return activeRuntime().runSync(wrap(effect))
   },
   runPromise(effect, options) {
-    return rt.runPromise(wrap(effect), options)
+    return activeRuntime().runPromise(wrap(effect), options)
   },
   runPromiseExit(effect, options) {
-    return rt.runPromiseExit(wrap(effect), options)
+    return activeRuntime().runPromiseExit(wrap(effect), options)
   },
   runFork(effect) {
-    return rt.runFork(wrap(effect))
+    return activeRuntime().runFork(wrap(effect))
   },
   runCallback(effect) {
-    return rt.runCallback(wrap(effect))
+    return activeRuntime().runCallback(wrap(effect))
   },
-  dispose: () => rt.dispose(),
+  dispose: () => {
+    const active = rt
+    rt = undefined
+    return active ? active.dispose() : Promise.resolve()
+  },
 }

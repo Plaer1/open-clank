@@ -1,0 +1,140 @@
+// Generated managed-provider contract constants; edit the JSON schema instead.
+export const PROTOCOL_VERSION = 1 as const
+export const PROVIDER_STORE_VERSION = 1 as const
+export const OPERATION_ROUTER_VERSION = 1 as const
+export const SCHEMA_VERSION = 2 as const
+export const SCHEMA_ID = "https://openclank.dev/contracts/managed-provider/v2" as const
+export const SCHEMA_HASH = "41620c9c18f1be69b82efd0413840cf2839e16e21193369d7311eb40595c430f" as const
+
+export const PROVIDER_STORE_METHODS = [
+  "_openclank/provider-store/v1/account/bind",
+  "_openclank/provider-store/v1/account/commit",
+  "_openclank/provider-store/v1/account/attempt",
+  "_openclank/provider-store/v1/credential/lease",
+  "_openclank/provider-store/v1/credential/replace",
+  "_openclank/provider-store/v1/refresh/acquire",
+  "_openclank/provider-store/v1/refresh/renew",
+  "_openclank/provider-store/v1/refresh/commit",
+  "_openclank/provider-store/v1/refresh/abort",
+] as const
+export const PROVIDER_CONTROL_METHODS = [
+  "_openclank/provider-control/v1/catalog",
+  "_openclank/provider-control/v1/connection/validate",
+  "_openclank/provider-control/v1/account/validate",
+  "_openclank/provider-control/v1/oauth/start",
+  "_openclank/provider-control/v1/oauth/poll",
+  "_openclank/provider-control/v1/oauth/callback",
+  "_openclank/provider-control/v1/oauth/cancel",
+] as const
+export const OPERATION_METHODS = [
+  "_openclank/operations/v1/journal/cas",
+  "_openclank/operations/v1/artifact/read",
+  "_openclank/operations/v1/artifact/write",
+  "_openclank/operations/v1/executor/invoke",
+  "_openclank/operations/v1/execute",
+  "_openclank/operations/v1/cancel",
+] as const
+export const SESSION_METHODS = [
+  "_openclank/session/v1/cwd/change",
+  "_openclank/session/v1/binding/read",
+  "_openclank/session/v1/code-context/read",
+  "_openclank/session/v1/settings/effective",
+  "_openclank/history/v1/query",
+  "_openclank/history/v1/mutate",
+  "_openclank/session/v1/goal/completed",
+] as const
+export const LOGGING_METHODS = [
+  "_openclank/logging/v1/admit",
+  "_openclank/logging/v1/events",
+] as const
+export const MANAGED_METHODS = [
+  "_openclank/provider-store/v1/account/bind",
+  "_openclank/provider-store/v1/account/commit",
+  "_openclank/provider-store/v1/account/attempt",
+  "_openclank/provider-store/v1/credential/lease",
+  "_openclank/provider-store/v1/credential/replace",
+  "_openclank/provider-store/v1/refresh/acquire",
+  "_openclank/provider-store/v1/refresh/renew",
+  "_openclank/provider-store/v1/refresh/commit",
+  "_openclank/provider-store/v1/refresh/abort",
+  "_openclank/provider-control/v1/catalog",
+  "_openclank/provider-control/v1/connection/validate",
+  "_openclank/provider-control/v1/account/validate",
+  "_openclank/provider-control/v1/oauth/start",
+  "_openclank/provider-control/v1/oauth/poll",
+  "_openclank/provider-control/v1/oauth/callback",
+  "_openclank/provider-control/v1/oauth/cancel",
+  "_openclank/operations/v1/journal/cas",
+  "_openclank/operations/v1/artifact/read",
+  "_openclank/operations/v1/artifact/write",
+  "_openclank/operations/v1/executor/invoke",
+  "_openclank/operations/v1/execute",
+  "_openclank/operations/v1/cancel",
+  "_openclank/session/v1/cwd/change",
+  "_openclank/session/v1/binding/read",
+  "_openclank/session/v1/code-context/read",
+  "_openclank/session/v1/settings/effective",
+  "_openclank/history/v1/query",
+  "_openclank/history/v1/mutate",
+  "_openclank/logging/v1/admit",
+  "_openclank/logging/v1/events",
+  "_openclank/session/v1/goal/completed",
+] as const
+export const OPERATIONS = [
+  "chat.stream",
+  "chat.complete",
+  "web.search",
+  "vision.describe",
+  "image.generate",
+  "image.edit",
+  "image.inpaint",
+  "image.img2img",
+  "image.upscale",
+  "image.denoise",
+  "image.segment",
+  "image.remove_background",
+  "image.restore_face",
+  "audio.synthesize",
+  "audio.transcribe",
+  "embeddings.create",
+] as const
+export const METHOD_DIRECTIONS = {
+  "_openclank/provider-store/v1/account/bind": "engine_to_host",
+  "_openclank/provider-store/v1/account/commit": "engine_to_host",
+  "_openclank/provider-store/v1/account/attempt": "engine_to_host",
+  "_openclank/provider-store/v1/credential/lease": "engine_to_host",
+  "_openclank/provider-store/v1/credential/replace": "engine_to_host",
+  "_openclank/provider-store/v1/refresh/acquire": "engine_to_host",
+  "_openclank/provider-store/v1/refresh/renew": "engine_to_host",
+  "_openclank/provider-store/v1/refresh/commit": "engine_to_host",
+  "_openclank/provider-store/v1/refresh/abort": "engine_to_host",
+  "_openclank/provider-control/v1/catalog": "host_to_engine",
+  "_openclank/provider-control/v1/connection/validate": "host_to_engine",
+  "_openclank/provider-control/v1/account/validate": "host_to_engine",
+  "_openclank/provider-control/v1/oauth/start": "host_to_engine",
+  "_openclank/provider-control/v1/oauth/poll": "host_to_engine",
+  "_openclank/provider-control/v1/oauth/callback": "host_to_engine",
+  "_openclank/provider-control/v1/oauth/cancel": "host_to_engine",
+  "_openclank/operations/v1/journal/cas": "engine_to_host",
+  "_openclank/operations/v1/artifact/read": "engine_to_host",
+  "_openclank/operations/v1/artifact/write": "engine_to_host",
+  "_openclank/operations/v1/executor/invoke": "engine_to_host",
+  "_openclank/operations/v1/execute": "host_to_engine",
+  "_openclank/operations/v1/cancel": "host_to_engine",
+  "_openclank/session/v1/cwd/change": "engine_to_host",
+  "_openclank/session/v1/binding/read": "engine_to_host",
+  "_openclank/session/v1/code-context/read": "engine_to_host",
+  "_openclank/session/v1/settings/effective": "host_to_engine",
+  "_openclank/history/v1/query": "engine_to_host",
+  "_openclank/history/v1/mutate": "engine_to_host",
+  "_openclank/logging/v1/admit": "engine_to_host",
+  "_openclank/logging/v1/events": "engine_to_host",
+  "_openclank/session/v1/goal/completed": "engine_to_host",
+} as const
+
+export type ProviderStoreMethod = (typeof PROVIDER_STORE_METHODS)[number]
+export type ProviderControlMethod = (typeof PROVIDER_CONTROL_METHODS)[number]
+export type OperationMethod = (typeof OPERATION_METHODS)[number]
+export type SessionMethod = (typeof SESSION_METHODS)[number]
+export type ManagedMethod = ProviderStoreMethod | ProviderControlMethod | OperationMethod | SessionMethod | (typeof LOGGING_METHODS)[number]
+export type Operation = (typeof OPERATIONS)[number]

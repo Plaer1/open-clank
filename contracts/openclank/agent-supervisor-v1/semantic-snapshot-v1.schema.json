@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openclank.dev/contracts/agent-supervisor-v1/semantic-snapshot-v1.schema.json",
+  "title": "Open Clank semantic snapshot v1",
+  "type": "object",
+  "required": ["schema_version", "owner_subject_id", "session_id", "semantic_epoch", "head_seq", "tail_seq", "transcript_revision", "transcript_sha256"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "owner_subject_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "semantic_epoch": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "head_seq": {"type": "integer", "minimum": 0},
+    "tail_seq": {"type": "integer", "minimum": 0},
+    "transcript_revision": {"type": "integer", "minimum": 0},
+    "transcript_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "turns": {"type": "array", "maxItems": 10000},
+    "messages": {"type": "array", "maxItems": 10000},
+    "thoughts": {"type": "array", "maxItems": 10000},
+    "tools": {"type": "array", "maxItems": 10000},
+    "plans": {"type": "array", "maxItems": 10000},
+    "tasks": {"type": "array", "maxItems": 10000},
+    "interactions": {"type": "array", "maxItems": 10000},
+    "actors": {"type": "array", "maxItems": 10000},
+    "errors": {"type": "array", "maxItems": 10000}
+  },
+  "additionalProperties": false
+}

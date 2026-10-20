@@ -1,0 +1,1 @@
+The three legal transitions reach A=(1,2), and the lower-bound argument uses anchor distance rather than a graph drawing.

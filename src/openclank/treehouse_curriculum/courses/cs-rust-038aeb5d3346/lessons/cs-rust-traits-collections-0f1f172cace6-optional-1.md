@@ -1,0 +1,1 @@
+A collection choice should follow access requirements, not whichever syntax is shorter.

@@ -1,0 +1,1 @@
+B is rejected first; A fits shorter paths and C more branching; the response names a relevant missing player-facing measure.

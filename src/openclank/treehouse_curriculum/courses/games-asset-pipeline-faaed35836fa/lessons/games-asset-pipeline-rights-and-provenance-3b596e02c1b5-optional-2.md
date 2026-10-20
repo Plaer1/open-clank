@@ -1,0 +1,1 @@
+CC BY requires attribution; BY-SA adds share-alike for adaptations; NC restricts commercial use; ND limits shared adaptations. Read the exact license and any separate permissions rather than treating these labels as interchangeable. Software dependencies use their own licenses. This course does not provide a general legal exemption for modding or reverse engineering.

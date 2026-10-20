@@ -4,6 +4,11 @@ import state from './state.js';
 import uiModule from '../ui.js';
 import { sortModelObjects } from '../modelSort.js';
 import { catalogEntries } from '../modelCatalog.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from '../modelLabels.js';
 
 var escapeHtml = uiModule.esc;
 
@@ -62,12 +67,21 @@ async function fetchModels() {
     data.items.forEach(item => {
       catalogEntries(item).forEach(entry => {
         const mid = entry.mid;
+        const provider = providerDisplayName(
+          entry.providerDisplayName || item.provider_display_name || entry.family,
+        );
+        const secondary = sharedSecondaryLabel({
+          label: item.share_label,
+          owner: item.shared_by,
+        });
         models.push({
           id: mid,
           url: item.url,
           name: (entry.displayName || mid).split('/').pop(),
           endpointId: item.endpoint_id || null,
-          endpointName: item.endpoint_name || '',
+          endpointName: item.shared === true
+            ? [sharedProviderLabel(provider), secondary].filter(Boolean).join(' · ')
+            : (item.endpoint_name || ''),
           type: classifyModel(mid),
         });
       });

@@ -53,7 +53,7 @@ def _drive(monkeypatch, url, lines, model):
 
     async def run():
         out = []
-        async for chunk in llm_core.stream_llm(
+        async for chunk in llm_core._legacy_stream_llm(
             url, model, [{"role": "user", "content": "hi"}],
             headers={"Authorization": "Bearer k"},
         ):

@@ -27,6 +27,7 @@ actually observed cancellation.
 """
 import asyncio
 import json
+from types import SimpleNamespace
 
 import src.agent_loop as al
 
@@ -48,6 +49,18 @@ def test_tool_task_cancelled_on_generator_close(monkeypatch):
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
     monkeypatch.setattr(al, "execute_tool_block", _slow_exec, raising=False)
+    monkeypatch.setattr(
+        al,
+        "resolve_chat_route",
+        lambda **kwargs: SimpleNamespace(
+            provider_model_id=kwargs.get("model_id") or "gpt-4o",
+            model_route_id="route-test",
+            provider_grant_id=None,
+            connection_id="connection-test",
+            runtime_model=f"connection-test/{kwargs.get('model_id') or 'gpt-4o'}",
+            capabilities={"tools": True},
+        ),
+    )
 
     native_calls = [{"name": "bash", "arguments": json.dumps({"command": "sleep 60"})}]
 
@@ -56,7 +69,7 @@ def test_tool_task_cancelled_on_generator_close(monkeypatch):
         yield f'data: {json.dumps({"type": "tool_calls", "calls": native_calls})}\n\n'
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "stream_agent_target", _fake_stream, raising=False)
 
     async def _run():
         gen = al.stream_agent_loop(

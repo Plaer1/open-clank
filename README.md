@@ -1,94 +1,104 @@
-# OpenAI Build Week.
+# Open Clank · Beta 1
 
-Codex made ALL of the master plans for Open Clank. Other models did a ton of the coding busywork; GPT-5.6 was the closer, and with less than an hour left, Codex fast mode came back in and basically saved the submission.
+![Open Clank](docs/assets/open-clank-banner.svg)
 
-It also made the Clanker theme—and, buried under that, the system that generates the metathemes. lol. We’ll talk about that one later.
+A self-hosted workspace for models, agents, files and knowledge.
 
-# Open Clank
+| Work | Where |
+| --- | --- |
+| Talk to models and use agent tools | Chat, Add Models, MiMo Code |
+| Create, edit and link material | Files, Editor, Wiki, Graph |
+| Plan and follow work | Tasks, calendar, email, reminders |
+| Learn and practice | TreeHouse: Programming, Games, AI and Open Clank |
+| Inspect and customize | History, Usage, Settings, themes and applet layouts |
 
-<p align="center">
-  <img src="docs/open-clanker.png" alt="Open Clanker mascot" width="560">
-</p>
+Editor and Wiki share documents, drafts and Undo. **Save** or Command/Control+S
+persists changes. Closing dirty work offers Save, Discard or Cancel. Local draft
+recovery is not a save. Files owns managed resources and image/Imps work.
 
+TreeHouse has four shared **Main Quests**: Programming, Games, AI and Open Clank.
+General concepts and product practice have separate homes, with linked topics
+and independent subject resume. Read freely; required work collects responses
+or actual outcome evidence. Self-report is labeled separately from reviewed or
+verified work. Responses, drafts and failed attempts stay available;
+prerequisites gate only confirmed practical success. Private courses, sharing
+and click-through Tutorials remain available. Read the maintained **TreeHouse**
+article through **Settings → Help**.
 
-## We did it!!
+![Programming, Games, AI and Open Clank in the TreeHouse hub](static/docs/media/treehouse-four-main-quests-20261014/preview-960.webp)
 
-<p align="center">
-<img width="3840" height="1561" alt="21__19-59--54" src="https://github.com/user-attachments/assets/8ffa8e21-afa4-4bb8-883d-06a17a8ac9c4" />
+## Start
 
-</p>
+**macOS 15+, Apple Silicon:** use `Open-Clank-1.0.2-macos-arm64.dmg` when offered
+by the [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1).
+Check its checksum and source/target provenance. Drag **OpenClank.app** to
+Applications, [install the verified offline artwork](docs/setup.md#macos-app-package)
+with its packaged CLI, then open the app. Private Python, Engine and native
+helpers are included. The pyramid-and-eye menu offers **Open** and **Quit**;
+there is no Dock icon. The Beta app is ad-hoc signed, not notarized.
 
-<p align="center">
-  A self-hosted system for turning curiosity into durable progress.
-</p>
+Create the first administrator in browser setup, then sign in. Authentication
+is required even on localhost. The normal address is `http://127.0.0.1:7777`;
+use the address printed by your launcher. Keep generated setup credentials
+private and change temporary passwords.
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="ROADMAP.md">Roadmap</a>
-</p>
+Your Open Clank account owns workspace data. Model access is separate:
+**Settings → Add Models → Local, API or Subscription**, then select a model in
+Chat. Provider subscriptions may not include API credits; check provider charges
+and quotas before sending requests.
 
-<p align="center">
-<img width="3839" height="2004" alt="image" src="https://github.com/user-attachments/assets/4a423519-25d0-4057-a09c-998b05d91778" />
-</p>
-
----
-
-Open Clank connects cited AI research, a local-first knowledge vault, evidence-based learning, calendars, email, notes, documents, scheduled agents, and local or API models through one trust-aware memory. Instead of restarting in a chatbot or shuttling context between apps, you can research a question, turn the findings into a course or plan, schedule the work, automate the routine parts, and preserve what mattered. Built on Odysseus, MiMoCode, and excellent open-source work, its contribution is not a new primitive; it is a clever, coherent composition where context, learning, and effort compound instead of leaking between tools.
-
-## Quick Start
-
-> This is the OpenAI Build Week snapshot. It is moving fast because, well, build week. xD
+Source setup needs Python 3.11+, Rust/Cargo and the platform prerequisites in
+[setup](docs/setup.md). On Apple Silicon, install Homebrew, ARM-native Python and
+Xcode Command Line Tools. A clone/source archive omits the full offline artwork:
+obtain matching part files and `emoji-assets.parts.json` from the
+[compact artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact),
+then run from the extracted source root:
 
 ```bash
-git clone https://github.com/Plaer1/open-clank.git
-cd open-clank
-cp .env.example .env
-docker compose up -d --build
+python3 scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
+python3 scripts/emoji_asset_bundle.py verify
+./start-macos.sh
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+First source setup downloads dependencies and builds native workers. Follow
+[complete source/artwork instructions](docs/setup.md#offline-emoji-artwork) and
+[upgrade preflight](docs/upgrading.md) for existing data.
 
-Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](docs/setup.md).
+## Support and limits
 
-## Features
+- Beta 1 is the first of several betas; machine version is `1.0.2`. Include the
+  installed revision when reporting problems.
+- macOS Apple Silicon package/source workflows have bounded qualification;
+  Intel/universal builds are not claimed. Windows **source** workflows are
+  tested; ARM64/x64 frozen packages still need release qualification. Use only
+  artifacts/architectures actually offered by a published release.
+- Linux release support remains unqualified. Docker is unsupported legacy material.
+- Models, tools and integrations depend on configuration and permissions.
+  Browser learning assets and JavaScript provide practice, not trusted grading
+  or arbitrary host-language execution. See [known limits](docs/known-limits.md).
+- Agents use the server account's OS permissions. Use an appropriately restricted
+  OS account or VM, protect credentials/backups, and read [security](SECURITY.md).
+- The inherited Odysseus document editor is no longer an improvement target;
+  Editor/Wiki own future authoring. Existing document and email compatibility
+  paths remain.
 
-- **Chat + Agents** — local/API models, tools, MCP, files, shell, skills, and memory.
-- **Cookbook** — hardware-aware model recommendations, downloads, and serving.
-- **Deep Research** — multi-step web research with source reading and report generation.
-- **Compare** — blind side-by-side model testing and synthesis.
-- **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
-- **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
-- **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
-- **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
+## Documentation and contributions
 
-## Demo
+**Settings → Help → Wiki documentation** or **Copal handbook** opens the same
+maintained read-only handbook in Wiki or Editor. Create personal documents for
+practice.
 
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
+[Setup](docs/setup.md) · [Upgrading](docs/upgrading.md) ·
+[Backup & restore](docs/backup-restore.md) · [Beta notes](docs/beta1.md) ·
+[Contributing](CONTRIBUTING.md) · [Security CI](docs/security-ci.md)
 
-## Contributing
+## Credits and license
 
-Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
-
-## Security
-
-Open Clank is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=Plaer1%2Fopen-clank&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Plaer1/open-clank&type=date&legend=top-left" />
- </picture>
-</a>
-
-## License
-
-AGPL-3.0-or-later -- see [LICENSE](LICENSE) and [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
-
-The previous [Odysseus wordmark](docs/odysseus-wordmark.png) remains available
-as a legacy identity asset; Open Clank and the Open Clanker mascot are the
-current project branding.
+Built on [Odysseus](https://github.com/odysseus-dev/odysseus), with Copal,
+[MiMo Code](https://github.com/XiaomiMiMo/mimo-code)/[opencode](https://github.com/anomalyco/opencode)
+and [Epic Games’ Lore](https://github.com/EpicGames/lore).
+[AgentsView](https://github.com/kenn-io/agentsview) inspired interface work;
+Google Noto Emoji and Emoji Kitchen supply artwork, with Xavier Salazar's Kitchen
+catalogue. [Acknowledgments](ACKNOWLEDGMENTS.md) contains component notices and
+provenance. **AGPL-3.0-or-later**; see [LICENSE](LICENSE). Included components retain
+their own licenses.

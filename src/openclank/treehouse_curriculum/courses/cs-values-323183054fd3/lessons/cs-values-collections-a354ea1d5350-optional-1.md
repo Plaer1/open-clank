@@ -1,0 +1,1 @@
+A tuple's fixed outer slots do not freeze objects stored inside them.

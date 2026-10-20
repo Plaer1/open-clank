@@ -1,0 +1,1 @@
+The reward revision addresses the named exploit; total costs are 4 for both A and 2.5 when split.

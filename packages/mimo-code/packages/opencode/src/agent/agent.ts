@@ -106,6 +106,13 @@ export const layer = Layer.effect(
         const defaults = Permission.fromConfig({
           "*": "allow",
           doom_loop: "ask",
+          skill: {
+            "*": "allow",
+            "compose:*": "deny",
+            "compose-next": "deny",
+          },
+          plan_enter: "deny",
+          plan_exit: "deny",
           external_directory: {
             "*": "ask",
             ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
@@ -132,6 +139,8 @@ export const layer = Layer.effect(
               defaults,
               Permission.fromConfig({
                 question: "allow",
+                plan_enter: "allow",
+                plan_exit: "allow",
               }),
               user,
             ),
@@ -170,6 +179,8 @@ export const layer = Layer.effect(
               defaults,
               Permission.fromConfig({
                 question: "allow",
+                plan_enter: "allow",
+                plan_exit: "allow",
                 external_directory: {
                   [path.join(Global.Path.data, "plans", "*")]: "allow",
                 },
@@ -201,12 +212,14 @@ export const layer = Layer.effect(
           compose: {
             name: "compose",
             color: "#a7a3d8",
-            description: "Compose mode. Orchestrates workflows with built-in compose skills.",
+            description:
+              "Compose mode (deprecated). Orchestrates workflows with built-in compose skills. For Fable/Sol-class models, use Build and run /compose-next instead.",
             options: {},
             permission: Permission.merge(
               defaults,
               Permission.fromConfig({
                 question: "allow",
+                skill: { "compose:*": "allow" },
               }),
               user,
             ),
@@ -291,6 +304,7 @@ export const layer = Layer.effect(
                 glob: "allow",
                 list: "allow",
                 bash: "allow",
+                exec: "allow",
                 webfetch: "allow",
                 websearch: "allow",
                 codesearch: "allow",
@@ -405,6 +419,7 @@ export const layer = Layer.effect(
                 grep: "allow",
                 memory: "allow",
                 bash: "allow",
+                exec: "allow",
                 external_directory: {
                   [path.join(Global.Path.data, "memory")]: "allow",
                   [path.join(Global.Path.data, "memory", "*")]: "allow",
@@ -412,7 +427,18 @@ export const layer = Layer.effect(
               }),
               user,
             ),
-            toolAllowlist: ["read", "write", "edit", "glob", "grep", "memory", "bash"],
+            toolAllowlist: [
+              "read",
+              "write",
+              "edit",
+              "apply_patch",
+              "view_image",
+              "glob",
+              "grep",
+              "memory",
+              "bash",
+              "exec",
+            ],
           },
           distill: {
             name: "distill",
@@ -432,6 +458,7 @@ export const layer = Layer.effect(
                 grep: "allow",
                 memory: "allow",
                 bash: "allow",
+                exec: "allow",
                 external_directory: {
                   [path.join(Global.Path.data, "memory")]: "allow",
                   [path.join(Global.Path.data, "memory", "*")]: "allow",
@@ -439,7 +466,18 @@ export const layer = Layer.effect(
               }),
               user,
             ),
-            toolAllowlist: ["read", "write", "edit", "glob", "grep", "memory", "bash"],
+            toolAllowlist: [
+              "read",
+              "write",
+              "edit",
+              "apply_patch",
+              "view_image",
+              "glob",
+              "grep",
+              "memory",
+              "bash",
+              "exec",
+            ],
           },
         }
 

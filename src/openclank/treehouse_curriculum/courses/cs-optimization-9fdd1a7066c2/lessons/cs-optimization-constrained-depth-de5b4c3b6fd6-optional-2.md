@@ -1,0 +1,1 @@
+For differentiable constrained problems, KKT conditions combine primal/dual feasibility, stationarity, and complementary slackness. Necessity needs suitable constraint qualifications; convex settings provide stronger sufficiency results. Sensitivity/shadow-price interpretations need assumptions and sign conventions. No general KKT solver or proof of every theorem is claimed.

@@ -1,0 +1,1 @@
+An actual run shows movement, one score transition and a reset; the answer assigns each state to its owner.

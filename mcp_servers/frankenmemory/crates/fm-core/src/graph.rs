@@ -1,5 +1,5 @@
 //! Graph memory overlay — types and identity (design:
-//! .futures/frankenmemory-update/graph-memory-design.md §2.1).
+//! .clanker/futures/frankenmemory-update/graph-memory-design.md §2.1).
 //!
 //! Nodes carry deterministic UUIDv5 identity over `"{kind}:{norm_name}"`,
 //! so re-capturing the same entity dedups/merges for free and recapture is
@@ -61,12 +61,13 @@ impl GraphScope {
     }
 
     pub fn node_id(&self, kind: &str, name: &str) -> String {
+        let literal_code=matches!(kind,"file"|"code_symbol"|"module"|"callable") && name.split_once("::").is_some_and(|(namespace,_)|namespace.strip_prefix("checkout_").is_some_and(|id|id.len()==32 && id.bytes().all(|b|b.is_ascii_hexdigit())));
         let key = format!(
             "{}:{}:{}:{}",
             self.owner.trim(),
             self.workspace_id.trim(),
             kind.trim().to_lowercase(),
-            norm_name(name)
+            if literal_code {name.to_string()}else{norm_name(name)}
         );
         Uuid::new_v5(&FM_GRAPH_NAMESPACE, key.as_bytes()).to_string()
     }

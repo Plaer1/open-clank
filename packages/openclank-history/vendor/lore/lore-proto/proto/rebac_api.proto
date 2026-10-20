@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ucs.auth;
+
+service RebacApi {
+  rpc CreateResource(CreateResourceRequest) returns (CreateResourceResponse) {};
+  rpc DeleteResource(DeleteResourceRequest) returns (DeleteResourceResponse) {};
+}
+
+// Messages for requests/responses
+
+message CreateResourceRequest {
+  string resource_id = 1;
+  string resource_name = 2;
+}
+message CreateResourceResponse {}
+
+message DeleteResourceRequest { string resource_id = 1; }
+message DeleteResourceResponse {}

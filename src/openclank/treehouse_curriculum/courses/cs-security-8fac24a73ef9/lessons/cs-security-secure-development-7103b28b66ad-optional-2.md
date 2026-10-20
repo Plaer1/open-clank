@@ -1,0 +1,1 @@
+Supply-chain trust includes dependency origin, review, build reproducibility/provenance where applicable, and update handling. Defense in depth combines controls with distinct failure modes; it does not justify leaving the primary check absent.

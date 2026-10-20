@@ -76,7 +76,7 @@ describe("Permission skip-all runtime toggle", () => {
   )
 
   it.live(
-    "forced-ask permissions (bash_delete) still block under skip-all",
+    "forced-ask permissions (bash_destructive) still block under skip-all",
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
         const perm = yield* Permission.Service
@@ -87,7 +87,7 @@ describe("Permission skip-all runtime toggle", () => {
         })
         // interactive:false so the forced ask fails fast instead of blocking the test.
         const result = yield* perm
-          .ask(buildRequest({ permission: "bash_delete" as never, interactive: false }))
+          .ask(buildRequest({ permission: "bash_destructive" as never, interactive: false }))
           .pipe(Effect.exit)
         unsub()
         expect(result._tag).toBe("Failure")

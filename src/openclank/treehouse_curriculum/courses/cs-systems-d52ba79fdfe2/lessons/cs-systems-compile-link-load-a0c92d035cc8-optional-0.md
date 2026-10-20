@@ -1,0 +1,1 @@
+Give each stage's artifact and distinguish machine-code generation from resolving cross-object names.

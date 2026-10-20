@@ -1,0 +1,23 @@
+{
+  "id": "batch-024",
+  "group": "docs.openclank-docs-editor",
+  "surface": "docs",
+  "entry_count": 1,
+  "character_count": 2046,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-editor.body",
+      "source": "# Editor\n\nEditor is the shared document workspace. Markdown pages, Wiki pages, typed\nnotes, Bases, Canvas, tables and media all open here as typed leaves with\ntabs and splits.\n\n## Pages and tabs\n\nOpen a document from the file tree or a link. Use tabs for parallel reading,\nand splits for side-by-side work. Navigation intent is honored: a normal click\nopens in the current tab, Command/Control-click opens a new tab, and the\ncontext menu offers split right or split below.\n\nLinks between documents navigate the tab you are in. Explicit new-tab\nnavigation stays explicit — nothing hijacks your current view.\n\n## Wiki pages\n\nWiki is a page type inside Editor, not a separate application. The Wiki\nlibrary lists your knowledge pages and can create, export and import them as\n`.memes` files. Opening a page gives you the article view with links,\nbacklinks and details — the same tabs, splits and save ownership as any other\ndocument.\n\nWikilinks look like `[[Some Page]]`. Existing targets open on click; missing\ntargets are shown as broken links you can create. Backlinks on a page list\nevery page that points at it.\n\nSee the [Wiki library](clank://wiki) or open [Editor](clank://editor).\n\n## Templates\n\nTemplates live in a folder you choose in\n[Settings](clank://settings). Inserting a template copies its assets and\nlinks into the current document and keeps resource identity, so attachments\nstay attached.\n\n## Source comments\n\nRich source comments attach a comment to a range of the document source. They\ntravel with the document and survive edits outside the range. Comments are\npart of the document record, not a separate overlay store.\n\n## Media and attachments\n\nImages, audio, video and PDFs can be attached to a document or referenced by\npath. Embedded media renders inline in the Markdown view. Attached files are\nowned by the document and move with it.\n\nThe [[Markdown Formatting Demo]] shows every formatting element this renderer\nsupports, with its raw source one click away.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:252"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    }
+  ]
+}

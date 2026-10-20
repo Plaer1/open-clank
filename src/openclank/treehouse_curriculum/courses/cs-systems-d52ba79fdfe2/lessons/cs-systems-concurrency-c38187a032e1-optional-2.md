@@ -1,0 +1,1 @@
+A race/state bug differs from slow execution. Deadlock can arise from circular waiting; consistent lock order is one prevention technique. Parallel hardware does not remove dependencies. Distributed messages add delay/failure and need their own protocol assumptions.

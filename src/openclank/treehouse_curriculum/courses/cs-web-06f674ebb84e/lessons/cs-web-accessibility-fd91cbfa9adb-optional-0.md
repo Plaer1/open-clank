@@ -1,0 +1,1 @@
+Predicted Tab order: Read the cards → About this page → Name input; Shift+Tab reverses. Restore for="name" to match id="name". Clicking the label should focus the input; inspect the actual accessible name rather than guessing browser heuristics. State which keyboard/name/layout checks you performed and which remain predicted.

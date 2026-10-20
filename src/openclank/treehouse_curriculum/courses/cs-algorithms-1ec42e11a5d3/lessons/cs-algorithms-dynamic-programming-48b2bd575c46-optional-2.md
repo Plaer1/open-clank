@@ -1,0 +1,1 @@
+The Bellman principle says an optimal continuation must be optimal for its reached state under the model. History-dependent constraints require a richer state. Games owns game/MDP applications; optimization owns objective and uncertainty choices.

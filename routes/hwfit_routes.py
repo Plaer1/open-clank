@@ -429,11 +429,27 @@ def setup_hwfit_routes():
             system["available_ram_gb"] = 0
             system["total_ram_gb"] = 0
         system = _apply_manual_hardware(system, manual_mode, manual_gpu_count, manual_vram_gb, manual_ram_gb, manual_backend)
-        # Image models use a single GPU — always use per-GPU VRAM
-        gpu_vrams = [float(g.get("vram_gb") or 0) for g in (system.get("gpus") or []) if isinstance(g, dict)]
-        single_vram = max(gpu_vrams) if gpu_vrams else ((system.get("gpu_vram_gb") or 0) / max(system.get("gpu_count") or 1, 1))
-        system["gpu_vram_gb"] = single_vram
-        system["gpu_count"] = 1 if single_vram > 0 else 0
+        try:
+            requested_gpu_count = int(gpu_count) if gpu_count != "" else None
+        except ValueError:
+            requested_gpu_count = None
+        if requested_gpu_count == 0:
+            # Respect the UI's RAM toggle. Before this route always rewrote the
+            # system to best-single-GPU VRAM, so image rows never changed when
+            # switching RAM/GPU.
+            system["has_gpu"] = False
+            system["gpu_vram_gb"] = 0
+            system["gpu_count"] = 0
+            system["gpu_only"] = False
+        else:
+            # Image diffusion backends generally use one device per pipeline,
+            # so rank GPU mode against the best single GPU rather than total
+            # multi-GPU VRAM.
+            gpu_vrams = [float(g.get("vram_gb") or 0) for g in (system.get("gpus") or []) if isinstance(g, dict)]
+            single_vram = max(gpu_vrams) if gpu_vrams else ((system.get("gpu_vram_gb") or 0) / max(system.get("gpu_count") or 1, 1))
+            system["gpu_vram_gb"] = single_vram
+            system["gpu_count"] = 1 if single_vram > 0 else 0
+            system["gpu_only"] = True if single_vram > 0 else False
         results = rank_image_models(system, search=search or None, sort=sort)
         return {"system": system, "models": results}
 

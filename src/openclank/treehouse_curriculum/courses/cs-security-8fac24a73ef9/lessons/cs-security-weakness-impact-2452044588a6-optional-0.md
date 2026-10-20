@@ -1,0 +1,1 @@
+Fact: the supplied harness transcript reports unhandled failure for1,,2 in TinyCounts-native0.1. Hypothesis: empty-field validation or indexing is wrong; the message alone does not diagnose memory corruption. Remote code execution or data access is unproven. Attribute the observations to the fictional card.

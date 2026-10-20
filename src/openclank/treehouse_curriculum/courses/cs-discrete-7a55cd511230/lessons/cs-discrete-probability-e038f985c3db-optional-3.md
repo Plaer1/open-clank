@@ -1,0 +1,1 @@
+Covariance E[(X−E[X])(Y−E[Y])] measures signed joint variation. Independence implies zero covariance when the expectations exist; zero covariance alone does not imply independence. Let X be uniform on −1,0,1 and Y=X²: Y depends on X, but E[XY]=0 and E[X]=0, so covariance is0. Check the three rows directly.

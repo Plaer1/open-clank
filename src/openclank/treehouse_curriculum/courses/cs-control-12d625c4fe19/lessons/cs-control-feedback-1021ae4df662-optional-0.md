@@ -1,0 +1,1 @@
+Give 4,2,1 and −12,18; explain decay versus growing oscillation and one model boundary.

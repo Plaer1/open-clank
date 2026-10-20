@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "request_id": "00000000000000000000000000000001",
+  "ok": true,
+  "event": "hello_ack",
+  "payload": {
+    "ready": false,
+    "reason": "host_activation_required",
+    "capabilities": {}
+  }
+}

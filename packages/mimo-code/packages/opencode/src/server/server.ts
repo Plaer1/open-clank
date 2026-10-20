@@ -16,6 +16,8 @@ import { GlobalRoutes } from "./routes/global"
 import { WorkspaceRouterMiddleware } from "./workspace"
 import { InstanceMiddleware } from "./routes/instance/middleware"
 import { WorkspaceRoutes } from "./routes/control/workspace"
+import { setChildProcessEnv } from "@/util/child-process-env"
+import { LLMServerTokens } from "@/llm-server/tokens"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -86,6 +88,25 @@ export async function openapi() {
       openapi: "3.1.1",
     },
   })
+  const schemas = result.components?.schemas
+  if (schemas && !schemas.__schema0) {
+    // hono-openapi emits this recursive JSON value as a local $def while
+    // referring to it through components. Promote the shared target so the
+    // published contract and generated SDK resolve the pointer correctly.
+    schemas.__schema0 = {
+      anyOf: [
+        { type: "string" },
+        { type: "number" },
+        { type: "boolean" },
+        { type: "null" },
+        { type: "array", items: { $ref: "#/components/schemas/__schema0" } },
+        {
+          type: "object",
+          additionalProperties: { $ref: "#/components/schemas/__schema0" },
+        },
+      ],
+    }
+  }
   return result
 }
 
@@ -98,7 +119,10 @@ export async function listen(opts: {
   mdnsDomain?: string
   cors?: string[]
   noAuth?: boolean
+  childEnv?: NodeJS.ProcessEnv
+  advertise?: boolean
 }): Promise<Listener> {
+  if (opts.childEnv) setChildProcessEnv(opts.childEnv)
   const isLoopback =
     opts.hostname === "127.0.0.1" || opts.hostname === "localhost" || opts.hostname === "::1"
   if (!isLoopback && !Flag.MIMOCODE_SERVER_PASSWORD && !opts.noAuth) {
@@ -128,6 +152,22 @@ export async function listen(opts: {
     log.warn("mDNS enabled but hostname is loopback; skipping mDNS publish")
   }
 
+  const advertise = opts.advertise !== false
+  const directory = process.cwd()
+  const advertisedHostname = opts.hostname === "0.0.0.0" || opts.hostname === "::" ? "127.0.0.1" : opts.hostname
+  const advertised = new URL("http://localhost")
+  advertised.hostname = advertisedHostname
+  advertised.port = String(server.port)
+  if (advertise) {
+    await LLMServerTokens.publish(directory, {
+      pid: process.pid,
+      hostname: advertisedHostname,
+      port: server.port,
+      url: advertised.toString(),
+      started: Date.now(),
+    }).catch((error) => log.warn("failed to advertise llm-server address", { error: String(error) }))
+  }
+
   let closing: Promise<void> | undefined
   return {
     hostname: opts.hostname,
@@ -135,6 +175,7 @@ export async function listen(opts: {
     url: next,
     stop(close?: boolean) {
       closing ??= (async () => {
+        if (advertise) await LLMServerTokens.unpublish(directory, process.pid, server.port).catch(() => {})
         if (mdns) MDNS.unpublish()
         await server.stop(close)
       })()

@@ -1,0 +1,1 @@
+An OS or hypervisor enforces the relevant isolation boundary. A snapshot supports recovery but does not establish perfect containment. A translated or instrumented environment may change timing and observable behavior; state those differences when comparing runs.

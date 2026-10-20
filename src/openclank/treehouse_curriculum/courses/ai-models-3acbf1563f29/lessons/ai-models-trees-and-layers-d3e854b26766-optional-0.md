@@ -1,0 +1,1 @@
+Toy targets [3,5], baseline predictions [2,4], residuals [1,1]. Adding a learned correction represented here as +1 gives [3,5]. Matching these supplied examples is not evidence of generalization.

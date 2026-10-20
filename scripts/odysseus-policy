@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Thin local client for Open Clank project policy and Git hooks."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.policy_local import (
+    PolicyClient,
+    PolicyLocalError,
+    PolicyWorker,
+    git_policy_selection,
+    git_project_root,
+    set_git_policy_selection,
+)
+
+
+def _client(args: argparse.Namespace) -> PolicyClient:
+    return PolicyClient(args.socket)
+
+
+def _request(args: argparse.Namespace, *, action: str) -> dict[str, object]:
+    root = git_project_root(args.root)
+    profile, project_id = git_policy_selection(root)
+    if not project_id:
+        raise PolicyLocalError("no project policy selection; run `open-clank policy use`")
+    return _client(args).request(
+        {
+            "action": action,
+            "profile": profile,
+            "project_id": project_id,
+            "project_root": str(root),
+        },
+        start_worker=not args.no_start,
+    )
+
+
+def command_use(args: argparse.Namespace) -> int:
+    root = git_project_root(args.root)
+    response = _client(args).request(
+        {
+            "action": "select",
+            "profile": args.profile,
+            "project_id": args.project,
+            "project_root": str(root),
+        },
+        start_worker=not args.no_start,
+    )
+    set_git_policy_selection(
+        root,
+        profile=str(response["profile"]),
+        project_id=str(response["project_id"]),
+    )
+    print(json.dumps(response, sort_keys=True))
+    return 0
+
+
+def command_check(args: argparse.Namespace) -> int:
+    response = _request(args, action=args.stage)
+    print(json.dumps(response, sort_keys=True))
+    return 0 if response.get("allowed") else 1
+
+
+def command_hook(args: argparse.Namespace) -> int:
+    response = _request(args, action=args.stage)
+    if response.get("allowed"):
+        return 0
+    for finding in response.get("findings") or []:
+        print(
+            f"{finding.get('level', 'block')}: {finding.get('henxel', 'project policy blocked the action')}",
+            file=sys.stderr,
+        )
+        for detail in finding.get("details") or []:
+            print(f"  {detail}", file=sys.stderr)
+    return 1
+
+
+def command_serve(args: argparse.Namespace) -> int:
+    from src.constants import FM_DB_PATH
+
+    os.umask(0o077)
+    PolicyWorker(
+        db_path=args.db or FM_DB_PATH,
+        state_dir=args.state_dir,
+        socket_path=args.socket,
+    ).serve_forever()
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="open-clank policy")
+    parser.add_argument("--socket", help="override the owner-local worker socket")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    use = subcommands.add_parser("use", help="select a signed local policy profile")
+    use.add_argument("profile")
+    use.add_argument("--project", required=True, help="stable Open Clank project id")
+    use.add_argument("--root", default=".")
+    use.add_argument("--no-start", action="store_true", help=argparse.SUPPRESS)
+    use.set_defaults(func=command_use)
+
+    check = subcommands.add_parser("check", help="check through the contained policy worker")
+    check.add_argument("--root", default=".")
+    check.add_argument("--stage", choices=("check", "pre-commit", "pre-push"), default="check")
+    check.add_argument("--no-start", action="store_true", help=argparse.SUPPRESS)
+    check.set_defaults(func=command_check)
+
+    hook = subcommands.add_parser("hook", help="noninteractive fail-closed Git-hook entrypoint")
+    hook.add_argument("stage", choices=("pre-commit", "pre-push"))
+    hook.add_argument("--root", default=".")
+    hook.add_argument("--no-start", action="store_true", help=argparse.SUPPRESS)
+    hook.set_defaults(func=command_hook)
+
+    serve = subcommands.add_parser("serve", help="run the independent owner-local worker")
+    serve.add_argument("--db", help="Frankenmemory policy-store path")
+    serve.add_argument("--state-dir", help="owner-private policy profile directory")
+    serve.set_defaults(func=command_serve)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return int(args.func(args))
+    except PolicyLocalError as exc:
+        print(f"open-clank policy: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

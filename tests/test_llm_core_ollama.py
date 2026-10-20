@@ -32,7 +32,7 @@ def test_llm_call_posts_native_ollama_payload(monkeypatch):
 
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
 
-    result = llm_core.llm_call(
+    result = llm_core._legacy_llm_call(
         "https://ollama.com/api",
         "gpt-oss:120b-test",
         [{"role": "user", "content": "Say OK"}],
@@ -64,7 +64,7 @@ def test_llm_call_posts_bare_local_ollama_to_native_api(monkeypatch):
 
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
 
-    result = llm_core.llm_call(
+    result = llm_core._legacy_llm_call(
         "http://localhost:11434",
         "llama3.2",
         [{"role": "user", "content": "Say OK"}],
@@ -98,7 +98,7 @@ def test_openai_compatible_chat_url_shapes(monkeypatch):
         ),
     ]
     for i, (base_url, expected_url) in enumerate(cases):
-        result = llm_core.llm_call(
+        result = llm_core._legacy_llm_call(
             base_url,
             f"openai-compatible-{i}",
             [{"role": "user", "content": f"Say OK {i}"}],
@@ -271,7 +271,7 @@ def test_llm_call_threads_discovered_num_ctx(monkeypatch):
 
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
 
-    llm_core.llm_call(
+    llm_core._legacy_llm_call(
         "https://ollama.com/api",
         "kimi-k2",
         [{"role": "user", "content": "Say OK"}],
@@ -309,7 +309,7 @@ def test_stream_llm_threads_discovered_num_ctx(monkeypatch):
     monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: True)
 
     async def collect():
-        return [chunk async for chunk in llm_core.stream_llm(
+        return [chunk async for chunk in llm_core._legacy_stream_llm(
             "https://ollama.com/api",
             "kimi-k2",
             [{"role": "user", "content": "Say OK"}],

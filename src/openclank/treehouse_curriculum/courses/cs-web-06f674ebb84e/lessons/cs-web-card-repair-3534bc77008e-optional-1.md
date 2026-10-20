@@ -1,0 +1,1 @@
+A click handler or tabindex alone does not supply native hyperlink semantics.

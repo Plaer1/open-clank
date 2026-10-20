@@ -1,0 +1,1 @@
+Use each row's dot product with the input vector; do not multiply matching positions only.

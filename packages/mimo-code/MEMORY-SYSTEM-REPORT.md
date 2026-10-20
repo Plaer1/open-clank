@@ -1,7 +1,7 @@
 # MiMo-Code Memory System — Full Investigation Report
 
 **Date:** 2026-06-12
-**Source:** `/home/e/sauce/ai/agents/mimo-code/packages/opencode/src/`
+**Source:** `/path/to/`
 
 ---
 

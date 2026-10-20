@@ -1,0 +1,1 @@
+Reversing the direction of the solver claim or introducing loops breaks this reduction.

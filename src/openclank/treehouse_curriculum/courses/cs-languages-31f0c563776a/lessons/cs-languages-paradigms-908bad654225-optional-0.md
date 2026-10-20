@@ -1,0 +1,1 @@
+Both compute the same result for a stated input; distinguish explicit accumulator from composition.

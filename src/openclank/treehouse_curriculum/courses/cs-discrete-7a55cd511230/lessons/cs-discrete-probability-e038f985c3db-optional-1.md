@@ -1,0 +1,1 @@
+After conditioning, divide by the probability of the condition; don't keep the original denominator 6.

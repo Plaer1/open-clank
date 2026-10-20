@@ -1,0 +1,1 @@
+Lifetimes express relationships between reference validity, not a command to extend storage. A returned reference cannot outlive what it borrows. Ownership avoids many memory-safety errors in safe Rust; it does not guarantee correct application logic.

@@ -3,7 +3,7 @@
  *
  * Pure function — takes the source pixel array + seed + tolerance and
  * returns a mask canvas with white where the fill landed. The legacy
- * gallery editor's magic-wand tool delegates to this.
+ * Imps magic-wand tool delegates to this.
  *
  * @param {Uint8ClampedArray|Uint8Array} src   RGBA bytes (length = w*h*4).
  * @param {number} w                           Pixel width.

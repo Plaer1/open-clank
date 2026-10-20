@@ -1,0 +1,1 @@
+Report 6/integer, "42"/text, 6/integer, and explain failed numeric parsing.

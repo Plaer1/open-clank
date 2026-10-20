@@ -1,0 +1,1 @@
+For x≡1(mod2), x≡2(mod3), list candidates0…5: only5 satisfies both; solutions repeat every6. For x≡0(mod2), x≡1(mod4), no solution exists: the latter is odd. Pairwise-coprime moduli give a unique residue modulo their product; do not drop that hypothesis. This is a toy arithmetic example, not secure encryption.

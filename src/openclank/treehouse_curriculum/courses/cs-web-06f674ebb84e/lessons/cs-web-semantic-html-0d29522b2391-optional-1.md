@@ -1,0 +1,1 @@
+Visual proximity alone does not create a programmatic label.

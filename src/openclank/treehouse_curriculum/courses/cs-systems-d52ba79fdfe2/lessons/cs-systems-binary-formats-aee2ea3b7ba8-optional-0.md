@@ -1,0 +1,1 @@
+Distinguish metadata from instructions and object from executable; state that symbols/debug data may be absent.

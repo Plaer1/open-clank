@@ -1,0 +1,1 @@
+STRIDE prompts spoofing, tampering, repudiation, disclosure, denial of service, and elevation of privilege. ATT&CK catalogs observed adversary techniques; it is not the same taxonomy. Model likelihood/impact under stated assumptions, not an invented universal risk score.

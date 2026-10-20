@@ -1,0 +1,1 @@
+0,1,2,1,1,2,2; each transition refers to smaller nonnegative sums.

@@ -1,0 +1,1 @@
+Give 5, 256 possible patterns, and distinguish exact mathematical number from stored approximation.

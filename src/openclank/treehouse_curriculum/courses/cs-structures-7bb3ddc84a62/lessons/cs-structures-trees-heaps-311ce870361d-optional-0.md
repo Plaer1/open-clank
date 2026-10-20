@@ -1,0 +1,1 @@
+Yes for its tree parent pairs; no, array order is not sorted.

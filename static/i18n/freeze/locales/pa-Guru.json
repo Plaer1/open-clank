@@ -1,0 +1,19 @@
+{
+  "id": "pa-Guru",
+  "name": "ਪੰਜਾਬੀ",
+  "dir": "ltr",
+  "catalog": "pa-Guru",
+  "html_lang": "pa-Guru",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 6434,
+    "english_fallback": 3188
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

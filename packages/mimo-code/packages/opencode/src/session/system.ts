@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect"
 
 import { Instance } from "../project/instance"
+import { InstanceRef } from "@/effect/instance-ref"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -8,6 +9,7 @@ import PROMPT_BEAST from "./prompt/beast.txt"
 import PROMPT_GEMINI from "./prompt/gemini.txt"
 import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
+import PROMPT_GPT_SUBAGENT_TOOLS from "../agent/prompt/gpt-tools.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_DEEPSEEK from "./prompt/deepseek.txt"
@@ -15,33 +17,46 @@ import PROMPT_GLM from "./prompt/glm.txt"
 import PROMPT_MINIMAX from "./prompt/minimax.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
 import { Provider } from "@/provider"
+import { ManagedProvider } from "@/acp/managed-provider"
 import { sortVisionModels } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
+import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
+import { usesGPTToolset } from "@/tool/gpt"
 
 export function provider(model: Provider.Model) {
-  if (model.api.id.includes("gpt-4") || model.api.id.includes("o1") || model.api.id.includes("o3"))
-    return [PROMPT_BEAST]
-  if (model.api.id.includes("gpt")) {
-    if (model.api.id.includes("codex")) {
-      return [PROMPT_CODEX]
-    }
-    return [PROMPT_GPT]
+  const prompt = (id: string) => {
+    if (id.includes("gpt-4") || id.includes("o1") || id.includes("o3")) return PROMPT_BEAST
+    if (id.includes("gpt")) return id.includes("codex") ? PROMPT_CODEX : PROMPT_GPT
+    if (id.includes("gemini-")) return PROMPT_GEMINI
+    if (id.includes("claude")) return PROMPT_ANTHROPIC
+    if (id.toLowerCase().includes("trinity")) return PROMPT_TRINITY
+    if (id.toLowerCase().includes("kimi")) return PROMPT_KIMI
+    if (id.toLowerCase().includes("deepseek")) return PROMPT_DEEPSEEK
+    if (id.toLowerCase().includes("glm")) return PROMPT_GLM
+    if (id.toLowerCase().includes("minimax")) return PROMPT_MINIMAX
   }
-  if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
-  if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-  if (model.api.id.toLowerCase().includes("trinity")) return [PROMPT_TRINITY]
-  if (model.api.id.toLowerCase().includes("kimi")) return [PROMPT_KIMI]
-  if (model.api.id.toLowerCase().includes("deepseek")) return [PROMPT_DEEPSEEK]
-  if (model.api.id.toLowerCase().includes("glm")) return [PROMPT_GLM]
-  if (model.api.id.toLowerCase().includes("minimax")) return [PROMPT_MINIMAX]
-  return [PROMPT_DEFAULT]
+  return [prompt(model.id) ?? prompt(model.api.id) ?? PROMPT_DEFAULT]
+}
+
+export function agent(agent: Agent.Info, model: Provider.Model) {
+  const base = agent.prompt ? [agent.prompt] : provider(model)
+  if (agent.mode !== "subagent" || agent.toolAllowlist?.length === 0 || !usesGPTToolset(model.id)) return base
+  if (!agent.prompt && base.includes(PROMPT_GPT)) return base
+  return [...base, PROMPT_GPT_SUBAGENT_TOOLS]
 }
 
 export interface Interface {
   readonly environment: (model: Provider.Model, now: number) => Effect.Effect<string[]>
-  readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
+  readonly skills: (agent: Agent.Info, model?: SkillSearchModel) => Effect.Effect<string | undefined>
+  readonly available: (agent?: Agent.Info) => Effect.Effect<Skill.Info[]>
+  readonly all: () => Effect.Effect<Skill.Info[]>
+  /** Trust-gated resolve for host slash/mention injection (user-explicit mode). */
+  readonly getForInvocation: (
+    name: string,
+    mode: Skill.InvocationMode,
+  ) => Effect.Effect<Skill.InvocationResult>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -54,7 +69,8 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
-        const project = Instance.project
+        const instance = (yield* InstanceRef) ?? Instance.current
+        const project = instance.project
         const base = [
           [
             // Identity is never claimed here — who the agent IS comes from the
@@ -64,8 +80,8 @@ export const layer = Layer.effect(
             `You are powered by the model named ${model.api.id}. The exact model ID is ${model.providerID}/${model.api.id}`,
             `Here is some useful information about the environment you are running in:`,
             `<env>`,
-            `  Working directory: ${Instance.directory}`,
-            `  Workspace root folder: ${Instance.worktree}`,
+            `  Working directory: ${instance.directory}`,
+            `  Workspace root folder: ${instance.worktree}`,
             `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
             // Anchored to the session's creation time (not request time) so this block
@@ -76,12 +92,17 @@ export const layer = Layer.effect(
           ].join("\n"),
           `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`,
         ]
+        // Vision guidance follows the selected model's declared route capability.
+        // Provider/model family names are not evidence that this exact adapter route
+        // can carry image bytes, and must never suppress an explicit fallback.
         if (!model.capabilities.input.image) {
           // NOTE: vision models are resolved per-call (lazy). If provider list changes
           // mid-session, this block may differ between turns and break cached system prefix.
           // In practice provider config is stable within a session.
-          const preferred = yield* provider.getVisionModel().pipe(Effect.orElseSucceed(() => undefined))
-          const visionModels = yield* provider
+          const preferred = yield* provider.getVisionModel(model).pipe(Effect.orElseSucceed(() => undefined))
+          const visionModels = ManagedProvider.enabled()
+            ? preferred ? [`${preferred.providerID}/${preferred.id}`] : []
+            : yield* provider
             .list()
             .pipe(
               Effect.map((providers) =>
@@ -111,18 +132,46 @@ export const layer = Layer.effect(
         return base
       }),
 
-      skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
+      skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info, model?: SkillSearchModel) {
         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
 
         const list = yield* skill.available(agent)
 
+        if (model && isSkillSearchDisabled(model)) {
+          return [
+            "Skills provide specialized instructions and workflows for specific tasks.",
+            "Use the skill tool to load a skill when a task matches its description.",
+            Skill.fmt(list, { verbose: true }),
+          ].join("\n")
+        }
+
         return [
           "Skills provide specialized instructions and workflows for specific tasks.",
+          "On the first user query in a session, when the task might benefit from a specialized workflow, call skill_search to find the best matching non-Compose skill.",
+          "Rewrite the user's request into a concise Skill Query with these dimensions when available: action, input, output, audience.",
+          "Preserve an explicitly mentioned skill ID, name, or alias verbatim in the Skill Query so exact matching can take priority over BM25.",
+          "If skill_search returns a loaded_skill_id, follow the loaded instructions. If it returns uncertain candidates, choose the best fit or continue without a skill. If it returns no_match, continue normally.",
+          "Compose skills are not searchable; load an explicitly requested Compose skill directly with the skill tool.",
           "Use the skill tool to load a skill when a task matches its description.",
           // the agents seem to ingest the information about skills a bit better if we present a more verbose
           // version of them here and a less verbose version in tool description, rather than vice versa.
           Skill.fmt(list, { verbose: true }),
         ].join("\n")
+      }),
+
+      available: Effect.fn("SystemPrompt.available")(function* (agent?: Agent.Info) {
+        return yield* skill.available(agent)
+      }),
+
+      all: Effect.fn("SystemPrompt.all")(function* () {
+        return yield* skill.all()
+      }),
+
+      getForInvocation: Effect.fn("SystemPrompt.getForInvocation")(function* (
+        name: string,
+        mode: Skill.InvocationMode,
+      ) {
+        return yield* skill.getForInvocation(name, mode)
       }),
     })
   }),

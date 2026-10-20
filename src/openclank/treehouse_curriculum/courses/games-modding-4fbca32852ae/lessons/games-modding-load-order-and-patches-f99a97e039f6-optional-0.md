@@ -1,0 +1,1 @@
+Results are 3 and 4; the patch requires both A and B and reports a missing dependency instead of silently applying.

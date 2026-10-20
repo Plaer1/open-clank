@@ -1,0 +1,1 @@
+Vec for ordered sequence, HashMap for ID lookup, and an explicit iteration/lookup contract.

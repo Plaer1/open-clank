@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from routes.copal_routes import CreateDocument, setup_copal_routes
-from src.openclank.copal_bridge import CopalBridgeError
+from src.openclank.copal_errors import CopalBridgeError
 
 
 class ScopedBridge:

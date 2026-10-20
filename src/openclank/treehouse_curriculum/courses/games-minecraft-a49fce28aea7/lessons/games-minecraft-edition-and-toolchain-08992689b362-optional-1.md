@@ -1,0 +1,1 @@
+Read --version and javaToolchains separately; a release flag does not select the daemon.

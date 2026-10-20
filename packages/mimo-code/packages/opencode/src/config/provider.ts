@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
+import { ConfigRetry } from "./retry"
 
 const PositiveInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThan(0))
 
@@ -17,7 +18,7 @@ export const Model = Schema.Struct({
     Schema.Union([
       Schema.Literal(true),
       Schema.Struct({
-        field: Schema.Literals(["reasoning_content", "reasoning_details"]),
+        field: Schema.Literals(["reasoning", "reasoning_content", "reasoning_details"]),
       }),
     ]),
   ),
@@ -102,6 +103,12 @@ export class Info extends Schema.Class<Info>("ProviderConfig")({
           description:
             "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
         }),
+        headerTimeout: Schema.optional(
+          Schema.Union([PositiveInt, Schema.Literal(false)]).annotate({
+            description:
+              "Timeout in milliseconds while waiting for response headers. OpenAI defaults to 300000 (5 minutes). Set to false to disable.",
+          }),
+        ),
         chunkTimeout: Schema.optional(PositiveInt).annotate({
           description:
             "Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted.",
@@ -110,6 +117,9 @@ export class Info extends Schema.Class<Info>("ProviderConfig")({
       [Schema.Record(Schema.String, Schema.Any)],
     ),
   ),
+  retry: Schema.optional(ConfigRetry.Info).annotate({
+    description: "Provider-specific overrides for retry budgets",
+  }),
   models: Schema.optional(Schema.Record(Schema.String, Model)),
   only_configured_models: Schema.optional(Schema.Boolean).annotate({
     description:

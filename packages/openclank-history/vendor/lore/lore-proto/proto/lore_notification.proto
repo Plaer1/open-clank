@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "model.proto";
+import "lock.proto";
+
+package lore.notification;
+
+// An event published when a branch is created on the server
+message BranchCreated {
+  bytes branch = 1;
+}
+
+// Represents a revision pushed event
+message BranchPushed {
+  bytes revision = 1;
+  uint64 revision_number = 2;
+  bytes branch = 3;
+  string user_id = 4;
+}
+
+// An event published when a branch is deleted from the server
+message BranchDeleted {
+  bytes branch = 1;
+}
+
+message ResourceLocked {
+  string user_id = 1;
+  repeated urc.lock.Resource resources = 2;
+}
+
+message ResourceUnlocked {
+  string user_id = 1;
+  repeated urc.lock.Resource resources = 2;
+}
+
+message Obliterate {
+  urc.model.Address address = 1;
+  bytes repository = 2;
+}
+
+message ExtensionEvent {
+  // Globally unique event identifier, e.g. `org.lore.security.compliance`
+  string type = 1;
+  google.protobuf.Any payload = 2;
+}
+
+message Event {
+  // UUID of the event
+  string id = 1;
+
+  // Timestamp object that supports seconds and nanoseconds
+  google.protobuf.Timestamp time = 2;
+
+  // The repository to which the event applies
+  bytes repository = 3;
+
+  // Event payload
+  oneof event {
+    ExtensionEvent other = 4;
+    BranchPushed branch_pushed = 5;
+    ResourceLocked resource_locked = 6;
+    ResourceUnlocked resource_unlocked = 7;
+    BranchDeleted branch_deleted = 8;
+    BranchCreated branch_created = 9;
+
+    // TODO(jcohen): We may eventually want to investigate supporting propagation of obliterate events between instances
+    //  directly using the storage layer, rather than relying on an external notification system for coordination.
+    Obliterate obliterate = 10;
+  }
+}
+
+message SubscribeRequest {
+  bytes repository = 1;
+}
+
+message PublishRequest {
+  Event event = 1;
+}
+
+service NotificationService {
+  rpc Subscribe (SubscribeRequest) returns (stream Event);
+  rpc Publish (PublishRequest) returns (google.protobuf.Empty);
+}

@@ -1,0 +1,5 @@
+.oc-achievement-art-slot { display:grid; place-items:center; aspect-ratio:1; min-width:0; width:100%; max-width:256px; --oc-art-accent:var(--accent,var(--red,#f6be48)); --oc-art-mascot:var(--accent,var(--red,#f6be48)); --oc-art-panel:var(--panel,var(--bg,#26313f)); --oc-art-ground:var(--bg,#1c2531); --oc-art-outline:var(--fg,#c89542); }
+.oc-achievement-art-slot > svg, .oc-achievement-art-slot > img { display:block; width:100%; height:auto; object-fit:contain; }
+.oc-achievement-art-offline { font-size:clamp(3rem,12vw,7rem); line-height:1; color:var(--accent,var(--red)); }
+[data-icon-mode="monochrome"] .oc-achievement-art .plate, [data-icon-mode="monochrome"] .oc-achievement-art .inset { fill:transparent; }
+@media (forced-colors:active) { .oc-achievement-art-slot { --oc-art-accent:CanvasText; --oc-art-mascot:CanvasText; --oc-art-panel:Canvas; --oc-art-ground:Canvas; --oc-art-outline:CanvasText; forced-color-adjust:auto; } }

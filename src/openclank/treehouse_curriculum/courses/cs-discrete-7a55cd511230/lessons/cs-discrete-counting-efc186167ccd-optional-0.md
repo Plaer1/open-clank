@@ -1,0 +1,1 @@
+Give 9 codes and 3 pairs, with the role of order/repetition stated.

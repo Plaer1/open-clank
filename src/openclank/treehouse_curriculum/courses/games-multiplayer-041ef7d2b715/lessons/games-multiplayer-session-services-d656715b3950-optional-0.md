@@ -1,0 +1,1 @@
+Roles follow the listed order; P1/P2 fit R1. No region fits all three. More R1 capacity cannot fix P3's latency. Hosting choice must name authority/availability/cost constraints, not a universal winner.

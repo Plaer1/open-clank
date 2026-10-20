@@ -1,0 +1,1 @@
+Both bucket2; store both entries and compare keys.

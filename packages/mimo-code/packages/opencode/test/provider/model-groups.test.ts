@@ -5,8 +5,8 @@ import { tmpdir } from "../fixture/fixture"
 import { Instance } from "../../src/project/instance"
 import { Agent } from "../../src/agent/agent"
 import { Provider } from "../../src/provider"
-import { ProviderID } from "../../src/provider/schema"
-import { SessionPrompt } from "../../src/session/prompt"
+import { ProviderID, ModelID } from "../../src/provider/schema"
+import { SessionPrompt, resolveCommandTaskModel } from "../../src/session/prompt"
 import { Effect } from "effect"
 import { AppRuntime } from "../../src/effect/app-runtime"
 
@@ -377,7 +377,11 @@ test("unknown custom group name still throws", async () => {
 // fed straight into resolveModelRef (covered above) and takes precedence over the
 // structured `model` field. Pure schema parse — no Instance/LLM needed.
 test("PromptInput and ShellInput accept modelRef", () => {
-  const p = SessionPrompt.PromptInput.parse({ sessionID: "ses_x", modelRef: "ultra", parts: [] })
+  const p = SessionPrompt.PromptInput.parse({
+    sessionID: "ses_x",
+    modelRef: "ultra",
+    parts: [{ type: "text", text: "hi" }],
+  })
   expect(p.modelRef).toBe("ultra")
   const s = SessionPrompt.ShellInput.parse({
     sessionID: "ses_x",
@@ -386,4 +390,41 @@ test("PromptInput and ShellInput accept modelRef", () => {
     modelRef: "anthropic/claude-x",
   })
   expect(s.modelRef).toBe("anthropic/claude-x")
+})
+
+
+test("managed helper and vision selection inherit caller without implicit substitutions", async () => {
+  await using tmp = await tmpdir({ init: async (dir) => {
+    await Bun.write(path.join(dir, "mimocode.json"), JSON.stringify({ model_groups: { explicit: { default: "alpha/alpha-1" } }, agent: { "group-worker": { mode: "subagent", model: "explicit" } }, provider: {
+      ...PROVIDERS,
+      vision: { name: "Vision", npm: "@ai-sdk/openai-compatible", env: [], options: { apiKey: "test-key" }, models: {
+        "vision-1": { name: "Vision 1", modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 8000, output: 2000 } },
+      } },
+    } }))
+  } })
+  await Instance.provide({ directory: tmp.path, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+    const provider = yield* Provider.Service
+    const caller = yield* provider.getModel(ProviderID.make("beta"), ModelID.make("beta-1"))
+    const vision = yield* provider.getModel(ProviderID.make("vision"), ModelID.make("vision-1"))
+    const inherited = { providerID: caller.providerID, modelID: caller.id }
+    const fallback = () => Effect.die(new Error("Explicit/caller model must not consult instance defaults"))
+    const agents = yield* Agent.Service
+    const grouped = yield* resolveCommandTaskModel({ agent: "group-worker" }, inherited, fallback, { provider, agents })
+    expect(String(grouped.providerID)).toBe("alpha")
+    expect(String(grouped.modelID)).toBe("alpha-1")
+    expect(yield* resolveCommandTaskModel({}, inherited, fallback, { provider, agents })).toEqual(inherited)
+    const previous = process.env.OPEN_CLANK_MANAGED
+    process.env.OPEN_CLANK_MANAGED = "1"
+    try {
+      expect((yield* provider.resolveModelRef("lite", caller.providerID).pipe(Effect.exit))._tag).toBe("Failure")
+      expect(yield* provider.getSmallModel(caller.providerID, caller)).toBe(caller)
+      expect(yield* provider.getSmallModel(caller.providerID)).toBeUndefined()
+      expect(yield* provider.getVisionModel(caller)).toBeUndefined()
+      expect(yield* provider.getVisionModel()).toBeUndefined()
+      expect(yield* provider.getVisionModel(vision)).toBe(vision)
+    } finally {
+      if (previous === undefined) delete process.env.OPEN_CLANK_MANAGED
+      else process.env.OPEN_CLANK_MANAGED = previous
+    }
+  })) })
 })

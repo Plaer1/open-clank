@@ -1,0 +1,1 @@
+Three measured attempts last30,40,50seconds, each including20seconds reading. Measured mean40; active mean20. A controller widening the input window when mean>30 triggers only for the first measure. A visible reward for fast attempts may encourage skipped instructions or retry farming. Identify the boundary/confound and keep a reversible player override.

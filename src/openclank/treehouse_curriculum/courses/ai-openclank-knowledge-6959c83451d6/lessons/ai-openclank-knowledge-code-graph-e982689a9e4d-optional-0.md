@@ -1,0 +1,1 @@
+For a useful bug report, retain workspace scope, current source revision, index status/revision, relationship type and target location. Do not include private code merely to prove that a stale pointer exists.

@@ -1,0 +1,1 @@
+Actual evidence covers each terminal state and a reset to score zero; the changed rule has a prediction and observation.

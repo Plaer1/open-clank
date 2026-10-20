@@ -1,0 +1,1 @@
+The response separates connection shape, entity control and authoritative validation.

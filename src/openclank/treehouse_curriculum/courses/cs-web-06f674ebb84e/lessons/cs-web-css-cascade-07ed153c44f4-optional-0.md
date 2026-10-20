@@ -1,0 +1,1 @@
+The note is blue because .note has greater specificity in the stated same normal author layer. Equal earlier priorities leave source order decisive: the later .card p rule sets #111. These comparisons do not override importance, origin or layer differences.

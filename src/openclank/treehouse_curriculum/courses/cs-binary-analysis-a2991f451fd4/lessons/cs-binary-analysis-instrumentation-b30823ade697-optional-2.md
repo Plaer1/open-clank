@@ -1,0 +1,1 @@
+Hooks intercept selected execution points; they can observe or alter behavior. Frida and DynamoRIO provide instrumentation mechanisms with different architectures. This unit teaches classification, not injection procedures or a claimed tool run.

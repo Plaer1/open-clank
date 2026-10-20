@@ -63,20 +63,12 @@ function isCacheCold(model?: Provider.Model, lastAssistantTime?: number): boolea
  * "1.5M"/"1.5m" (megatokens), or plain number.
  */
 export function parseThreshold(s: string, windowSize: number): number {
-  const trimmed = s.trim()
-  if (trimmed.endsWith("%")) {
-    const pct = parseFloat(trimmed.slice(0, -1))
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
-      throw new Error(`Invalid checkpoint threshold percentage: "${s}" (must be 0 < n <= 100)`)
-    }
-    return Math.floor((windowSize * pct) / 100)
+  const value = Token.parseQuantity(s, windowSize)
+  if (value !== undefined) return value
+  if (s.trim().endsWith("%")) {
+    throw new Error(`Invalid checkpoint threshold percentage: "${s}" (must be 0 < n <= 100)`)
   }
-  const match = trimmed.match(/^(\d+(?:\.\d+)?)([KkMm]?)$/)
-  if (!match) throw new Error(`Invalid checkpoint threshold format: "${s}"`)
-  let n = parseFloat(match[1])
-  if (match[2] === "K" || match[2] === "k") n *= 1_000
-  else if (match[2] === "M" || match[2] === "m") n *= 1_000_000
-  return Math.floor(n)
+  throw new Error(`Invalid checkpoint threshold format: "${s}"`)
 }
 
 /**
@@ -138,18 +130,20 @@ export interface Interface {
     tokens: MessageV2.Assistant["tokens"]
     lastAssistantTime?: number
     promptOps?: ActorPromptOps
+    cfg?: Config.Info
   }) => Effect.Effect<void>
   /**
    * Fire background checkpoint writers for every newly-crossed threshold.
    * Call this at the START of each runLoop iteration so thresholds fire
    * mid-turn as tokens grow (not only at turn end).
    */
-  readonly fireCheckpoints: (input: {
-    sessionID: SessionID
-    model: Provider.Model
-    tokens: MessageV2.Assistant["tokens"]
-    promptOps: ActorPromptOps
-    agentID?: string
+    readonly fireCheckpoints: (input: {
+      sessionID: SessionID
+      model: Provider.Model
+      tokens: MessageV2.Assistant["tokens"]
+      promptOps: ActorPromptOps
+      agentID?: string
+      cfg?: Config.Info
   }) => Effect.Effect<void>
   /** True when the current tokens have just crossed the max checkpoint threshold. */
   readonly maxThresholdCrossed: (sessionID: SessionID) => Effect.Effect<boolean>
@@ -243,6 +237,7 @@ export const layer: Layer.Layer<
       tokens: MessageV2.Assistant["tokens"]
       promptOps: ActorPromptOps
       agentID?: string
+      cfg?: Config.Info
     }) {
       // Checkpoint serves main/peer only; subagents use per-actor compaction
       // (independent layers — see 2026-05-22-checkpoint-v8-design.md:71), and
@@ -270,7 +265,7 @@ export const layer: Layer.Layer<
         return
       }
 
-      const cfg = yield* config.get()
+      const cfg = input.cfg ?? (yield* config.get())
       const windowSize = usable({ cfg, model: input.model })
       if (windowSize === 0) return
       const raw = cfg.checkpoint?.thresholds ?? defaultThresholdsFor(windowSize)
@@ -322,6 +317,10 @@ export const layer: Layer.Layer<
               writerFailures.delete(input.sessionID)
               return
             }
+            // "no-writer" and "timeout" both mean "not a settled failure". A
+            // timed-out wait leaves the writer in flight (and still able to
+            // advance the watermark), so counting it would retire a
+            // merely-slow-but-working writer. Only a real failure ticks below.
             if (result !== "failure") return
             const next = (writerFailures.get(input.sessionID) ?? 0) + 1
             writerFailures.set(input.sessionID, next)
@@ -362,9 +361,10 @@ export const layer: Layer.Layer<
       tokens: MessageV2.Assistant["tokens"]
       lastAssistantTime?: number
       promptOps?: ActorPromptOps
+      cfg?: Config.Info
     }) {
-      const cfg = yield* config.get()
-      if (!cfg.compaction?.prune) return
+      const cfg = input.cfg ?? (yield* config.get())
+      if (cfg.compaction?.prune === false) return
 
       if (!isCacheCold(input.model, input.lastAssistantTime)) return
 

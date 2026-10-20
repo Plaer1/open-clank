@@ -324,7 +324,7 @@ export async function uploadPending(opts = {}) {
     uploaded = (data.files || []);
     if (uploaded.some(x => x && x.gallery_id)) {
       try { localStorage.setItem('gallery-fresh-chat-upload', String(Date.now())); } catch (_) {}
-      window.dispatchEvent(new CustomEvent('gallery-refresh', { detail: { source: 'chat-upload' } }));
+      window.dispatchEvent(new CustomEvent('imps-refresh', { detail: { source: 'chat-upload' } }));
     }
     pendingFiles = [];          // clear only on success
     // Stash the full meta (incl. width/height for images) on the module so
@@ -356,14 +356,14 @@ export async function uploadPending(opts = {}) {
 /**
  * Add files to pending list (capped at MAX_FILES)
  */
-export async function addFiles(files) {
+export async function addFiles(files, opts = {}) {
   for (const f of files) {
     if (pendingFiles.length >= MAX_FILES) {
       _showToast(`Max ${MAX_FILES} files allowed`);
       break;
     }
     let nextFile = f;
-    if (_isMobileViewport() && _isCroppableImage(f)) {
+    if (!opts.skipCrop && _isMobileViewport() && _isCroppableImage(f)) {
       try {
         nextFile = await _openMobileCropper(f);
       } catch (_) {

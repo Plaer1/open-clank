@@ -1,0 +1,229 @@
+/* Applet-local menu chrome: title, menu and content share one window box. */
+.workbench-menubar {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 5px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--fg);
+  font: 12px var(--font-family, monospace);
+}
+.workbench-menu-navigation {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.workbench-menu-navigation::-webkit-scrollbar { display: none; }
+.workbench-menu-trigger {
+  flex: none;
+  height: 26px;
+  padding: 0 9px;
+  margin: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.workbench-menu-trigger:hover,
+.workbench-menu-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+}
+.workbench-menu-trigger:focus-visible,
+.workbench-command:focus-visible,
+.workbench-palette-close:focus-visible {
+  outline: 2px solid var(--accent-focus, var(--accent));
+  outline-offset: -2px;
+}
+.workbench-menu-popup {
+  position: absolute;
+  z-index: 1;
+  box-sizing: border-box;
+  width: 340px;
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--accent);
+  border-radius: 0 0 8px 8px;
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 8px 24px #0005;
+  font: 12px var(--font-family, monospace);
+}
+.workbench-command {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 12px;
+  padding: 7px 9px;
+  margin: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.workbench-command:hover,
+.workbench-command:focus-visible,
+.workbench-command.active { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+.workbench-command-label { overflow-wrap: anywhere; }
+.workbench-command kbd { border: 0; padding: 0; color: var(--color-muted); background: none; font: inherit; font-size: 11px; white-space: nowrap; }
+.workbench-command[aria-disabled="true"] { color: var(--color-muted); cursor: default; }
+.workbench-command[aria-checked="true"] .workbench-command-label::before { content: '✓ '; color: var(--accent); }
+.workbench-command-reason { grid-column: 1 / -1; font-size: 10px; line-height: 1.3; color: var(--color-muted-alt, var(--color-muted)); }
+.workbench-palette {
+  box-sizing: border-box;
+  width: min(620px, calc(100vw - 24px));
+  max-height: calc(100dvh - 48px);
+  margin: 24px auto auto;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--fg);
+  box-shadow: 0 12px 48px #0006;
+  font: 13px var(--font-family, monospace);
+}
+.workbench-palette[open] { display: flex; flex-direction: column; gap: 9px; }
+.workbench-palette::backdrop { background: #0005; }
+.workbench-palette h2 { margin: 0; font: inherit; color: var(--brand-color, var(--accent)); font-weight: 600; }
+.workbench-palette input {
+  width: 100%;
+  box-sizing: border-box;
+  flex: none;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.workbench-palette input:focus-visible { outline: 2px solid var(--accent-focus, var(--accent)); outline-offset: -1px; }
+.workbench-palette-results { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.workbench-palette-feedback { flex: none; margin: 0; color: var(--color-muted); font-size: 11px; }
+.workbench-palette-close { align-self: flex-end; flex: none; padding: 5px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); font: inherit; cursor: pointer; }
+.workbench-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+@media (max-width: 768px) {
+  .workbench-menu-trigger { padding: 0 7px; }
+  .workbench-palette { margin-top: 8px; max-height: calc(100dvh - 16px); }
+}
+
+/* Round 2: compact workbench surfaces; all color/identity remains theme-owned. */
+.workbench-menu-feedback {
+  position: sticky; bottom: -5px; padding: 7px 9px; margin-top: 4px;
+  border-top: 1px solid var(--border); background: var(--panel);
+  color: var(--color-muted); font-size: 11px; line-height: 1.35; min-height: 30px;
+}
+.copal-notes-window .copal-workspace-title small { display: none; }
+.copal-notes-workspace .copal-shell-side-header.left { min-height: 32px; flex-basis: 32px; gap: 3px; }
+.copal-notes-workspace .copal-shell-side-header.left strong { font-size: 11px; }
+.copal-notes-workspace .copal-shell-side-header.left .copal-btn { padding: 3px 5px; min-width: 24px; }
+.copal-notes-workspace .copal-explorer-tools { display: flex; gap: 4px; align-items: center; padding: 3px 6px; }
+.copal-notes-workspace .copal-explorer-tools .copal-file-sort { flex: 1; min-width: 0; }
+.copal-notes-workspace .copal-resource-folder-location { font-size: 11px; padding: 4px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-notes-workspace .copal-resource-folder-search { padding: 4px 7px; font-size: 11px; min-height: 26px; }
+.copal-notes-workspace .copal-resource-folder-controls { gap: 4px; padding: 2px 5px; }
+.copal-notes-workspace .copal-resource-folder-controls > .copal-btn { min-width: 26px; padding: 3px 5px; }
+.copal-notes-workspace .copal-resource-folder-rows .copal-resource-row { height: 28px; min-height: 28px; max-height: 28px; padding: 0 7px; }
+.copal-notes-workspace .copal-resource-row.active,
+.copal-notes-workspace .copal-file-entry.active { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+.copal-notes-workspace .copal-resource-row.active { box-shadow: inset 2px 0 var(--accent); }
+.copal-notes-workspace .copal-folder-row,
+.copal-notes-workspace .copal-file-row { min-height: 28px; padding-block: 3px; font-size: 11px; }
+.copal-notes-workspace .copal-file-row { display: flex; align-items: center; gap: 5px; }
+.copal-notes-workspace .copal-file-row > span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copal-notes-workspace .copal-folder-row > .copal-resource-row-icon { flex: 0 0 14px; }
+.copal-notes-workspace .copal-file-kind { color: var(--accent); flex: none; }
+.copal-notes-workspace .copal-readonly-badge { color: var(--color-muted); font-size: 9px; flex: none; }
+.copal-notes-workspace .copal-note-tabs { min-height: 32px; flex-basis: 32px; }
+.copal-notes-workspace .copal-note-tab { flex-basis: 160px; min-width: 110px; }
+.copal-notes-workspace .copal-note-tab-label { font-size: 11px; padding: 6px; }
+.copal-notes-workspace .copal-note-tab.active { box-shadow: inset 0 -1px var(--accent); }
+.copal-notes-workspace .copal-note-tab-state { flex: none; color: var(--color-warning, var(--accent)); font-size: 9px; }
+.copal-notes-workspace .copal-note-tab:hover .copal-note-tab-pin,
+.copal-notes-workspace .copal-note-tab:hover .copal-note-tab-close { opacity: 1; }
+.copal-notes-workspace .copal-note-view-header {
+  min-height: 32px; display: flex; align-items: center; gap: 7px; padding: 3px 8px;
+}
+.copal-notes-workspace .copal-note-breadcrumb {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px;
+  color: var(--color-muted); font-size: 11px;
+}
+.copal-notes-workspace .copal-breadcrumb-parent { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.copal-notes-workspace .copal-note-view-header .copal-inline-title {
+  flex: 0 1 auto; min-width: 40px; min-height: 24px; width: auto; max-width: 100%;
+  padding: 2px; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+}
+.copal-notes-workspace .copal-note-view-header input.copal-inline-title { flex: 1; }
+.copal-notes-workspace .copal-leaf-mode { flex: none; font-size: 9px; opacity: 1; color: var(--color-muted); }
+.copal-notes-workspace .copal-note-header-actions { flex: none; margin-inline-start: auto; gap: 3px; }
+.copal-notes-workspace .copal-note-header-actions > .copal-btn { padding: 3px 6px; min-height: 24px; font-size: 11px; }
+.copal-notes-workspace.right-closed .copal-note-leaf,
+.copal-notes-workspace .copal-note-leaf { grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.copal-notes-workspace.right-closed .copal-note-status,
+.copal-notes-workspace .copal-note-status {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end;
+  min-height: 25px; gap: 5px 12px; padding: 3px 8px; font-size: 10px;
+  opacity: 1; color: var(--color-muted); white-space: normal;
+}
+.copal-notes-workspace .copal-note-status > span { display: inline; flex: none; max-width: 100%; }
+.copal-notes-workspace .copal-note-status .copal-status-language { margin-inline-end: auto; color: var(--fg); }
+.copal-notes-workspace .copal-note-status .copal-btn { padding: 2px 5px; font-size: 10px; }
+.copal-notes-workspace.narrow .copal-resource-folder-rows .copal-resource-row { height: 44px; min-height: 44px; max-height: 44px; }
+.copal-notes-workspace.narrow .copal-note-tabs { min-height: 44px; flex-basis: 44px; }
+.copal-notes-workspace.narrow .copal-folder-row,
+.copal-notes-workspace.narrow .copal-file-row,
+.copal-notes-workspace.narrow .copal-note-tab button,
+.copal-notes-workspace.narrow .copal-shell-side-header.left .copal-btn { min-height: 44px; }
+
+/* Round 3: shrink layout tracks, keeping long source lines in CM's scroller. */
+.copal-notes-window .copal-view { min-width: 0; max-width: 100%; }
+.copal-notes-workspace .copal-notes-main,
+.copal-notes-workspace .copal-note-group,
+.copal-notes-workspace .copal-note-group-body,
+.copal-notes-workspace .copal-note-leaf-content,
+.copal-notes-workspace .copal-note-editing-surface,
+.copal-notes-workspace .copal-codemirror-host { min-width: 0; max-width: 100%; }
+.copal-notes-workspace .copal-note-leaf { grid-template-columns: minmax(0, 1fr); max-width: 100%; }
+.copal-notes-workspace .copal-note-editing-surface.side-by-side { grid-template-columns: minmax(0, 1fr) minmax(0, .82fr); }
+.copal-notes-workspace .copal-codemirror-host .cm-editor { min-width: 0; max-width: 100%; }
+.copal-notes-workspace .copal-codemirror-host .cm-scroller { min-width: 0; max-width: 100%; overflow: auto; }
+.copal-notes-workspace .copal-note-status > span { min-width: 0; flex-shrink: 1; overflow-wrap: anywhere; }
+.copal-notes-workspace .copal-status-language { min-width: 0; max-width: min(180px, 100%); margin-inline-end: auto; }
+.copal-notes-workspace select.copal-status-language {
+  color: var(--fg); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 3px; font: inherit; cursor: pointer;
+}
+.copal-notes-workspace select.copal-status-language:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.copal-notes-workspace .copal-note-view-header { flex-wrap: wrap; }
+.copal-notes-workspace .copal-note-breadcrumb { flex: 1 1 100px; }
+.copal-notes-workspace .copal-note-header-actions { max-width: 100%; flex-wrap: wrap; }
+.copal-notes-workspace .copal-popover-menu { min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.copal-notes-workspace .copal-popover-menu .copal-btn { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.openclank-context-menu { min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.openclank-context-item, .workbench-menu-feedback { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 580px) {
+  .copal-notes-workspace .copal-note-editing-surface.side-by-side { grid-template-columns: minmax(0, 1fr); }
+}
+
+.copal-notes-workspace .copal-status-details {
+  display: flex; flex: 1 1 auto; min-width: 0; max-width: 100%;
+  flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px 12px;
+}
+.copal-notes-workspace .copal-status-details > span { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }

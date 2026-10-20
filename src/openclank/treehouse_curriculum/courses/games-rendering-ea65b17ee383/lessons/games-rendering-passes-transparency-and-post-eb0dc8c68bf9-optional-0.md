@@ -1,0 +1,1 @@
+The dependency order is explicit; results are (0.25,0,0.5) and (0.5,0,0.25) in linear RGB under the stated blend rule.

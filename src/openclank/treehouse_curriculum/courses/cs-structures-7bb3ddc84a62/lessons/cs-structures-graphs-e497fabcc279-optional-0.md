@@ -1,0 +1,1 @@
+A:[B,C], B:[D], C:[D], D:[]; A,B,C,D or A,C,B,D; D→A creates a cycle.

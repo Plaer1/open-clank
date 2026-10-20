@@ -1,0 +1,1 @@
+The payload is 2,000 bytes/second; each message class has an explicit reliability/order/duplicate policy.

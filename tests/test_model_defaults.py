@@ -1,296 +1,317 @@
-"""Tests for share_defaults_with_users setting"""
-import pytest
+"""Durable default-chat selection uses normalized provider route bindings."""
+
+from __future__ import annotations
+
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
-from tests.helpers.import_state import preserve_import_state
-from tests.helpers.db_stubs import make_core_db_stub
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-with preserve_import_state("core.database", "src.database", "routes.model_routes", "routes.prefs_routes"):
-    import routes.model_routes as model_routes
-    import routes.prefs_routes as prefs_routes
-    import src.auth_helpers as auth_helpers
-
-
-### Helper Classes
-
-class _FakeEndpoint:
-    """Minimal fake endpoint for testing"""
-    def __init__(self, id, base_url, is_enabled=True, owner=None):
-        self.id = id
-        self.base_url = base_url
-        self.is_enabled = is_enabled
-        self.owner = owner
-        self.cached_models = None
-        self.hidden_models = None
-        self.pinned_models = None
+import routes.provider_v1_routes as provider_routes
+from core.provider_models import ProviderBase
+from routes.provider_v1_routes import setup_provider_v1_routes
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
+from src.openclank.provider_store import ProviderStore
 
 
-class _FakeQuery:
-    """Fake query object for testing"""
-    def __init__(self, endpoints, user=None, include_shared=True):
-        self._endpoints = endpoints
-        self._user = user
-        self._include_shared = include_shared
-
-    def filter(self, *conditions):
-        for cond in conditions:
-            cond_str = str(cond)
-            print(f"Filter condition: {cond_str}")
-            if 'owner' in cond_str and 'IS NULL' not in cond_str:
-                self._include_shared = False
-        return self
-
-    def first(self):
-        """Return first endpoint respecting owner filter"""
-        if not self._endpoints:
-            return None
-
-        if self._user:
-            for ep in self._endpoints:
-                ep_owner = getattr(ep, 'owner', None)
-                if ep_owner == self._user:
-                    return ep
-                if self._include_shared and ep_owner is None:
-                    return ep
-            return None
-        return self._endpoints[0]
+@pytest.fixture()
+def provider_store():
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    ProviderBase.metadata.create_all(bind=engine)
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    yield ProviderStore(factory)
+    engine.dispose()
 
 
-def _make_db_session(endpoints, user=None):
-    """Create a fake DB session that returns our fake query"""
-    fake_session = MagicMock()
-    fake_query = _FakeQuery(endpoints, user)
-    fake_session.query.return_value = fake_query
-    return fake_session
-
-
-def _get_default_chat_route(router):
-    """Extract the /api/default-chat GET route from the router"""
-    for route in router.routes:
-        if getattr(route, "path", "") == "/api/default-chat" and "GET" in getattr(route, "methods", set()):
-            return route.endpoint
-    raise AssertionError("GET /api/default-chat route not found")
-
-
-def _make_request(user=None, auth_manager=None):
-    """Create a fake request for testing"""
+def _request(owner: str = "alice", *, privileges: dict | None = None):
     return SimpleNamespace(
-        state=SimpleNamespace(current_user=user),
-        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
-        client=SimpleNamespace(host="127.0.0.1"),
+        state=SimpleNamespace(current_user=owner, api_token=False),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth_manager=SimpleNamespace(
+                    is_configured=True,
+                    get_privileges=lambda _owner: privileges or {},
+                    is_admin=lambda _owner: False,
+                ),
+            ),
+        ),
     )
 
-### Shared test logic
-def _run_get_default_chat_test(monkeypatch, share_defaults_enabled, second_endpoint_only=False):
-    """Helper function that runs get_default_chat with the given share_defaults_with_users setting."""
 
-    global_settings = {
-        "default_endpoint_id": "global-ep-123",
-        "default_model": "qwen-3.6",
-        "default_model_fallbacks": [
-            {"endpoint_id": "fallback-ep", "model": "fallback-model"}
-        ],
-        "share_defaults_with_users": share_defaults_enabled
+def _endpoint(router, path: str, method: str = "GET"):
+    pending = list(reversed(router.routes))
+    while pending:
+        route = pending.pop(0)
+        if getattr(route, "path", None) == path and method in route.methods:
+            return route.endpoint
+        included = getattr(route, "original_router", None)
+        if included is not None:
+            pending[:0] = reversed(included.routes)
+    raise LookupError(f"No {method} route for {path}")
+
+
+def _default_chat(store: ProviderStore, request):
+    router = setup_provider_v1_routes(store, object())
+    return _endpoint(router, "/api/default-chat")(request)
+
+
+def _add_route(
+    store: ProviderStore,
+    *,
+    owner: str,
+    connection_id: str,
+    model_route_id: str,
+    model_id: str,
+    operations=("chat.stream", "chat.complete"),
+):
+    store.create_connection(
+        owner=owner,
+        connection_id=connection_id,
+        family_id="openai",
+        adapter_id="openai-responses",
+        kind="official",
+        billing_lane="metered_api",
+        label=connection_id,
+    )
+    route = store.create_model_route(
+        owner=owner,
+        connection_id=connection_id,
+        model_route_id=model_route_id,
+        provider_model_id=model_id,
+        display_name=model_id,
+        operations=operations,
+    )
+    account = store.create_account(
+        owner=owner,
+        connection_id=connection_id,
+        account_id=f"pac_default_{owner}_{connection_id}",
+        label=f"{connection_id} account",
+        auth_method="api_key",
+        auth_class="metered",
+        credentials={"type": "api_key", "key": f"fixture-{owner}-{connection_id}"},
+    )
+    store.set_entitlement(
+        owner=owner,
+        account_id=account.id,
+        model_route_id=route.id,
+        eligible=True,
+    )
+    return route
+
+
+def test_default_chat_is_empty_without_a_normalized_chat_route(provider_store):
+    assert _default_chat(provider_store, _request()) == {
+        "endpoint_id": "",
+        "endpoint_url": "",
+        "model": "",
     }
 
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: global_settings)
-    monkeypatch.setattr(prefs_routes, "_load_for_user", lambda user: {})
 
-    fake_auth_manager = MagicMock()
-    fake_auth_manager.is_admin = lambda user: False
+def test_chat_binding_order_is_the_durable_default_and_fallback(provider_store):
+    first = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_first",
+        model_route_id="pmr_first",
+        model_id="model-first",
+    )
+    preferred = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_preferred",
+        model_route_id="pmr_preferred",
+        model_id="model-preferred",
+    )
+    bindings = provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[preferred.id, first.id],
+        expected_revision=0,
+        enabled_by_route={preferred.id: False},
+    )
 
-    endpoints = [
-        _FakeEndpoint(
-            id="global-ep-123",
-            base_url="http://global-endpoint:8000/v1",
-            is_enabled=True,
-            owner="regular_user",
+    assert [binding.model_route_id for binding in bindings] == [
+        preferred.id,
+        first.id,
+    ]
+    assert _default_chat(provider_store, _request()) == {
+        "endpoint_id": "pcn_first",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "model-first",
+    }
+
+
+def test_enabled_bound_route_precedes_catalog_order(provider_store):
+    first = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_a_catalog_first",
+        model_route_id="pmr_catalog_first",
+        model_id="catalog-first",
+    )
+    preferred = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_z_preferred",
+        model_route_id="pmr_preferred",
+        model_id="preferred",
+    )
+    provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[preferred.id, first.id],
+        expected_revision=0,
+    )
+
+    assert _default_chat(provider_store, _request()) == {
+        "endpoint_id": "pcn_z_preferred",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "preferred",
+    }
+
+
+def test_legacy_global_default_settings_do_not_override_route_bindings(
+    monkeypatch,
+    provider_store,
+):
+    route = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_normalized",
+        model_route_id="pmr_normalized",
+        model_id="normalized-model",
+    )
+    provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[route.id],
+        expected_revision=0,
+    )
+    monkeypatch.setattr(
+        provider_routes,
+        "load_settings",
+        lambda: {
+            "default_endpoint_id": "legacy-global-endpoint",
+            "default_model": "legacy-global-model",
+            "share_defaults_with_users": True,
+        },
+    )
+
+    result = _default_chat(provider_store, _request())
+
+    assert result == {
+        "endpoint_id": "pcn_normalized",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "normalized-model",
+    }
+    assert "legacy" not in str(result)
+
+
+def test_default_chat_bindings_are_owner_scoped(provider_store):
+    alice = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_alice",
+        model_route_id="pmr_alice",
+        model_id="alice-model",
+    )
+    bob = _add_route(
+        provider_store,
+        owner="bob",
+        connection_id="pcn_bob",
+        model_route_id="pmr_bob",
+        model_id="bob-model",
+    )
+    provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[alice.id],
+        expected_revision=0,
+    )
+    provider_store.put_route_binding(
+        owner="bob",
+        purpose="chat",
+        model_route_ids=[bob.id],
+        expected_revision=0,
+    )
+
+    assert _default_chat(provider_store, _request("bob")) == {
+        "endpoint_id": "pcn_bob",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "bob-model",
+    }
+
+
+def test_allowed_models_filter_advances_to_the_next_bound_route(provider_store):
+    blocked = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_blocked",
+        model_route_id="pmr_blocked",
+        model_id="blocked-model",
+    )
+    allowed = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_allowed",
+        model_route_id="pmr_allowed",
+        model_id="allowed-model",
+    )
+    provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[blocked.id, allowed.id],
+        expected_revision=0,
+    )
+
+    result = _default_chat(
+        provider_store,
+        _request(
+            privileges={
+                "allowed_models_restricted": True,
+                "allowed_models": [allowed.id],
+            },
         ),
-        _FakeEndpoint(
-            id="fallback-ep",
-            base_url="http://fallback-endpoint:8000/v1",
-            is_enabled=True,
-            owner="regular_user",
-        )
-    ]
+    )
 
-    # When testing fallback scenario, removes the primary endpoint
-    if second_endpoint_only:
-        endpoints = [endpoints[1]]
-
-    fake_db = _make_db_session(endpoints, user="regular_user")
-    monkeypatch.setattr(model_routes, "SessionLocal", lambda: fake_db)
-    monkeypatch.setattr(model_routes, "_normalize_base", lambda url: url)
-    monkeypatch.setattr(model_routes, "build_chat_url", lambda base: f"{base}/chat")
-
-    router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
-    fake_request = _make_request(user="regular_user", auth_manager=fake_auth_manager)
-
-    result = get_default_chat(fake_request)
-
-    return result
-
-### Test Functions
-
-def test_get_default_chat_user_no_prefs_share_disabled_uses_first_owned_endpoint(monkeypatch):
-    """
-    Without shared defaults, a user may still fall back to the first endpoint
-    in their own catalogue. The global model string is not inherited.
-    """
-
-    test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=False)
-
-    assert test_data["endpoint_id"] == "global-ep-123"
-    assert test_data["model"] == "", "Should not inherit the global model"
+    assert result == {
+        "endpoint_id": "pcn_allowed",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "allowed-model",
+    }
 
 
-def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults_fallbacks(monkeypatch):
-    """
-    Non-admin user without personal preferences should resolve to global
-    defaults for ep_id, model, and fallbacks when share_defaults_with_users is enabled.
-    """
+def test_non_chat_routes_never_become_the_chat_default(provider_store):
+    speech = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_speech",
+        model_route_id="pmr_speech",
+        model_id="mimo-tts",
+        operations=("speech.synthesize",),
+    )
+    chat = _add_route(
+        provider_store,
+        owner="alice",
+        connection_id="pcn_chat",
+        model_route_id="pmr_chat",
+        model_id="mimo-chat",
+    )
+    provider_store.put_route_binding(
+        owner="alice",
+        purpose="chat",
+        model_route_ids=[speech.id, chat.id],
+        expected_revision=0,
+    )
 
-    test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=True)
-
-    assert test_data["model"] == "qwen-3.6", \
-        "model should be resolved from global default_model"
-
-    assert test_data["endpoint_id"] == "global-ep-123", \
-        "Should get global endpoint_id"
-
-def test_get_default_chat_user_no_prefs_share_enabled_resolves_global_defaults(monkeypatch):
-    """
-    Non-admin user without personal preferences should resolve to global
-    defaults for ep_id, model, and fallbacks when share_defaults_with_users is enabled.
-    """
-
-    test_data = _run_get_default_chat_test(monkeypatch, share_defaults_enabled=True, second_endpoint_only=True)
-
-    assert test_data["model"] == "qwen-3.6", \
-        "model should be resolved from global default_model"
-
-    assert test_data["endpoint_id"] == "fallback-ep", \
-        "Should get global endpoint_id"
-
-def test_get_default_chat_mimo_stale_model_falls_back_to_chat_base_model(monkeypatch):
-    """A stale mimo default_model must fall back to the first BASE chat model
-    from the filtered catalog — never a TTS model or whatever provider happens
-    to come first in the raw handshake order."""
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
-        "default_endpoint_id": "mimo",
-        "default_model": "xiaomi/mimo-v2.5-pro-ultraspeed",  # no longer exists
-    })
-
-    supervisor = MagicMock()
-    supervisor.available_models = lambda owner=None: [
-        {"modelId": "deepseek/deepseek-v4-flash"},
-        {"modelId": "xiaomi/mimo-v2.5-tts"},
-        {"modelId": "xiaomi/mimo-v2.5-pro"},
-        {"modelId": "xiaomi/mimo-v2.5-pro/low"},
-    ]
-
-    fake_auth_manager = MagicMock()
-    fake_auth_manager.is_admin = lambda user: True
-    fake_auth_manager.get_privileges = lambda user: {}
-
-    router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
-    request = _make_request(user="e", auth_manager=fake_auth_manager)
-    request.app.state.mimo_supervisor = supervisor
-
-    result = get_default_chat(request)
-
-    assert result["endpoint_id"] == "mimo"
-    assert result["endpoint_url"] == "mimo://acp"
-    assert result["model"] == "deepseek/deepseek-v4-flash", \
-        "should pick the first chat-capable BASE model from the filtered catalog"
-
-
-def test_get_default_chat_mimo_valid_model_kept(monkeypatch):
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
-        "default_endpoint_id": "mimo",
-        "default_model": "xiaomi/mimo-v2.5-pro",
-    })
-
-    supervisor = MagicMock()
-    supervisor.available_models = lambda owner=None: [
-        {"modelId": "deepseek/deepseek-v4-flash"},
-        {"modelId": "xiaomi/mimo-v2.5-pro"},
-    ]
-
-    fake_auth_manager = MagicMock()
-    fake_auth_manager.is_admin = lambda user: True
-    fake_auth_manager.get_privileges = lambda user: {}
-
-    router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
-    request = _make_request(user="e", auth_manager=fake_auth_manager)
-    request.app.state.mimo_supervisor = supervisor
-
-    result = get_default_chat(request)
-
-    assert result["model"] == "xiaomi/mimo-v2.5-pro"
-
-
-def test_get_default_chat_mimo_unconfigured_prefers_auto(monkeypatch):
-    """e's rule: when nothing (valid) is configured, fall back to the
-    router's auto mode before any specific model."""
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
-        "default_endpoint_id": "mimo",
-        "default_model": "",
-    })
-    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
-
-    supervisor = MagicMock()
-    supervisor.available_models = lambda owner=None: [
-        {"modelId": "xiaomi/mimo-v2.5-pro"},
-        {"modelId": "xiaomi/mimo-auto"},
-        {"modelId": "deepseek/deepseek-v4-flash"},
-    ]
-
-    fake_auth_manager = MagicMock()
-    fake_auth_manager.is_admin = lambda user: True
-    fake_auth_manager.get_privileges = lambda user: {}
-
-    router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
-    request = _make_request(user="e", auth_manager=fake_auth_manager)
-    request.app.state.mimo_supervisor = supervisor
-
-    result = get_default_chat(request)
-
-    assert result["model"] == "xiaomi/mimo-auto"
-
-
-def test_get_default_chat_provider_scoped_mimo_endpoint(monkeypatch):
-    """Per-provider Settings rows (mimo:<provider>) resolve like normal
-    endpoints: catalog scoped to that provider, id echoed back."""
-    monkeypatch.setattr(model_routes, "_load_settings", lambda: {
-        "default_endpoint_id": "mimo:xiaomi",
-        "default_model": "",
-    })
-    monkeypatch.setattr(model_routes, "_covered_direct_providers", lambda *a, **k: {})
-
-    supervisor = MagicMock()
-    supervisor.available_models = lambda owner=None: [
-        {"modelId": "deepseek/deepseek-v4-flash"},
-        {"modelId": "xiaomi/mimo-v2.5-pro"},
-        {"modelId": "xiaomi/mimo-auto"},
-    ]
-
-    fake_auth_manager = MagicMock()
-    fake_auth_manager.is_admin = lambda user: True
-    fake_auth_manager.get_privileges = lambda user: {}
-
-    router = model_routes.setup_model_routes(model_discovery=None)
-    get_default_chat = _get_default_chat_route(router)
-    request = _make_request(user="e", auth_manager=fake_auth_manager)
-    request.app.state.mimo_supervisor = supervisor
-
-    result = get_default_chat(request)
-
-    assert result["endpoint_id"] == "mimo:xiaomi"
-    assert result["endpoint_url"] == "mimo://acp"
-    assert result["model"] == "xiaomi/mimo-auto"
+    assert _default_chat(provider_store, _request()) == {
+        "endpoint_id": "pcn_chat",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "model": "mimo-chat",
+    }

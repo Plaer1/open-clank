@@ -152,7 +152,7 @@ class Spinner {
 
     this._wpCanvas = canvas;
     this._wpCtx = canvas.getContext('2d');
-    this._wpFrame = 60;
+    this._wpStartedAt = null;
     this.element = wrapper;
     return wrapper;
   }
@@ -164,12 +164,12 @@ class Spinner {
     const cx = W / 2, cy = H / 2;
     const maxR = Math.min(W, H) / 2 - 1;
     const lw = W > 30 ? 3 : W > 20 ? 2 : 1.5;
-    const TOTAL_TURNS = 4;
-    const TAIL_LEN = 0.45;
-    const SPIN_SPEED = 0.08;
-    const LAYERS = 12;
-    const STEPS = 50;
-    const t = this._wpFrame;
+    const TOTAL_TURNS = 2.7;
+    const STEPS = 84;
+    const LOOP_MS = 1100;
+    if (!this._wpStartedAt) this._wpStartedAt = performance.now();
+    const loop = ((performance.now() - this._wpStartedAt) % LOOP_MS) / LOOP_MS;
+    const rot = loop * Math.PI * 2;
 
     // Colors from CSS vars — read ONCE and cache. Calling getComputedStyle every
     // frame forces a full style recalc per frame, which janks/freezes the canvas
@@ -185,8 +185,9 @@ class Spinner {
     const fg = this._wpColors.fg;
     const track = this._wpColors.track;
 
-    function spiralPoint(frac, rot) {
-      const r = maxR * (1 - frac);
+    function spiralPoint(frac) {
+      const eased = Math.pow(frac, 0.82);
+      const r = maxR * eased;
       const angle = frac * TOTAL_TURNS * Math.PI * 2 + rot;
       return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
     }
@@ -202,49 +203,32 @@ class Spinner {
     ctx.stroke();
     ctx.globalAlpha = 1;
 
-    const headPos = (t * 0.008) % 1;
-
-    // overlapping sub-paths for smooth fade
+    // Rotating a single continuous spiral keeps the loop seamless: the start
+    // and end frames are the same shape, just one full turn apart.
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    for (let layer = LAYERS - 1; layer >= 0; layer--) {
-      const endFrac = (layer + 1) / LAYERS;
-      const stepsForLayer = Math.ceil(STEPS * endFrac);
-      const alpha = Math.pow(1 - endFrac, 2) * 0.7;
-
+    for (let i = 1; i <= STEPS; i++) {
+      const a = (i - 1) / STEPS;
+      const b = i / STEPS;
+      const p0 = spiralPoint(a);
+      const p1 = spiralPoint(b);
       ctx.beginPath();
-      let started = false;
-      let prevPos = -1;
-      for (let i = 0; i <= stepsForLayer; i++) {
-        const frac = i / STEPS;
-        let pos = headPos - frac * TAIL_LEN;
-        if (pos < 0) pos += 1;
-        if (started && prevPos < 0.3 && pos > 0.7) {
-          ctx.stroke();
-          ctx.beginPath();
-          started = false;
-        }
-        const pt = spiralPoint(pos, t * SPIN_SPEED);
-        if (!started) { ctx.moveTo(pt.x, pt.y); started = true; }
-        else ctx.lineTo(pt.x, pt.y);
-        prevPos = pos;
-      }
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
       ctx.strokeStyle = fg;
-      ctx.lineWidth = lw * 0.8;
-      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lw * (0.52 + b * 0.32);
+      ctx.globalAlpha = 0.12 + Math.pow(b, 1.8) * 0.72;
       ctx.stroke();
     }
 
-    // bright dot at head
-    const head = spiralPoint(headPos, t * SPIN_SPEED);
+    const head = spiralPoint(1);
     ctx.beginPath();
-    ctx.arc(head.x, head.y, Math.max(1, lw * 0.45), 0, Math.PI * 2);
+    ctx.arc(head.x, head.y, Math.max(1.05, lw * 0.48), 0, Math.PI * 2);
     ctx.fillStyle = fg;
     ctx.globalAlpha = 0.9;
     ctx.fill();
     ctx.globalAlpha = 1;
 
-    this._wpFrame++;
     if (!this.isRunning) return;
     // Leak-safe self-terminate: stop once our element WAS in the DOM and then
     // got removed (e.g. a loading row replaced by results). But keep spinning
@@ -293,7 +277,7 @@ class Spinner {
     }
 
     if (this.animation === 'whirlpool') {
-      this._wpFrame = 60;
+      this._wpStartedAt = performance.now();
       this._drawWhirlpool();
       return;
     }

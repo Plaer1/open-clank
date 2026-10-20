@@ -1,0 +1,35 @@
+{
+  "id": "batch-065",
+  "group": "treehouse.lesson.house-collaborate",
+  "surface": "treehouse",
+  "entry_count": 2,
+  "character_count": 410,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-collaborate.tool-activity.title",
+      "source": "Inspecting tool activity and existing authority",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:294"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.tool-activity.whyThisHelps",
+      "source": "Knowing the boundary before you delegate keeps surprises out of your files. And when something did run, the activity record is how you check it — without guessing from the prose reply.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:294"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    }
+  ]
+}

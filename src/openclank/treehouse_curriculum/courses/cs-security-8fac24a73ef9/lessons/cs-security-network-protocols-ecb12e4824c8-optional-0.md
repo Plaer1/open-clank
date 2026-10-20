@@ -1,0 +1,1 @@
+Buffer until the declared bounded length is available; validate lengths; enforce resource permissions after channel authentication.

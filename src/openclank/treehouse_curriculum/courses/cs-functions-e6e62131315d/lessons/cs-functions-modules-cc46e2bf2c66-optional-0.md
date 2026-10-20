@@ -1,0 +1,1 @@
+Name push/pop/is_empty, a defined empty case, and hide storage/index layout.

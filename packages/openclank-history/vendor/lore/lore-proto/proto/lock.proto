@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+package urc.lock;
+
+// Represents the resource being locked in the repository
+message Resource {
+  // Branch ID
+  bytes branch = 1;
+
+  // Hash for the resource
+  bytes hash = 2;
+
+  // Human readable description of the resource (i.e. file path, property name,
+  // etc)
+  string description = 3;
+}
+
+// Represents the lock on a resource
+message Lock {
+  // Resource reference
+  Resource resource = 1;
+
+  // The server will store the user's ID provided with the
+  // request's auth info
+  string owner = 2;
+
+  // Lock timestamp
+  google.protobuf.Timestamp locked_at = 3;
+}
+
+//////////////////////////////////
+// RPC service definitions
+//
+
+service LockService {
+  // Locks resources, errors if already locked
+  rpc Lock(LockRequest) returns (LockResponse);
+
+  // Query for locks
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Get lock status
+  rpc Status(StatusRequest) returns (StatusResponse);
+
+  // Unlocks resources, no-ops if no lock exists
+  rpc Unlock(UnlockRequest) returns (UnlockResponse);
+
+  // Locks resources for another user
+  rpc AdminLock(AdminLockRequest) returns (AdminLockResponse);
+}
+
+message LockRequest { repeated Resource resources = 1; }
+
+message LockResponse {
+  // List of created locks
+  repeated Lock locks = 1;
+}
+
+message QueryRequest {
+  optional bytes branch = 1;
+  optional string owner = 2;
+  optional string description = 3;
+}
+
+message QueryResponse { repeated Lock result = 1; }
+
+message StatusRequest { repeated Resource resources = 1; }
+
+message StatusResponse {
+  // List of locks found
+  // NOTE: We might want to consider just boolean returns in order?
+  repeated Lock locks = 1;
+}
+
+message UnlockRequest { repeated Resource resources = 1; }
+
+message UnlockResponse {
+  // List of resources unlocked
+  // NOTE: Same as above, maybe booleans in order?
+  repeated Resource resources = 1;
+}
+
+message AdminLockRequest {
+  repeated Resource resources = 1;
+  string owner = 2;
+}
+
+message AdminLockResponse {
+  // List of created locks
+  repeated Lock locks = 1;
+}

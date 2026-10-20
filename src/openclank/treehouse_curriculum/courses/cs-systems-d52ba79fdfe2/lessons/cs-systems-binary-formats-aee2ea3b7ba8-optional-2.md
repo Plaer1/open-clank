@@ -1,0 +1,1 @@
+Local `file` identified Mach-O64-bit arm64 object/executable; `nm toy.o` showed _bump and _main. These spellings are an observed Apple target convention, not universal symbol names. Dynamic linking/ASLR may change loaded addresses; never reuse a file offset as a pointer without the mapping.

@@ -1,0 +1,1 @@
+Distances 4 and 5 collide, 6 does not; the collectible disappears once, while the wall prevents or corrects penetration.

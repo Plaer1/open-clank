@@ -1,0 +1,1 @@
+Injection means distinct inputs have distinct outputs; surjection means every codomain element is reached; a bijection has both. Equivalence relations are reflexive, symmetric, transitive and partition a set; partial orders are reflexive, antisymmetric, transitive and allow incomparable elements. Powersets collect subsets; Cartesian products collect pairs.

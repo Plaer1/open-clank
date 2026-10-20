@@ -4,38 +4,50 @@ import os
 
 from src.runtime_paths import get_app_root, get_default_data_dir
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # ---------------------------------------------------------------------------
-# OPENTHESIUS_DEBUG — master debug bit
+# OPEN_CLANK_DEBUG — master debug bit
 # ---------------------------------------------------------------------------
-# Set to "1" or "true" in .env to enable debug pipelines throughout thesius.
+# Set to "1" or "true" in .env to enable Open Clank debug pipelines.
 # Individual debug systems should gate on this flag (e.g. extra logging,
 # timing instrumentation, verbose error dumps). Check via is_openthesius_debug().
 def is_openthesius_debug() -> bool:
-    v = os.environ.get("OPENTHESIUS_DEBUG", "")
+    v = (
+        os.environ.get("OPEN_CLANK_DEBUG")
+        or os.environ.get("OPENTHESIUS_DEBUG")
+        or ""
+    )
     return v.lower() in ("1", "true", "yes", "on")
 
 # ---------------------------------------------------------------------------
-# THESIUS_AGENT_HOME — per-agent process isolation (Phase 4)
+# OPEN_CLANK_AGENT_HOME — per-agent process isolation
 # ---------------------------------------------------------------------------
-# When set, derive ODYSSEUS_DATA_DIR, OPENTHESIUS_GLOBAL_CWD, MIMOCODE_HOME,
+# When set, derive Open Clank's data root plus compatibility variables,
 # and FM_DB_PATH so each agent process gets its own data/config under its
 # agent home. Explicit overrides in the environment take precedence.
-_THESIUS_AGENT_HOME = os.environ.get("THESIUS_AGENT_HOME")
+_LEGACY_AGENT_HOME = os.environ.get("THESIUS_AGENT_HOME")
+_OPEN_CLANK_AGENT_HOME = (
+    os.environ.get("OPEN_CLANK_AGENT_HOME")
+    or _LEGACY_AGENT_HOME
+)
 
 # Snapshot the ORIGINAL default data dir BEFORE we possibly override
-# ODYSSEUS_DATA_DIR.  This lets AUTH_FILE stay pinned to the global
+# OPEN_CLANK_DATA_DIR. This lets AUTH_FILE stay pinned to the global
 # location even when data lives under the agent home.
 _ORIGINAL_DEFAULT_DATA_DIR = get_default_data_dir()
 
-if _THESIUS_AGENT_HOME:
-    _h = _THESIUS_AGENT_HOME
-    if "ODYSSEUS_DATA_DIR" not in os.environ:
-        os.environ["ODYSSEUS_DATA_DIR"] = os.path.join(_h, "data")
-    if "OPENTHESIUS_GLOBAL_CWD" not in os.environ:
-        os.environ["OPENTHESIUS_GLOBAL_CWD"] = _h
-    if "MIMOCODE_HOME" not in os.environ:
+if _OPEN_CLANK_AGENT_HOME:
+    _h = _OPEN_CLANK_AGENT_HOME
+    if "OPEN_CLANK_DATA_DIR" not in os.environ and "ODYSSEUS_DATA_DIR" not in os.environ:
+        os.environ["OPEN_CLANK_DATA_DIR"] = os.path.join(_h, "data")
+    if "OPEN_CLANK_GLOBAL_CWD" not in os.environ:
+        os.environ["OPEN_CLANK_GLOBAL_CWD"] = (
+            os.environ.get("OPENTHESIUS_GLOBAL_CWD") or _h
+        )
+    # Compatibility only for operators still using the legacy switch. New
+    # Open Clank workers set their private bundled-runtime home themselves.
+    if _LEGACY_AGENT_HOME and "MIMOCODE_HOME" not in os.environ:
         os.environ["MIMOCODE_HOME"] = os.path.join(_h, ".mimocode")
     if "FM_DB_PATH" not in os.environ:
         os.environ["FM_DB_PATH"] = os.path.join(_h, "data", "frankenmemory.db")
@@ -43,10 +55,18 @@ if _THESIUS_AGENT_HOME:
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-DATA_DIR = os.getenv("ODYSSEUS_DATA_DIR", get_default_data_dir())
+DATA_DIR = os.path.abspath(os.path.expanduser(
+    os.getenv("OPEN_CLANK_DATA_DIR")
+    or os.getenv("ODYSSEUS_DATA_DIR")
+    or get_default_data_dir()
+))
+# One authority, two read-compatible names. Old embedded helpers still read the
+# legacy variable; forcing both to the resolved root prevents split writers.
+os.environ["OPEN_CLANK_DATA_DIR"] = DATA_DIR
+os.environ["ODYSSEUS_DATA_DIR"] = DATA_DIR
 
 # Every fm-mcp child inherits one canonical absolute database path. Resolving
-# here avoids cwd-dependent split brains between Odyssius and MiMo.
+# here avoids cwd-dependent split brains between Odyssius and Open Clank agent.
 FM_DB_PATH = os.path.abspath(
     os.path.expanduser(os.environ.get("FM_DB_PATH") or os.path.join(DATA_DIR, "frankenmemory.db"))
 )
@@ -54,8 +74,8 @@ os.environ["FM_DB_PATH"] = FM_DB_PATH
 
 # Data file paths
 # Single source of truth: every persisted file/dir lives under DATA_DIR, which
-# is the ONLY place ODYSSEUS_DATA_DIR is read. Import these constants instead of
-# re-deriving paths from __file__ or a relative "data" literal.
+# is the ONLY first-party place the legacy data variable is read. Import these
+# constants instead of re-deriving paths from __file__ or a relative literal.
 SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
 MEMORY_FILE = os.path.join(DATA_DIR, "memory.json")
 PERSONAL_DIR = os.path.join(DATA_DIR, "personal_docs")
@@ -63,9 +83,9 @@ RUNBOOK_DIR = os.path.join(PERSONAL_DIR, "runbook")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 FEATURES_FILE = os.path.join(DATA_DIR, "features.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-# Auth stays global even when THESIUS_AGENT_HOME is set — one user, one auth.
+# Auth stays global even when OPEN_CLANK_AGENT_HOME is set — one user, one auth.
 AUTH_FILE = os.path.join(
-    _ORIGINAL_DEFAULT_DATA_DIR if _THESIUS_AGENT_HOME else DATA_DIR,
+    _ORIGINAL_DEFAULT_DATA_DIR if _OPEN_CLANK_AGENT_HOME else DATA_DIR,
     "auth.json",
 )
 USER_PREFS_FILE = os.path.join(DATA_DIR, "user_prefs.json")
@@ -100,7 +120,11 @@ GALLERY_UPLOADS_DIR = os.path.join(DATA_DIR, "gallery_uploads")
 MEMORY_VECTORS_DIR = os.path.join(DATA_DIR, "memory_vectors")
 
 # Paths with an intentional dedicated env override, defaulting under DATA_DIR.
-MAIL_ATTACHMENTS_DIR = os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR", os.path.join(DATA_DIR, "mail-attachments"))
+MAIL_ATTACHMENTS_DIR = (
+    os.getenv("OPEN_CLANK_MAIL_ATTACHMENTS_DIR")
+    or os.getenv("ODYSSEUS_MAIL_ATTACHMENTS_DIR")
+    or os.path.join(DATA_DIR, "mail-attachments")
+)
 # `or` (not os.getenv's default arg) so a PRESENT-but-EMPTY value falls back to
 # the default. docker-compose.yml injects `FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}`,
 # which sets the var to "" when the host hasn't defined it. os.getenv(name, default)
@@ -155,19 +179,20 @@ DEFAULT_MAX_TOKENS = 0
 
 
 def internal_api_base() -> str:
-    """Base URL for in-process loopback calls to Odysseus's own API.
+    """Base URL for in-process loopback calls to Open Clank's own API.
 
     Agent tools and background jobs reach admin-gated routes by calling the
     running server over HTTP. Resolution order:
-      1. ODYSSEUS_INTERNAL_BASE  - explicit override (e.g. behind a TLS proxy).
-      2. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
-      3. Fallback http://127.0.0.1:7000 - legacy default.
+      1. OPEN_CLANK_INTERNAL_BASE - explicit override.
+      2. ODYSSEUS_INTERNAL_BASE  - compatibility override.
+      3. APP_PORT                - http://127.0.0.1:$APP_PORT (docker-compose).
+      4. Fallback http://127.0.0.1:7777 - default.
 
     127.0.0.1 (not "localhost") avoids IPv6/DNS ambiguity for a strictly-local
     call. Without this, loopback tools fail with "All connection attempts
-    failed" whenever the server is not on port 7000.
+    failed" whenever the server is not on the default port.
     """
-    override = os.environ.get("ODYSSEUS_INTERNAL_BASE")
+    override = os.environ.get("OPEN_CLANK_INTERNAL_BASE") or os.environ.get("ODYSSEUS_INTERNAL_BASE")
     if override:
         return override.rstrip("/")
-    return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7000')}"
+    return f"http://127.0.0.1:{os.environ.get('APP_PORT', '7777')}"

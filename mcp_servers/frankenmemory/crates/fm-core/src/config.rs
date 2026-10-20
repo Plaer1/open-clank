@@ -7,8 +7,41 @@ pub struct FmConfig {
     pub recall: RecallConfig,
     pub collapse: CollapseConfig,
     pub decay: DecayConfig,
+    pub code_index: CodeIndexConfig,
     pub providers: ProviderConfig,
     pub workspace_id: String,
+}
+
+/// Controls how long an owner/repository code-index run may remain leased
+/// before a later request can classify it as abandoned. This is a recovery
+/// lease, not an indexing timeout. Configure it above the expected
+/// uninterrupted run duration for large repositories so a later request does
+/// not classify the active run as abandoned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeIndexConfig {
+    pub lease_seconds: u64,
+}
+
+impl CodeIndexConfig {
+    pub const DEFAULT_LEASE_SECONDS: u64 = 99_999;
+    pub const MIN_LEASE_SECONDS: u64 = 60;
+    pub const MAX_LEASE_SECONDS: u64 = 99_999;
+
+    pub fn from_env() -> Self {
+        let requested = std::env::var("FM_CODE_INDEX_LEASE_SECONDS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_LEASE_SECONDS);
+        Self {
+            lease_seconds: requested.clamp(Self::MIN_LEASE_SECONDS, Self::MAX_LEASE_SECONDS),
+        }
+    }
+}
+
+impl Default for CodeIndexConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +119,7 @@ impl Default for FmConfig {
             recall: RecallConfig::default(),
             collapse: CollapseConfig::default(),
             decay: DecayConfig::default(),
+            code_index: CodeIndexConfig::default(),
             providers: ProviderConfig::default(),
             workspace_id: "global".into(),
         }
@@ -94,10 +128,9 @@ impl Default for FmConfig {
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
-        // Local-first default (management ruling 2026-07-09): a keyless local
-        // ollama endpoint is the only thing that can work with ZERO
-        // configuration. Cloud endpoints (OpenAI, Gemini's OpenAI-compat
-        // layer) are one FM_EMBED_API_BASE + FM_EMBED_API_KEY away.
+        // Retained only for backward-compatible store shape.  Curated-memory
+        // vectors fail closed until their schema can record immutable managed
+        // route/adapter/dimension generations.
         Self {
             api_base: "http://127.0.0.1:11434/v1".into(),
             model: "qwen3-embedding:8b".into(),
@@ -110,40 +143,11 @@ impl Default for EmbeddingConfig {
 }
 
 impl EmbeddingConfig {
-    /// Defaults overridable via env — the embedding endpoint must be
-    /// configurable (management ruling 2026-07-08): FM_EMBED_API_BASE,
-    /// FM_EMBED_MODEL, FM_EMBED_DIMENSIONS, FM_EMBED_TIMEOUT_MS.
-    /// NOTE: whether an HTTP client is used AT ALL is decided by the binary
-    /// (fm-mcp uses HTTP only when FM_EMBED_API_BASE is set; otherwise the
-    /// deterministic Noop embedder, the pre-E1 behavior).
+    /// Provider-bearing environment overrides are retired.  Open Clank's
+    /// normalized provider repository and managed operation router are the
+    /// sole embedding authority.
     pub fn from_env() -> Self {
-        let mut cfg = Self::default();
-        if let Ok(v) = std::env::var("FM_EMBED_API_BASE") {
-            if !v.trim().is_empty() {
-                cfg.api_base = v;
-            }
-        }
-        if let Ok(v) = std::env::var("FM_EMBED_MODEL") {
-            if !v.trim().is_empty() {
-                cfg.model = v;
-            }
-        }
-        if let Ok(v) = std::env::var("FM_EMBED_DIMENSIONS") {
-            if let Ok(n) = v.trim().parse::<usize>() {
-                cfg.dimensions = n;
-            }
-        }
-        if let Ok(v) = std::env::var("FM_EMBED_TIMEOUT_MS") {
-            if let Ok(n) = v.trim().parse::<u64>() {
-                cfg.timeout_ms = n;
-            }
-        }
-        if let Ok(v) = std::env::var("FM_EMBED_API_KEY") {
-            if !v.trim().is_empty() {
-                cfg.api_key = Some(v);
-            }
-        }
-        cfg
+        Self::default()
     }
 }
 
@@ -152,29 +156,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedding_config_reads_env_overrides() {
-        std::env::set_var("FM_EMBED_API_BASE", "http://127.0.0.1:11434/v1");
-        std::env::set_var("FM_EMBED_MODEL", "qwen3-embedding:8b");
-        std::env::set_var("FM_EMBED_DIMENSIONS", "4096");
-        std::env::set_var("FM_EMBED_TIMEOUT_MS", "15000");
-
+    fn embedding_config_has_no_provider_environment_authority() {
         let cfg = EmbeddingConfig::from_env();
         assert_eq!(cfg.api_base, "http://127.0.0.1:11434/v1");
         assert_eq!(cfg.model, "qwen3-embedding:8b");
         assert_eq!(cfg.dimensions, 4096);
-        assert_eq!(cfg.timeout_ms, 15000);
+        assert_eq!(cfg.timeout_ms, 20000);
+        assert!(cfg.api_key.is_none());
+    }
 
-        std::env::remove_var("FM_EMBED_API_BASE");
-        std::env::remove_var("FM_EMBED_MODEL");
-        std::env::remove_var("FM_EMBED_DIMENSIONS");
-        std::env::remove_var("FM_EMBED_TIMEOUT_MS");
-
-        let cfg = EmbeddingConfig::from_env();
-        assert_eq!(
-            cfg.api_base, "http://127.0.0.1:11434/v1",
-            "local-first default"
-        );
-        assert_eq!(cfg.dimensions, 4096);
+    #[test]
+    fn code_index_lease_has_large_repo_safe_defaults_and_bounds() {
+        let cfg = CodeIndexConfig::default();
+        assert_eq!(cfg.lease_seconds, CodeIndexConfig::DEFAULT_LEASE_SECONDS);
+        assert!(cfg.lease_seconds > 5 * 60);
+        assert_eq!(CodeIndexConfig::DEFAULT_LEASE_SECONDS, 99_999);
+        assert_eq!(CodeIndexConfig::MAX_LEASE_SECONDS, 99_999);
+        assert!(CodeIndexConfig::MIN_LEASE_SECONDS >= 60);
     }
 }
 

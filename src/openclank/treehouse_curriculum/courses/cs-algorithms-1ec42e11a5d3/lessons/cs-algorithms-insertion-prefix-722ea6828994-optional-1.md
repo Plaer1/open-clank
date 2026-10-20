@@ -1,0 +1,1 @@
+Changing the shift test to greater-or-equal can reverse equal-key order.

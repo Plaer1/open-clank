@@ -7,6 +7,9 @@ edition = "2021"
 name = "fm-mcp"
 path = "src/main.rs"
 
+[features]
+s03-fixtures = []
+
 [dependencies]
 fm-core = { path = "../fm-core" }
 tokio = { workspace = true }

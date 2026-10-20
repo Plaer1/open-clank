@@ -1,0 +1,1 @@
+Use S→(S)S→((S)S)S then replace inner/remaining S with empty; mention division by zero or undefined names.

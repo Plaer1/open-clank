@@ -7,12 +7,15 @@ Covers:
   - Relative traversal (~/../../etc/passwd) — blocked
   - Shell rc files (.bashrc, .zshrc, .profile) — blocked
   - SSH key filenames (id_rsa, id_ed25519) — blocked regardless of dir
-  - Legitimate paths under project data/ and /tmp — allowed
+  - Open Clank control data — blocked, including from a broader workspace
+  - Legitimate paths under /tmp and ordinary workspaces — allowed
   - Extra roots via tool_path_extra_roots setting — opt-in
   - Even with $HOME as extra root, sensitive subpaths stay blocked
 """
 
+import json
 import os
+import pathlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -161,19 +164,134 @@ def test_blocks_netrc():
         _resolve_tool_path("~/.netrc")
 
 
-def test_allows_project_data(tmp_path):
-    """Paths under project data/ must resolve cleanly."""
+def test_blocks_project_control_data(tmp_path):
+    """Generic model file tools cannot read or mutate application state."""
     from src.tool_execution import _resolve_tool_path
     from src.constants import DATA_DIR
-    target = os.path.join(DATA_DIR, "test-confinement-ok.txt")
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(target, "w") as f:
-        f.write("ok")
+    with pytest.raises(ValueError, match="Open Clank control data"):
+        _resolve_tool_path(os.path.join(DATA_DIR, "app.db"))
+
+
+def test_workspace_blocks_control_data_and_symlink_alias(monkeypatch, tmp_path):
+    from src.tool_execution import _resolve_tool_path_in_workspace
+
+    workspace = tmp_path / "repo"
+    control = workspace / "data"
+    control.mkdir(parents=True)
+    target = control / "app.db"
+    target.write_text("secret")
+    normal = workspace / "notes.txt"
+    normal.write_text("ok")
+    alias = workspace / "control-alias"
+    alias.symlink_to(control, target_is_directory=True)
+
+    monkeypatch.setattr("src.constants.DATA_DIR", str(control))
+    monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
+    monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))
+
+    assert _resolve_tool_path_in_workspace(str(workspace), "notes.txt") == str(normal)
+    with pytest.raises(ValueError, match="Open Clank control data"):
+        _resolve_tool_path_in_workspace(str(workspace), "data/app.db")
+    with pytest.raises(ValueError, match="Open Clank control data"):
+        _resolve_tool_path_in_workspace(str(workspace), "control-alias/app.db")
+
+
+def test_control_data_cannot_be_bound_as_workspace(monkeypatch, tmp_path):
+    from src.tool_execution import vet_workspace
+
+    control = tmp_path / "data"
+    control.mkdir()
+    monkeypatch.setattr("src.constants.DATA_DIR", str(control))
+    monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
+    monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))
+
+    assert vet_workspace(str(control)) is None
+
+
+def test_runtime_xdg_config_is_control_data(monkeypatch, tmp_path):
+    from src.tool_execution import _is_control_data_path
+
+    monkeypatch.setenv("MIMOCODE_HOME", str(tmp_path / "mimo-home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    assert _is_control_data_path(str(tmp_path / "mimo-home" / "auth.json"))
+    assert _is_control_data_path(str(tmp_path / "config" / "mimocode" / "config.json"))
+
+
+def test_external_frankenmemory_sidecars_are_control_data(monkeypatch, tmp_path):
+    from src.tool_execution import _is_control_data_path
+
+    monkeypatch.setattr("src.constants.DATA_DIR", str(tmp_path / "agent-data"))
+    monkeypatch.setattr("src.constants.AUTH_FILE", str(tmp_path / "auth-data" / "auth.json"))
+    db_path = tmp_path / "memory-data" / "frankenmemory.db"
+    monkeypatch.setattr("src.constants.FM_DB_PATH", str(db_path))
+
+    assert _is_control_data_path(f"{db_path}-wal")
+    assert _is_control_data_path(f"{db_path}-shm")
+
+
+@pytest.mark.asyncio
+async def test_publish_admin_home_fallback_still_blocks_control_data(monkeypatch, tmp_path):
+    from src.agent_tools.filesystem_tools import PublishFileTool
+
+    control = tmp_path / "data"
+    control.mkdir()
+    target = control / "app.db"
+    target.write_text("secret")
+    monkeypatch.setattr("src.constants.DATA_DIR", str(control))
+    monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
+    monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(
+        "src.tool_security.owner_is_admin_or_single_user",
+        lambda owner: True,
+    )
+
+    result = await PublishFileTool().execute(
+        json.dumps({"path": str(target)}),
+        {"owner": "admin"},
+    )
+
+    assert result["exit_code"] == 1
+    assert "Open Clank control data" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_code_nav_prunes_control_data(monkeypatch, tmp_path):
+    from src.agent_tools.filesystem_tools import GlobTool, GrepTool, LsTool
+    from src.tool_execution import _active_workspace
+
+    workspace = tmp_path / "repo"
+    control = workspace / "data"
+    control.mkdir(parents=True)
+    (control / "secret.txt").write_text("CONTROL_SECRET")
+    (workspace / "safe.txt").write_text("SAFE_CONTENT")
+
+    monkeypatch.setattr("src.constants.DATA_DIR", str(control))
+    monkeypatch.setattr("src.constants.AUTH_FILE", str(control / "auth.json"))
+    monkeypatch.setattr("src.constants.FM_DB_PATH", str(control / "frankenmemory.db"))
+
+    token = _active_workspace.set(str(workspace))
     try:
-        resolved = _resolve_tool_path(target)
-        assert resolved == os.path.realpath(target)
+        listed = await LsTool().execute("", {})
+        globbed = await GlobTool().execute(
+            '{"pattern": "secret.txt", "path": ""}',
+            {},
+        )
+        grepped = await GrepTool().execute(
+            '{"pattern": "CONTROL_SECRET", "path": ""}',
+            {},
+        )
     finally:
-        os.unlink(target)
+        _active_workspace.reset(token)
+
+    assert listed["exit_code"] == 0
+    assert "safe.txt" in listed["output"]
+    assert "data/" not in listed["output"]
+    assert globbed["exit_code"] == 0
+    assert globbed["paths"] == []
+    assert grepped["exit_code"] == 0
+    assert grepped["matches"] == []
 
 
 def test_allows_tmp(tmp_path):

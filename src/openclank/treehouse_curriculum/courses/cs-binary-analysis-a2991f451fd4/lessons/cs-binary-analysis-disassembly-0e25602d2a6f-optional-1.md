@@ -1,0 +1,1 @@
+An instruction's effect is narrower than the story suggested by a guessed function name.

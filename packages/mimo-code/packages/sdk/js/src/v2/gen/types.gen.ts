@@ -92,6 +92,21 @@ export type EventActorRegistered = {
     description: string
     agent: string
     background: boolean
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -105,6 +120,21 @@ export type EventActorStatus = {
     turnCount: number
     lastTurnTime: number
     error?: string
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -116,6 +146,47 @@ export type EventActorStuck = {
     description: string
     lastTurnTime: number
     stuckDuration: number
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
+  }
+}
+
+export type EventActorStalled = {
+  type: "actor.stalled"
+  properties: {
+    sessionID: string
+    actorID: string
+    description: string
+    lastTurnTime: number
+    stalledDuration: number
+    requestedModel?: string
+    effectiveModel?: {
+      providerID: string
+      modelID: string
+    }
+    hostContext?: {
+      accountID?: string
+      grantID?: string
+      grantRevision?: number
+      credentialRevision?: number
+      chatID?: string
+      workspaceID?: string
+      cwd?: string
+      goalID?: string
+    }
   }
 }
 
@@ -222,6 +293,19 @@ export type EventMetricsAgentRequest = {
     total_tokens_out: number
     files_changed: number
     validation_status: string
+  }
+}
+
+export type EventMetricsTryBestDetected = {
+  type: "metrics.try_best_detected"
+  properties: {
+    sessionID: string
+    reason: "edit_repeat" | "bash_retry" | "action_streak"
+    provider: string
+    model_id: string
+    count: number
+    similarity?: number
+    action?: "edit" | "verify"
   }
 }
 
@@ -564,6 +648,25 @@ export type EventSessionRetryAttempt = {
   }
 }
 
+export type EventSessionTryBestDetected = {
+  type: "session.try_best.detected"
+  properties: {
+    sessionID: string
+    agentID?: string
+    providerID: string
+    modelID: string
+    reason: "edit_repeat" | "bash_retry" | "action_streak"
+    evidence: {
+      tool: string
+      path?: string
+      command?: string
+      count: number
+      similarity?: number
+      action?: "edit" | "verify"
+    }
+  }
+}
+
 export type EventHookExecuted = {
   type: "hook.executed"
   properties: {
@@ -597,6 +700,14 @@ export type EventHookReactMaxReached = {
     phase: "pre" | "post"
     actorID: string
     agentType: string
+  }
+}
+
+export type EventSessionCwd = {
+  type: "session.cwd"
+  properties: {
+    sessionID: string
+    cwd: string
   }
 }
 
@@ -687,20 +798,19 @@ export type EventQuestionRejected = {
   properties: QuestionRejected
 }
 
-export type EventSessionCwd = {
-  type: "session.cwd"
-  properties: {
-    sessionID: string
-    cwd: string
-  }
-}
-
 export type EventBashInteractiveAsked = {
   type: "bash.interactive.asked"
   properties: {
     id: string
+    sessionID: string
+    callID: string
     command: string
     cwd: string
+    workspace: string
+    writableRoots: Array<string>
+    shell: string
+    network: "enabled" | "disabled"
+    timeout: number
     env?: {
       [key: string]: string
     }
@@ -708,12 +818,59 @@ export type EventBashInteractiveAsked = {
   }
 }
 
+export type EventBashInteractiveCancelled = {
+  type: "bash.interactive.cancelled"
+  properties: {
+    id: string
+    reason: string
+  }
+}
+
 export type EventBashInteractiveReplied = {
   type: "bash.interactive.replied"
   properties: {
     id: string
+    sessionID: string
+    callID: string
     output: string
     exitCode: number
+  }
+}
+
+export type SessionStatus =
+  | {
+      type: "idle"
+    }
+  | {
+      type: "retry"
+      attempt: number
+      phaseAttempt?: number
+      message: string
+      next: number
+      phase?: "request" | "stream"
+      scope?: "request" | "live-step" | "max-candidate" | "max-judge"
+    }
+  | {
+      type: "notice"
+      message: string
+    }
+  | {
+      type: "busy"
+      message?: string
+    }
+
+export type EventSessionStatus = {
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  type: "session.idle"
+  properties: {
+    sessionID: string
   }
 }
 
@@ -746,6 +903,14 @@ export type EventCommandExecuted = {
     sessionID: string
     arguments: string
     messageID: string
+  }
+}
+
+export type EventSessionCompacted = {
+  type: "session.compacted"
+  properties: {
+    sessionID: string
+    agentID?: string
   }
 }
 
@@ -783,43 +948,27 @@ export type EventTodoUpdated = {
   }
 }
 
-export type SessionStatus =
-  | {
-      type: "idle"
-    }
-  | {
-      type: "retry"
-      attempt: number
-      message: string
-      next: number
-    }
-  | {
-      type: "busy"
-      message?: string
-    }
-
-export type EventSessionStatus = {
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
 export type EventSessionGoal = {
   type: "session.goal"
   properties: {
     sessionID: string
     goal?: {
+      id: string
       condition: string
+      revision: number
+      status:
+        | "queued"
+        | "active"
+        | "awaiting_verification"
+        | "paused"
+        | "blocked"
+        | "verification_degraded"
+        | "completed"
+        | "cancelled"
+        | "expired"
+      react: number
     }
+    queued?: number
     lastVerdict?: {
       ok: boolean
       impossible?: boolean
@@ -827,15 +976,15 @@ export type EventSessionGoal = {
       attempt: number
       messageID?: string
       error?: boolean
+      reasonCode?:
+        | "not_met"
+        | "met"
+        | "impossible"
+        | "judge_timeout"
+        | "judge_provider_failure"
+        | "judge_malformed_verdict"
+        | "evidence_policy_not_satisfied"
     }
-  }
-}
-
-export type EventSessionCompacted = {
-  type: "session.compacted"
-  properties: {
-    sessionID: string
-    agentID?: string
   }
 }
 
@@ -1152,6 +1301,10 @@ export type ToolStateCompleted = {
     [key: string]: unknown
   }
   output: string
+  providerOutput?: Schema0
+  providerMetadata?: {
+    [key: string]: unknown
+  }
   title: string
   metadata: {
     [key: string]: unknown
@@ -1177,6 +1330,7 @@ export type ToolStateError = {
     start: number
     end: number
   }
+  attachments?: Array<FilePart>
 }
 
 export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError
@@ -1272,6 +1426,7 @@ export type CheckpointPart = {
   checkpointDir: string
   checkpointNumber: number
   coveredUpTo: string
+  digestUpTo?: string
 }
 
 export type CompactionPart = {
@@ -1346,6 +1501,8 @@ export type Session = {
     url: string
   }
   title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
   version: string
   time: {
     created: number
@@ -1362,16 +1519,16 @@ export type Session = {
   }
 }
 
-export type EventSessionCreated = {
-  type: "session.created"
+export type EventSessionUpdated = {
+  type: "session.updated"
   properties: {
     sessionID: string
     info: Session
   }
 }
 
-export type EventSessionUpdated = {
-  type: "session.updated"
+export type EventSessionCreated = {
+  type: "session.created"
   properties: {
     sessionID: string
     info: Session
@@ -1436,26 +1593,15 @@ export type SyncEventMessagePartRemoved = {
   }
 }
 
-export type SyncEventSessionCreated = {
-  type: "sync"
-  name: "session.created.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    sessionID: string
-    info: Session
-  }
-}
-
 export type SyncEventSessionUpdated = {
   type: "sync"
-  name: "session.updated.1"
+  name: "session.updated.2"
   id: string
   seq: number
   aggregateID: "sessionID"
   data: {
     sessionID: string
+    previousRevision?: number
     info: {
       id: string | null
       slug: string | null
@@ -1475,6 +1621,8 @@ export type SyncEventSessionUpdated = {
         url: string | null
       }
       title: string | null
+      titleSource: "fallback" | "generated" | "user" | null
+      titleRevision: number | null
       version: string | null
       time?: {
         created: number | null
@@ -1490,6 +1638,18 @@ export type SyncEventSessionUpdated = {
         diff?: string
       } | null
     }
+  }
+}
+
+export type SyncEventSessionCreated = {
+  type: "sync"
+  name: "session.created.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    sessionID: string
+    info: Session
   }
 }
 
@@ -1520,6 +1680,7 @@ export type GlobalEvent = {
     | EventActorRegistered
     | EventActorStatus
     | EventActorStuck
+    | EventActorStalled
     | EventWriterCachePerf
     | EventInboxArrived
     | EventTaskCreated
@@ -1527,6 +1688,7 @@ export type GlobalEvent = {
     | EventMetricsModelCall
     | EventMetricsToolCall
     | EventMetricsAgentRequest
+    | EventMetricsTryBestDetected
     | EventTeamCreated
     | EventTeamMemberJoined
     | EventWorkflowPhase
@@ -1549,26 +1711,28 @@ export type GlobalEvent = {
     | EventSessionDiff
     | EventSessionError
     | EventSessionRetryAttempt
+    | EventSessionTryBestDetected
     | EventHookExecuted
     | EventHookReactReentered
     | EventHookReactMaxReached
+    | EventSessionCwd
     | EventQuestionAsked
     | EventQuestionReplied
     | EventQuestionRejected
-    | EventSessionCwd
     | EventBashInteractiveAsked
+    | EventBashInteractiveCancelled
     | EventBashInteractiveReplied
+    | EventSessionStatus
+    | EventSessionIdle
     | EventVcsBranchUpdated
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
+    | EventSessionCompacted
     | EventWorktreeReady
     | EventWorktreeFailed
     | EventTodoUpdated
-    | EventSessionStatus
-    | EventSessionIdle
     | EventSessionGoal
-    | EventSessionCompacted
     | EventPtyCreated
     | EventPtyUpdated
     | EventPtyExited
@@ -1581,15 +1745,15 @@ export type GlobalEvent = {
     | EventMessageRemoved
     | EventMessagePartUpdated
     | EventMessagePartRemoved
-    | EventSessionCreated
     | EventSessionUpdated
+    | EventSessionCreated
     | EventSessionDeleted
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
     | SyncEventMessagePartRemoved
-    | SyncEventSessionCreated
     | SyncEventSessionUpdated
+    | SyncEventSessionCreated
     | SyncEventSessionDeleted
 }
 
@@ -1622,6 +1786,20 @@ export type ServerConfig = {
    * Additional domains to allow for CORS
    */
   cors?: Array<string>
+}
+
+/**
+ * Defaults for temporary local LLM server token lifetimes
+ */
+export type LlmServerConfig = {
+  /**
+   * Default sliding lifetime for issued tokens, measured from last use (e.g. '30m', '12h', '1d', or 'none'). Default '1d'.
+   */
+  ttl?: string
+  /**
+   * Absolute ceiling from issue, regardless of activity (e.g. '7d', or 'none'). Default 'none', so an actively used token is not cut off.
+   */
+  maxAge?: string
 }
 
 export type PermissionActionConfig = "ask" | "allow" | "deny"
@@ -1755,10 +1933,188 @@ export type ProviderConfig = {
      */
     timeout?: number | false
     /**
+     * Timeout in milliseconds while waiting for response headers. OpenAI defaults to 300000 (5 minutes). Set to false to disable.
+     */
+    headerTimeout?: number | false
+    /**
      * Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted.
      */
     chunkTimeout?: number
-    [key: string]: unknown | string | boolean | number | false | number | undefined
+    [key: string]: unknown | string | boolean | number | false | number | false | number | undefined
+  }
+  /**
+   * Provider-specific overrides for retry budgets
+   */
+  retry?: {
+    request?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    stream?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    maxCandidate?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    maxJudge?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    network?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    server?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    rateLimit?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    unknown?: {
+      /**
+       * bounded stops after maxRetries; persistent ignores the retry count and waits until cancellation or deadline
+       */
+      mode?: "bounded" | "persistent"
+      /**
+       * Retries after the initial attempt; 0 disables retries and the maximum is 100
+       */
+      maxRetries?: number
+      /**
+       * Wall-clock retry deadline in milliseconds; use noDeadline for an explicit unlimited deadline
+       */
+      deadlineMs?: number
+      /**
+       * Disable the wall-clock retry deadline explicitly; maxRetries still applies to bounded budgets
+       */
+      noDeadline?: boolean
+      initialDelayMs?: number
+      maxDelayMs?: number
+      jitterRatio?: number
+    }
+    jitterRatio?: number
   }
   models?: {
     [key: string]: {
@@ -1773,7 +2129,7 @@ export type ProviderConfig = {
       interleaved?:
         | true
         | {
-            field: "reasoning_content" | "reasoning_details"
+            field: "reasoning" | "reasoning_content" | "reasoning_details"
           }
       cost?: {
         input: number
@@ -1832,6 +2188,11 @@ export type ProviderConfig = {
   only_configured_models?: boolean
 }
 
+/**
+ * Policy for MCP client-side sampling (`sampling/createMessage`) from this server: deny, ask (default), or allow.
+ */
+export type McpSamplingPolicy = "deny" | "ask" | "allow"
+
 export type McpLocalConfig = {
   /**
    * Type of MCP server connection
@@ -1855,6 +2216,7 @@ export type McpLocalConfig = {
    * Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.
    */
   timeout?: number
+  sampling?: McpSamplingPolicy
 }
 
 export type McpOAuthConfig = {
@@ -1903,6 +2265,7 @@ export type McpRemoteConfig = {
    * Timeout in ms for MCP server requests. Defaults to 5000 (5 seconds) if not specified.
    */
   timeout?: number
+  sampling?: McpSamplingPolicy
 }
 
 /**
@@ -1916,15 +2279,10 @@ export type Config = {
    */
   $schema?: string
   logLevel?: LogLevel
-  /**
-   * Environment variables to inject into the mimocode process and its child processes (e.g. the bash tool). A variable already set in the real environment takes precedence — config values only apply when the variable is not already set. Supports {env:VAR} and {file:path} substitution.
-   */
-  env?: {
-    [key: string]: string
-  }
   server?: ServerConfig
+  llmServer?: LlmServerConfig
   /**
-   * Command configuration, see https://opencode.ai/docs/commands
+   * Command configuration, see https://mimo.xiaomi.com/mimocode/commands
    */
   command?: {
     [key: string]: {
@@ -2037,7 +2395,7 @@ export type Config = {
     [key: string]: AgentConfig | undefined
   }
   /**
-   * Agent configuration, see https://opencode.ai/docs/agents
+   * Agent configuration, see https://mimo.xiaomi.com/mimocode/agents
    */
   agent?: {
     plan?: AgentConfig
@@ -2148,6 +2506,15 @@ export type Config = {
      * Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
      */
     reserved?: number
+    /**
+     * Compact earlier than the model window. A token count (300000), a shorthand string ("300K", "1M", "50%"), or a map keyed by "<providerID>/<modelID>" with wildcards ("openai/gpt-5*"). Always clamped to the model's real window — it can only lower the compaction trigger, never raise it. 0 means no budget.
+     */
+    max_context?:
+      | number
+      | string
+      | {
+          [key: string]: number | string
+        }
   }
   checkpoint?: {
     /**
@@ -2238,9 +2605,35 @@ export type Config = {
   }
   memory?: {
     /**
+     * Disable native memory/checkpoint writes while keeping memory reads available. Default: false.
+     */
+    disable_write?: boolean
+    /**
      * Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.
      */
     cc_index?: boolean
+    /**
+     * Memory search provider. 'native' uses the built-in FTS5 markdown index (default). 'frankenmemory' delegates to the fm-mcp Rust engine over MCP stdio.
+     */
+    provider?: "native" | "frankenmemory"
+    graph?: {
+      /**
+       * Extract a knowledge graph (entities/relations/cues) from each captured turn via one small LLM call and store it in frankenmemory. Requires memory.provider = 'frankenmemory'. Default: true.
+       */
+      enabled?: boolean
+      /**
+       * Model for graph extraction as 'provider/model'. Default: the cheapest configured model (by input cost), falling back to the session default.
+       */
+      model?: string
+      /**
+       * Extract from every Nth captured turn per session. Default: 1 (every turn). Raise to trade graph freshness for token spend.
+       */
+      every_n_turns?: number
+      /**
+       * Minimum seconds between extractions per session, applied on top of every_n_turns. Default: 0.
+       */
+      min_interval_seconds?: number
+    }
   }
   /**
    * Trajectory (conversation history) FTS index configuration.
@@ -2253,7 +2646,7 @@ export type Config = {
   }
   dream?: {
     /**
-     * Auto-trigger dream memory consolidation on new session start. Default: true.
+     * Auto-trigger dream memory consolidation on new session start. Default: false.
      */
     auto?: boolean
     /**
@@ -2263,7 +2656,7 @@ export type Config = {
   }
   distill?: {
     /**
-     * Auto-trigger distill workflow packaging on new session start. Default: true.
+     * Auto-trigger distill workflow packaging on new session start. Default: false.
      */
     auto?: boolean
     /**
@@ -2302,6 +2695,27 @@ export type Config = {
      * Continue the agent loop when a tool call is denied
      */
     continue_loop_on_deny?: boolean
+    /**
+     * Try-best loop detector thresholds.
+     */
+    try_best?: {
+      /**
+       * Recent edit events to compare (default 12).
+       */
+      edit_window?: number
+      /**
+       * Jaccard threshold for near-identical edit detection (default 0.8).
+       */
+      edit_similarity?: number
+      /**
+       * Prior similar edits required before pausing (default 2).
+       */
+      edit_matches?: number
+      /**
+       * Consecutive edit or verify actions without progress before pausing (default 4).
+       */
+      action_streak?: number
+    }
     /**
      * Timeout in milliseconds for model context protocol (MCP) requests
      */
@@ -2396,6 +2810,8 @@ export type NotFoundError = {
 export type Model = {
   id: string
   providerID: string
+  baseModelId?: string
+  preset?: string
   api: {
     id: string
     url: string
@@ -2425,7 +2841,7 @@ export type Model = {
     interleaved:
       | boolean
       | {
-          field: "reasoning_content" | "reasoning_details"
+          field: "reasoning" | "reasoning_content" | "reasoning_details"
         }
   }
   cost: {
@@ -2466,12 +2882,11 @@ export type Model = {
   cachePromptTTL?: "5m" | "1h"
 }
 
-export type Provider = {
+export type PublicProvider = {
   id: string
   name: string
   source: "env" | "config" | "custom" | "api"
   env: Array<string>
-  key?: string
   options: {
     [key: string]: unknown
   }
@@ -2543,6 +2958,8 @@ export type GlobalSession = {
     url: string
   }
   title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
   version: string
   time: {
     created: number
@@ -2573,6 +2990,13 @@ export type ConflictError = {
   data: {
     message: string
   }
+}
+
+export type TitleSnapshot = {
+  sessionID: string
+  title: string
+  titleSource: "fallback" | "generated" | "user"
+  titleRevision: number
 }
 
 export type TextPartInput = {
@@ -2719,6 +3143,7 @@ export type Event =
   | EventActorRegistered
   | EventActorStatus
   | EventActorStuck
+  | EventActorStalled
   | EventWriterCachePerf
   | EventInboxArrived
   | EventTaskCreated
@@ -2726,6 +3151,7 @@ export type Event =
   | EventMetricsModelCall
   | EventMetricsToolCall
   | EventMetricsAgentRequest
+  | EventMetricsTryBestDetected
   | EventTeamCreated
   | EventTeamMemberJoined
   | EventWorkflowPhase
@@ -2748,26 +3174,28 @@ export type Event =
   | EventSessionDiff
   | EventSessionError
   | EventSessionRetryAttempt
+  | EventSessionTryBestDetected
   | EventHookExecuted
   | EventHookReactReentered
   | EventHookReactMaxReached
+  | EventSessionCwd
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
-  | EventSessionCwd
   | EventBashInteractiveAsked
+  | EventBashInteractiveCancelled
   | EventBashInteractiveReplied
+  | EventSessionStatus
+  | EventSessionIdle
   | EventVcsBranchUpdated
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
+  | EventSessionCompacted
   | EventWorktreeReady
   | EventWorktreeFailed
   | EventTodoUpdated
-  | EventSessionStatus
-  | EventSessionIdle
   | EventSessionGoal
-  | EventSessionCompacted
   | EventPtyCreated
   | EventPtyUpdated
   | EventPtyExited
@@ -2780,8 +3208,8 @@ export type Event =
   | EventMessageRemoved
   | EventMessagePartUpdated
   | EventMessagePartRemoved
-  | EventSessionCreated
   | EventSessionUpdated
+  | EventSessionCreated
   | EventSessionDeleted
 
 export type McpStatusConnected = {
@@ -2845,6 +3273,7 @@ export type Command = {
   agent?: string
   model?: string
   source?: "command" | "mcp" | "skill"
+  bundled?: boolean
   template: string
   subtask?: boolean
   hints: Array<string>
@@ -2887,6 +3316,16 @@ export type FormatterStatus = {
   extensions: Array<string>
   enabled: boolean
 }
+
+export type Schema0 =
+  | string
+  | number
+  | boolean
+  | null
+  | Array<Schema0>
+  | {
+      [key: string]: Schema0
+    }
 
 export type GlobalHealthData = {
   body?: never
@@ -3728,7 +4167,7 @@ export type ConfigProvidersResponses = {
    * List of providers
    */
   200: {
-    providers: Array<Provider>
+    providers: Array<PublicProvider>
     default: {
       [key: string]: string
     }
@@ -3835,6 +4274,39 @@ export type ToolIdsResponses = {
 }
 
 export type ToolIdsResponse = ToolIdsResponses[keyof ToolIdsResponses]
+
+export type ToolMetadataData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/experimental/tool/metadata"
+}
+
+export type ToolMetadataErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ToolMetadataError = ToolMetadataErrors[keyof ToolMetadataErrors]
+
+export type ToolMetadataResponses = {
+  /**
+   * Tool metadata
+   */
+  200: Array<{
+    id: string
+    source: "builtin" | "extension"
+    registered: boolean
+    reason: string
+  }>
+}
+
+export type ToolMetadataResponse = ToolMetadataResponses[keyof ToolMetadataResponses]
 
 export type ToolListData = {
   body?: never
@@ -3969,6 +4441,57 @@ export type WorktreeResetResponses = {
 
 export type WorktreeResetResponse = WorktreeResetResponses[keyof WorktreeResetResponses]
 
+export type ExperimentalTitleGenerateData = {
+  body: {
+    text?: string
+    parts?: Array<
+      | {
+          type: "text"
+          text: string
+        }
+      | {
+          type: "image"
+          data: string
+          mime: "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+          filename?: string
+        }
+    >
+    locale?: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/experimental/title"
+}
+
+export type ExperimentalTitleGenerateErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type ExperimentalTitleGenerateError = ExperimentalTitleGenerateErrors[keyof ExperimentalTitleGenerateErrors]
+
+export type ExperimentalTitleGenerateResponses = {
+  /**
+   * Generated conversation title
+   */
+  200: {
+    title: string
+    status: "generated" | "fallback" | "untitled"
+  }
+}
+
+export type ExperimentalTitleGenerateResponse =
+  ExperimentalTitleGenerateResponses[keyof ExperimentalTitleGenerateResponses]
+
 export type ExperimentalSessionListData = {
   body?: never
   path?: never
@@ -4077,6 +4600,7 @@ export type SessionListResponse = SessionListResponses[keyof SessionListResponse
 
 export type SessionCreateData = {
   body?: {
+    id?: string
     parentID?: string
     contextFrom?: string
     contextWatermark?: string
@@ -4139,6 +4663,1257 @@ export type SessionStatusResponses = {
 }
 
 export type SessionStatusResponse = SessionStatusResponses[keyof SessionStatusResponses]
+
+export type SessionGoalGetData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalGetErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalGetError = SessionGoalGetErrors[keyof SessionGoalGetErrors]
+
+export type SessionGoalGetResponses = {
+  /**
+   * Goal state
+   */
+  200: {
+    state: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    replay?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    analytics: {
+      [key: string]: number
+    }
+  }
+}
+
+export type SessionGoalGetResponse = SessionGoalGetResponses[keyof SessionGoalGetResponses]
+
+export type SessionGoalUpdateData = {
+  body?:
+    | {
+        action: "create"
+        objective: string
+        budget?: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+      }
+    | {
+        action: "pause"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
+      }
+    | {
+        action: "resume"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
+      }
+    | {
+        action: "cancel"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
+      }
+    | {
+        action: "clear_history"
+        expectedEnvelopeRevision: number
+      }
+    | {
+        action: "edit"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
+        objective: string
+      }
+    | {
+        action: "evidence"
+        target: {
+          goalID: string
+          expectedRevision: number
+        }
+        evidence:
+          | {
+              kind: "command"
+              subject: string
+              sourceRef: string
+            }
+          | {
+              kind: "file"
+              subject: string
+              sourceRef: string
+            }
+          | {
+              kind: "user"
+              subject: string
+              observation: string
+            }
+      }
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal"
+}
+
+export type SessionGoalUpdateErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+  /**
+   * Conflict — session resource is busy
+   */
+  409: ConflictError
+}
+
+export type SessionGoalUpdateError = SessionGoalUpdateErrors[keyof SessionGoalUpdateErrors]
+
+export type SessionGoalUpdateResponses = {
+  /**
+   * Updated goal state
+   */
+  200: {
+    state: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    replay?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    analytics: {
+      [key: string]: number
+    }
+  }
+}
+
+export type SessionGoalUpdateResponse = SessionGoalUpdateResponses[keyof SessionGoalUpdateResponses]
+
+export type SessionGoalJournalData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/goal/journal"
+}
+
+export type SessionGoalJournalErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionGoalJournalError = SessionGoalJournalErrors[keyof SessionGoalJournalErrors]
+
+export type SessionGoalJournalResponses = {
+  /**
+   * Goal journal
+   */
+  200: Array<{
+    id: string
+    goalID: string
+    revision: number
+    envelopeRevision?: number
+    actor: "user" | "worker" | "verifier" | "system"
+    type: string
+    reasonCode?: string
+    budgetDelta?: {
+      turns?: number
+      tokens?: number
+      toolCalls?: number
+    }
+    evidenceRefs?: Array<string>
+    stateHash?: string
+    snapshot?: {
+      revision: number
+      active?: {
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }
+      queue?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+      history?: Array<{
+        id: string
+        revision: number
+        objective: string
+        status:
+          | "queued"
+          | "active"
+          | "awaiting_verification"
+          | "paused"
+          | "blocked"
+          | "verification_degraded"
+          | "completed"
+          | "cancelled"
+          | "expired"
+        owner: string
+        workspace: string
+        project: string
+        sessionID: string
+        createdAt: number
+        updatedAt: number
+        completedAt?: number
+        react: number
+        budget: {
+          maxTurns?: number
+          maxTokens?: number
+          maxWallMs?: number
+          maxToolCalls?: number
+          deadline?: number
+          usedTurns?: number
+          usedTokens?: number
+          usedToolCalls?: number
+        }
+        lease?: {
+          id: string
+          owner: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        continuation?: {
+          id: string
+          owner: string
+          intentID: string
+          reasonCode: string
+          display: string
+          acquiredAt: number
+          expiresAt: number
+          attempt: number
+        }
+        requiredEvidence?: Array<"model" | "command" | "file" | "user">
+        evidence?: Array<{
+          id: string
+          kind: "model" | "command" | "file" | "user"
+          subject: string
+          sourceRef: string
+          observation: string
+          capturedAt: number
+          producer: string
+          contentHash: string
+          verifier?: string
+        }>
+        accountedMessageIDs?: Array<string>
+        lastOutcome?: {
+          code: string
+          reason?: string
+          verifiedAt: number
+          evidenceRefs?: Array<string>
+        }
+      }>
+    }
+    createdAt: number
+  }>
+}
+
+export type SessionGoalJournalResponse = SessionGoalJournalResponses[keyof SessionGoalJournalResponses]
 
 export type SessionDeleteData = {
   body?: never
@@ -4211,6 +5986,7 @@ export type SessionGetResponse = SessionGetResponses[keyof SessionGetResponses]
 export type SessionUpdateData = {
   body?: {
     title?: string
+    expectedRevision?: number
     permission?: PermissionRuleset
     time?: {
       archived?: number
@@ -4235,6 +6011,15 @@ export type SessionUpdateErrors = {
    * Not found
    */
   404: NotFoundError
+  /**
+   * Title changed by another writer
+   */
+  409: {
+    name: "TitleConflictError"
+    data: {
+      current: TitleSnapshot
+    }
+  }
 }
 
 export type SessionUpdateError = SessionUpdateErrors[keyof SessionUpdateErrors]
@@ -4285,6 +6070,87 @@ export type SessionChildrenResponses = {
 }
 
 export type SessionChildrenResponse = SessionChildrenResponses[keyof SessionChildrenResponses]
+
+export type SessionRecoveryData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    agentID?: string
+  }
+  url: "/session/{sessionID}/recovery"
+}
+
+export type SessionRecoveryErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionRecoveryError = SessionRecoveryErrors[keyof SessionRecoveryErrors]
+
+export type SessionRecoveryResponses = {
+  /**
+   * Recoverable interrupted turns
+   */
+  200: Array<{
+    assistantMessageID: string
+    parentMessageID: string
+    created: number
+  }>
+}
+
+export type SessionRecoveryResponse = SessionRecoveryResponses[keyof SessionRecoveryResponses]
+
+export type SessionResumeData = {
+  body?: never
+  path: {
+    sessionID: string
+    assistantMessageID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    agentID?: string
+    task_id?: string
+    titleLocale?: string
+    modelProviderID?: string
+    modelID?: string
+  }
+  url: "/session/{sessionID}/turn/{assistantMessageID}/resume"
+}
+
+export type SessionResumeErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+  /**
+   * Conflict — session resource is busy
+   */
+  409: ConflictError
+}
+
+export type SessionResumeError = SessionResumeErrors[keyof SessionResumeErrors]
+
+export type SessionResumeResponses = {
+  /**
+   * Resume started
+   */
+  202: unknown
+}
 
 export type SessionTodoData = {
   body?: never
@@ -4365,6 +6231,41 @@ export type SessionTaskResponses = {
 
 export type SessionTaskResponse = SessionTaskResponses[keyof SessionTaskResponses]
 
+export type SessionDeleteToolOutputData = {
+  body?: never
+  path: {
+    sessionID: string
+    outputID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/tool-output/{outputID}"
+}
+
+export type SessionDeleteToolOutputErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * Not found
+   */
+  404: NotFoundError
+}
+
+export type SessionDeleteToolOutputError = SessionDeleteToolOutputErrors[keyof SessionDeleteToolOutputErrors]
+
+export type SessionDeleteToolOutputResponses = {
+  /**
+   * Whether the retained output existed in this session scope
+   */
+  200: boolean
+}
+
+export type SessionDeleteToolOutputResponse = SessionDeleteToolOutputResponses[keyof SessionDeleteToolOutputResponses]
+
 export type SessionInitData = {
   body?: {
     modelID: string
@@ -4406,6 +6307,7 @@ export type SessionInitResponse = SessionInitResponses[keyof SessionInitResponse
 export type SessionForkData = {
   body?: {
     messageID?: string
+    title?: string
   }
   path: {
     sessionID: string
@@ -4591,6 +6493,8 @@ export type SessionSummarizeResponse = SessionSummarizeResponses[keyof SessionSu
 export type SessionAskData = {
   body?: {
     question: string
+    providerID?: string
+    modelID?: string
   }
   path: {
     sessionID: string
@@ -4690,8 +6594,15 @@ export type SessionPromptData = {
      */
     task_id?: string
     source?: "user" | "spawn" | "hook"
+    command?: string
+    arguments?: string
+    titleLocale?: string
     provenance?: Provenance
     noReply?: boolean
+    verifyGoalTarget?: {
+      goalID: string
+      expectedRevision: number
+    }
     /**
      * @deprecated tools and permissions have been merged, you can set permissions on the session itself now
      */
@@ -4905,8 +6816,15 @@ export type SessionPromptAsyncData = {
      */
     task_id?: string
     source?: "user" | "spawn" | "hook"
+    command?: string
+    arguments?: string
+    titleLocale?: string
     provenance?: Provenance
     noReply?: boolean
+    verifyGoalTarget?: {
+      goalID: string
+      expectedRevision: number
+    }
     /**
      * @deprecated tools and permissions have been merged, you can set permissions on the session itself now
      */
@@ -4955,17 +6873,34 @@ export type SessionCommandData = {
     messageID?: string
     agent?: string
     model?: string
+    titleLocale?: string
     arguments: string
     command: string
     variant?: string
-    parts?: Array<{
-      id?: string
-      type: "file"
-      mime: string
-      filename?: string
-      url: string
-      source?: FilePartSource
-    }>
+    parts?: Array<
+      | {
+          id?: string
+          type: "text"
+          text: string
+          synthetic?: boolean
+          ignored?: boolean
+          time?: {
+            start: number
+            end?: number
+          }
+          metadata?: {
+            [key: string]: unknown
+          }
+        }
+      | {
+          id?: string
+          type: "file"
+          mime: string
+          filename?: string
+          url: string
+          source?: FilePartSource
+        }
+    >
   }
   path: {
     sessionID: string
@@ -5335,6 +7270,113 @@ export type PermissionSetSkipAllResponses = {
 
 export type PermissionSetSkipAllResponse = PermissionSetSkipAllResponses[keyof PermissionSetSkipAllResponses]
 
+export type PermissionAutoApproveDeleteData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionAutoApproveDeleteResponses = {
+  /**
+   * Current auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionAutoApproveDeleteResponse =
+  PermissionAutoApproveDeleteResponses[keyof PermissionAutoApproveDeleteResponses]
+
+export type PermissionSetAutoApproveDeleteData = {
+  body?: {
+    /**
+     * Whether auto-approve-delete is enabled
+     */
+    enabled: boolean
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/auto-approve-delete"
+}
+
+export type PermissionSetAutoApproveDeleteErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type PermissionSetAutoApproveDeleteError =
+  PermissionSetAutoApproveDeleteErrors[keyof PermissionSetAutoApproveDeleteErrors]
+
+export type PermissionSetAutoApproveDeleteResponses = {
+  /**
+   * Updated auto-approve-delete state
+   */
+  200: boolean
+}
+
+export type PermissionSetAutoApproveDeleteResponse =
+  PermissionSetAutoApproveDeleteResponses[keyof PermissionSetAutoApproveDeleteResponses]
+
+export type PermissionAskTimeoutData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/ask-timeout"
+}
+
+export type PermissionAskTimeoutResponses = {
+  /**
+   * Current ask timeout in ms, or null
+   */
+  200: number | null
+}
+
+export type PermissionAskTimeoutResponse = PermissionAskTimeoutResponses[keyof PermissionAskTimeoutResponses]
+
+export type PermissionSetAskTimeoutData = {
+  body?: {
+    /**
+     * Timeout in ms, or null to disable
+     */
+    ms: number | null
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/permission/ask-timeout"
+}
+
+export type PermissionSetAskTimeoutErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type PermissionSetAskTimeoutError = PermissionSetAskTimeoutErrors[keyof PermissionSetAskTimeoutErrors]
+
+export type PermissionSetAskTimeoutResponses = {
+  /**
+   * Updated ask timeout in ms, or null
+   */
+  200: number | null
+}
+
+export type PermissionSetAskTimeoutResponse = PermissionSetAskTimeoutResponses[keyof PermissionSetAskTimeoutResponses]
+
 export type WorkflowListData = {
   body?: never
   path?: never
@@ -5590,8 +7632,18 @@ export type BashInteractiveListResponses = {
    */
   200: Array<{
     id: string
+    sessionID: string
+    callID: string
     command: string
     cwd: string
+    workspace: string
+    writableRoots: Array<string>
+    shell: string
+    network: "enabled" | "disabled"
+    timeout: number
+    env?: {
+      [key: string]: string
+    }
     description: string
   }>
 }
@@ -5600,6 +7652,14 @@ export type BashInteractiveListResponse = BashInteractiveListResponses[keyof Bas
 
 export type BashInteractiveReplyData = {
   body?: {
+    /**
+     * Session that owns the pending interactive command
+     */
+    sessionID: string
+    /**
+     * Tool call that owns the pending interactive command
+     */
+    callID: string
     /**
      * Captured output from the interactive command
      */
@@ -5656,11 +7716,12 @@ export type ProviderListResponses = {
    * List of providers
    */
   200: {
-    all: Array<Provider>
+    all: Array<PublicProvider>
     default: {
       [key: string]: string
     }
     connected: Array<string>
+    authenticated: Array<string>
   }
 }
 
@@ -5699,6 +7760,18 @@ export type ProviderOauthAuthorizeData = {
     inputs?: {
       [key: string]: string
     }
+    /**
+     * Caller-owned authorization flow ID
+     */
+    flowID?: string
+    /**
+     * Public OAuth callback URI
+     */
+    redirectURI?: string
+    /**
+     * Caller-owned OAuth state
+     */
+    state?: string
   }
   path: {
     /**
@@ -5741,6 +7814,10 @@ export type ProviderOauthCallbackData = {
      * OAuth authorization code
      */
     code?: string
+    /**
+     * Caller-owned authorization flow ID
+     */
+    flowID?: string
   }
   path: {
     /**
@@ -5772,6 +7849,23 @@ export type ProviderOauthCallbackResponses = {
 }
 
 export type ProviderOauthCallbackResponse = ProviderOauthCallbackResponses[keyof ProviderOauthCallbackResponses]
+
+export type DeleteProviderProviderIdOauthFlowIdData = {
+  body?: never
+  path: {
+    providerID: string
+    flowID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/provider/{providerID}/oauth/{flowID}"
+}
+
+export type DeleteProviderProviderIdOauthFlowIdResponses = {
+  200: unknown
+}
 
 export type SyncStartData = {
   body?: never
@@ -6712,10 +8806,25 @@ export type AppSkillsResponses = {
   200: Array<{
     name: string
     description: string
+    aliases?: Array<string>
     location: string
     content: string
     hidden?: boolean
     bundled?: boolean
+    skillID?: string
+    revision?: number
+    contentHash?: string
+    owner?: string
+    status?: string
+    source?: string
+    sourceStatus?: string
+    sourceURI?: string
+    sourceRevision?: string
+    platforms?: Array<string>
+    requiresToolsets?: Array<string>
+    trust?: string
+    lastAudit?: number
+    disableModelInvocation?: boolean
   }>
 }
 

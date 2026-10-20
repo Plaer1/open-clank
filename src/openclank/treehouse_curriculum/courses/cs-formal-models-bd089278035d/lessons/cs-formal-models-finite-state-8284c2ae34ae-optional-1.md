@@ -1,0 +1,1 @@
+Ending in a pattern differs from containing it earlier.

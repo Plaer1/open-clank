@@ -1,0 +1,1 @@
+gcd=6; x=2 mod 5; 2x is always even mod 4.

@@ -1,0 +1,1 @@
+Subgame-perfect reasoning requires equilibrium behavior in every subgame. With imperfect information, beliefs and sequential rationality require more care. Trembling-hand refinements ask whether behavior survives small mistakes; the short exercise makes no general existence or uniqueness claim.

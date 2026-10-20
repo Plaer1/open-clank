@@ -1,0 +1,1 @@
+An interface that leaks the backing array's indices makes representation changes observable.

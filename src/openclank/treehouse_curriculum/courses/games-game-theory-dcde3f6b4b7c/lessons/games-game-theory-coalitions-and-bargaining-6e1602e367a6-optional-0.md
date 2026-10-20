@@ -1,0 +1,1 @@
+The allocation is A=4, B=2; both meet their solo values and the total is 6.

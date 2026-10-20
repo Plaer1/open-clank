@@ -1,6 +1,6 @@
 Child-session orchestration tool (shell form, Orchestrator mode only). Each
 child runs in its own session id with its own mode, model, task panel, and
-memory. Verbs: create | switch | list | cancel | ask.
+memory. Verbs: create | switch | list | dashboard | cancel | ask.
 
 # Script structure
 #   - Multi-line: one command per non-blank line, set-e on first failure
@@ -28,6 +28,7 @@ memory. Verbs: create | switch | list | cancel | ask.
 
 # inspect:
     session list                       # this Orchestrator's children: id, title, mode, status
+    session dashboard                  # fleet TABLE: liveness+age, turns, mode, worktree branch/ahead/dir per child
 
 # navigate the user's frontend panel:
     session switch ses_...             # Orchestrator-only; a child cannot switch back

@@ -1,0 +1,1 @@
+Distinguish all three cases and use a condition consistent with the threshold.

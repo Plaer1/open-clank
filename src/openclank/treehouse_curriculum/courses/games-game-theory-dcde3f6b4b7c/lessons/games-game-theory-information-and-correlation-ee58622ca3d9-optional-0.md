@@ -1,0 +1,1 @@
+Following the shared recommendation gives payoff 1; independent fair choices match with probability 1/2.

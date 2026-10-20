@@ -1,0 +1,1 @@
+The decoded state is coins=5, room=2; malformed cases fail explicit length/version/magic/room checks.

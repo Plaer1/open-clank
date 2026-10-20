@@ -1,0 +1,1 @@
+Use two synthetic notes with an explicit status property and a writable Base. Save a filter, reopen it and check which note appears. If testing a row edit, preserve the source first and verify the source value afterward; denied writes are not completed edits.

@@ -12,6 +12,8 @@ import { SessionRevert } from "@/session/revert"
 import { SessionShare } from "@/share"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
+import { Goal } from "@/session/goal"
+import * as GoalState from "@/session/goal-state"
 import { Todo } from "@/session/todo"
 import { Effect } from "effect"
 import { Agent } from "@/agent/agent"
@@ -21,6 +23,8 @@ import { Log } from "@/util"
 import { ActorRegistry } from "@/actor/registry"
 import { TaskRegistry } from "@/task/registry"
 import { Task } from "@/task/schema"
+import { ToolID } from "@/tool/schema"
+import * as Truncate from "@/tool/truncate"
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -35,6 +39,22 @@ import { jsonRequest, runRequest } from "./trace"
 import { RateLimitMiddleware } from "../../rate-limit"
 
 const log = Log.create({ service: "server" })
+const GoalView = z.object({
+  state: GoalState.Envelope,
+  replay: GoalState.Envelope.optional(),
+  analytics: z.record(z.string(), z.number()),
+})
+const GoalTarget = z
+  .object({
+    goalID: z.string().min(1),
+    expectedRevision: z.number().int().positive(),
+  })
+  .strict()
+const GoalEvidenceInput = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("command"), subject: z.string().min(1), sourceRef: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("file"), subject: z.string().min(1), sourceRef: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("user"), subject: z.string().min(1), observation: z.string().min(1) }).strict(),
+])
 
 // Cadence of the keep-alive whitespace written on the POST /:sessionID/message
 // stream while a turn is in flight. Matches the 10s SSE heartbeat in
@@ -144,6 +164,127 @@ export const SessionRoutes = lazy(() =>
         }),
     )
     .get(
+      "/:sessionID/goal",
+      describeRoute({
+        summary: "Inspect session goal",
+        description:
+          "Read the tenant-scoped durable goal, privacy-safe journal replay, queue, history, and outcome counts.",
+        operationId: "session.goal.get",
+        responses: {
+          200: {
+            description: "Goal state",
+            content: { "application/json": { schema: resolver(GoalView) } },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      async (c) =>
+        jsonRequest("SessionRoutes.goal.get", c, function* () {
+          const sessionID = c.req.valid("param").sessionID
+          const goal = yield* Goal.Service
+          return {
+            state: yield* goal.inspect(sessionID),
+            replay: yield* goal.replay(sessionID),
+            analytics: yield* goal.analytics(sessionID),
+          }
+        }),
+    )
+    .get(
+      "/:sessionID/goal/journal",
+      describeRoute({
+        summary: "List session goal journal",
+        description: "Read the append-only tenant-scoped goal lifecycle journal.",
+        operationId: "session.goal.journal",
+        responses: {
+          200: {
+            description: "Goal journal",
+            content: { "application/json": { schema: resolver(GoalState.JournalEvent.array()) } },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      async (c) =>
+        jsonRequest("SessionRoutes.goal.journal", c, function* () {
+          const goal = yield* Goal.Service
+          return yield* goal.journal(c.req.valid("param").sessionID)
+        }),
+    )
+    .post(
+      "/:sessionID/goal",
+      describeRoute({
+        summary: "Control session goal",
+        description: "Create, pause, resume, cancel, edit, clear history, or attach typed evidence.",
+        operationId: "session.goal.update",
+        responses: {
+          200: {
+            description: "Updated goal state",
+            content: { "application/json": { schema: resolver(GoalView) } },
+          },
+          ...errors(400, 404, 409),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      validator(
+        "json",
+        z.discriminatedUnion("action", [
+          z.object({
+            action: z.literal("create"),
+            objective: z.string().min(1),
+            budget: GoalState.Budget.partial().optional(),
+            requiredEvidence: GoalState.EvidenceKind.array().optional(),
+          }),
+          z.object({ action: z.literal("pause"), target: GoalTarget }),
+          z.object({ action: z.literal("resume"), target: GoalTarget }),
+          z.object({ action: z.literal("cancel"), target: GoalTarget }),
+          z.object({
+            action: z.literal("clear_history"),
+            expectedEnvelopeRevision: z.number().int().nonnegative(),
+          }),
+          z.object({
+            action: z.literal("edit"),
+            target: GoalTarget,
+            objective: z.string().min(1),
+          }),
+          z.object({
+            action: z.literal("evidence"),
+            target: GoalTarget,
+            evidence: GoalEvidenceInput,
+          }),
+        ]),
+      ),
+      async (c) =>
+        jsonRequest("SessionRoutes.goal.update", c, function* () {
+          const sessionID = c.req.valid("param").sessionID
+          const body = c.req.valid("json")
+          const goal = yield* Goal.Service
+          if (body.action === "create") {
+            yield* goal.set(sessionID, body.objective, {
+              budget: body.budget,
+              requiredEvidence: body.requiredEvidence,
+            })
+          } else if (body.action === "pause") {
+            yield* goal.pause(sessionID, body.target)
+          } else if (body.action === "resume") {
+            yield* goal.resume(sessionID, body.target)
+          } else if (body.action === "cancel") {
+            yield* goal.clear(sessionID, body.target)
+          } else if (body.action === "clear_history") {
+            yield* goal.clearHistory(sessionID, body.expectedEnvelopeRevision)
+          } else if (body.action === "edit") {
+            yield* goal.edit(sessionID, body.target, body.objective)
+          } else {
+            yield* goal.addEvidence(sessionID, body.target, body.evidence)
+          }
+          return {
+            state: yield* goal.inspect(sessionID),
+            replay: yield* goal.replay(sessionID),
+            analytics: yield* goal.analytics(sessionID),
+          }
+        }),
+    )
+    .get(
       "/:sessionID",
       describeRoute({
         summary: "Get session",
@@ -217,6 +358,52 @@ export const SessionRoutes = lazy(() =>
           const session = yield* Session.Service
           return yield* session.children(sessionID, { visible })
         })
+      },
+    )
+    .get(
+      "/:sessionID/recovery",
+      describeRoute({
+        summary: "List recoverable session turns",
+        operationId: "session.recovery",
+        responses: {
+          200: { description: "Recoverable interrupted turns", content: { "application/json": { schema: resolver(z.array(z.object({ assistantMessageID: z.string(), parentMessageID: z.string(), created: z.number() }))) } } },
+          ...errors(400, 404),
+        },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod })),
+      validator("query", z.object({ agentID: z.string().optional() })),
+      async (c) =>
+        jsonRequest("SessionRoutes.recovery", c, function* () {
+          const params = c.req.valid("param")
+          const query = c.req.valid("query")
+          const session = yield* Session.Service
+          yield* session.get(params.sessionID)
+          return yield* (yield* SessionPrompt.Service).recovery({ sessionID: params.sessionID, agentID: query.agentID })
+        }),
+    )
+    .post(
+      "/:sessionID/turn/:assistantMessageID/resume",
+      describeRoute({
+        summary: "Resume an interrupted session turn",
+        operationId: "session.resume",
+        responses: { 202: { description: "Resume started" }, ...errors(400, 404, 409) },
+      }),
+      validator("param", z.object({ sessionID: SessionID.zod, assistantMessageID: MessageID.zod })),
+      validator("query", z.object({ agentID: z.string().optional(), task_id: z.string().optional(), titleLocale: z.string().optional(), modelProviderID: ProviderID.zod.optional(), modelID: ModelID.zod.optional() }).refine((q) => (q.modelProviderID === undefined) === (q.modelID === undefined), { message: "modelProviderID and modelID must be provided together" })),
+      async (c) => {
+        const params = c.req.valid("param")
+        const query = c.req.valid("query")
+        await runRequest("SessionRoutes.resume", c, Effect.gen(function* () {
+          yield* (yield* SessionPrompt.Service).resumeBackground({
+            sessionID: params.sessionID,
+            assistantMessageID: params.assistantMessageID,
+            agentID: query.agentID,
+            task_id: query.task_id,
+            titleLocale: query.titleLocale,
+            model: query.modelProviderID && query.modelID ? { providerID: query.modelProviderID, modelID: query.modelID } : undefined,
+          })
+        }))
+        return c.json({ resumed: true }, 202)
       },
     )
     .get(
@@ -320,6 +507,43 @@ export const SessionRoutes = lazy(() =>
         }),
     )
     .delete(
+      "/:sessionID/tool-output/:outputID",
+      describeRoute({
+        summary: "Delete retained tool output",
+        description: "Delete one retained tool-output spill owned by this session.",
+        operationId: "session.deleteToolOutput",
+        responses: {
+          200: {
+            description: "Whether the retained output existed in this session scope",
+            content: {
+              "application/json": {
+                schema: resolver(z.boolean()),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: SessionID.zod,
+          outputID: ToolID.zod,
+        }),
+      ),
+      async (c) =>
+        jsonRequest("SessionRoutes.deleteToolOutput", c, function* () {
+          const params = c.req.valid("param")
+          const sessions = yield* Session.Service
+          yield* sessions.get(params.sessionID)
+          const truncation = yield* Truncate.Service
+          return yield* truncation.remove(params.outputID, {
+            owner: process.env.OPEN_CLANK_OWNER ?? "",
+            sessionID: params.sessionID,
+          })
+        }),
+    )
+    .delete(
       "/:sessionID",
       describeRoute({
         summary: "Delete session",
@@ -347,6 +571,18 @@ export const SessionRoutes = lazy(() =>
         jsonRequest("SessionRoutes.delete", c, function* () {
           const sessionID = c.req.valid("param").sessionID
           const svc = yield* Session.Service
+          const truncation = yield* Truncate.Service
+          const pending = [sessionID]
+          const ownedSessions: SessionID[] = []
+          while (pending.length) {
+            const current = pending.pop()!
+            ownedSessions.push(current)
+            const children = yield* svc.children(current)
+            pending.push(...children.map((child) => child.id))
+          }
+          for (const ownedSession of ownedSessions) {
+            yield* truncation.removeSession(ownedSession, process.env.OPEN_CLANK_OWNER ?? "")
+          }
           yield* svc.remove(sessionID)
           return true
         }),
@@ -366,6 +602,7 @@ export const SessionRoutes = lazy(() =>
               },
             },
           },
+          409: { description: "Title changed by another writer", content: { "application/json": { schema: resolver(Session.TitleConflict) } } },
           ...errors(400, 404),
         },
       }),
@@ -378,14 +615,15 @@ export const SessionRoutes = lazy(() =>
       validator(
         "json",
         z.object({
-          title: z.string().optional(),
+          title: Session.SetTitleInput.shape.title.optional(),
+          expectedRevision: Session.Info.shape.titleRevision.optional(),
           permission: Permission.Ruleset.zod.optional(),
           time: z
             .object({
               archived: z.number().optional(),
             })
             .optional(),
-        }),
+        }).strict().refine((input) => input.title === undefined || input.expectedRevision !== undefined, { message: "expectedRevision is required when renaming", path: ["expectedRevision"] }),
       ),
       async (c) =>
         jsonRequest("SessionRoutes.update", c, function* () {
@@ -395,7 +633,7 @@ export const SessionRoutes = lazy(() =>
           const current = yield* session.get(sessionID)
 
           if (updates.title !== undefined) {
-            yield* session.setTitle({ sessionID, title: updates.title })
+            yield* session.setTitle({ sessionID, title: updates.title, expectedRevision: updates.expectedRevision! })
           }
           if (updates.permission !== undefined) {
             yield* session.setPermission({
@@ -716,12 +954,14 @@ export const SessionRoutes = lazy(() =>
         "json",
         z.object({
           question: z.string().min(1),
+          providerID: ProviderID.zod.optional(),
+          modelID: ModelID.zod.optional(),
         }),
       ),
       async (c) =>
         jsonRequest("SessionRoutes.ask", c, function* () {
           const sessionID = c.req.valid("param").sessionID
-          const question = c.req.valid("json").question
+          const body = c.req.valid("json")
           const sessions = yield* Session.Service
           const provider = yield* Provider.Service
           // Resolve the Actor through the late-bound spawnRef rather than a layer
@@ -732,7 +972,9 @@ export const SessionRoutes = lazy(() =>
             return yield* Effect.fail(
               new Error("Actor service unavailable — Actor.defaultLayer must be running to ask a side question"),
             )
-          const answer = yield* forkQuery({ sessions, provider, actor }, sessionID, question)
+          const selectedModel =
+            body.providerID && body.modelID ? { providerID: body.providerID, modelID: body.modelID } : undefined
+          const answer = yield* forkQuery({ sessions, provider, actor }, sessionID, body.question, selectedModel)
           return { answer }
         }),
     )
@@ -787,13 +1029,10 @@ export const SessionRoutes = lazy(() =>
                 },
                 { message: "Invalid cursor" },
               ),
-            agent_id: z
-              .string()
-              .optional()
-              .meta({
-                description:
-                  "Filter by message slice. Omitted = main-agent slice only (default). Pass a subagent's actor id to fetch its slice. Pass `*` to return every message regardless of slice.",
-              }),
+            agent_id: z.string().optional().meta({
+              description:
+                "Filter by message slice. Omitted = main-agent slice only (default). Pass a subagent's actor id to fetch its slice. Pass `*` to return every message regardless of slice.",
+            }),
           })
           .refine((value) => !value.before || value.limit !== undefined, {
             message: "before requires limit",

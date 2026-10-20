@@ -1,0 +1,1 @@
+Registers hold machine state; calls commonly use a stack plus a target-specific calling convention. System calls request OS services with an authority boundary. Compilers can optimize variables away, so source-local names may lack a stable address.

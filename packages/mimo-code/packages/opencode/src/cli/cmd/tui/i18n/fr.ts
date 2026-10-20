@@ -45,23 +45,34 @@ export const dict = {
 
   // Tips
   "tui.tips.label": "Astuce",
-  "tui.tips.plain_terminal": "Nous recommandons iTerm ou le terminal VS Code",
+  "tui.tips.plain_terminal":
+    "Le terminal Mac par défaut a des capacités de rendu limitées. Utilisez iTerm2 ou le terminal VS Code",
   "tui.tips.attach_file":
     "Tapez {highlight}@{/highlight} suivi d'un nom de fichier pour rechercher et joindre des fichiers",
   "tui.tips.shell_prefix":
     "Commencez un message par {highlight}!{/highlight} pour exécuter directement des commandes shell (ex. {highlight}!ls -la{/highlight})",
   "tui.tips.tab_agent":
+    "Appuyez sur {highlight}Tab{/highlight} ou {highlight}Shift+Tab{/highlight} pour basculer entre les agents Build, Plan et Compose",
+  "tui.tips.tab_agent_orchestrator":
     "Appuyez sur {highlight}Tab{/highlight} ou {highlight}Shift+Tab{/highlight} pour basculer entre les agents Build, Plan, Compose et Orchestrator",
   "tui.tips.theme_mode":
     "Exécutez {highlight}/dark{/highlight} pour le mode sombre ou {highlight}/light{/highlight} pour le mode clair",
   "tui.tips.doc": "Exécutez {highlight}/doc{/highlight} pour ouvrir la documentation utilisateur",
   "tui.tips.free_models": "Modèles gratuits disponibles pour une durée limitée — essayez-les !",
+  "tui.tips.free_api_sunset":
+    "Le service API gratuit est terminé. Exécutez {highlight}/login{/highlight} pour vous connecter. Abonnez-vous au MiMo Token Plan ou configurez une API tierce pour utiliser MiMo Code.",
+  "tui.tips.multi_skills":
+    "Combinez plusieurs déclencheurs {highlight}/skill-name{/highlight} dans un même message pour utiliser plusieurs Skills ensemble",
+  "tui.tips.ask_slash_commands":
+    "Vous cherchez un raccourci ? Demandez {highlight}Quelles commandes slash puis-je utiliser ?{/highlight} directement dans le chat",
   "tui.tips.background":
     "Exécutez {highlight}/background{/highlight} pour définir une image personnalisée comme fond d'écran d'accueil",
+  "tui.tips.vivid":
+    "Exécutez {highlight}/vivid{/highlight} pour basculer entre les affichages enrichi et minimal selon vos besoins",
+  "tui.tips.compose_next":
+    "Essayez {highlight}/compose-next{/highlight} au lieu de l'agent Compose pour les modèles avancés",
   "tui.tips.undo": "Utilisez {highlight}/undo{/highlight} pour annuler le dernier message et ses modifications",
   "tui.tips.redo": "Utilisez {highlight}/redo{/highlight} pour rétablir des messages et modifications précédemment annulés",
-  "tui.tips.share":
-    "Exécutez {highlight}/share{/highlight} pour créer un lien public vers votre conversation sur opencode.ai",
   "tui.tips.drag_drop": "Glissez-déposez des images ou PDF dans le terminal pour les ajouter au contexte",
   "tui.tips.paste_image":
     "Appuyez sur {highlight}Ctrl+V{/highlight} pour coller des images du presse-papiers (sur macOS, utilisez Ctrl+V et non Cmd+V — le terminal intercepte Cmd+V)",
@@ -168,8 +179,6 @@ export const dict = {
     "Exécutez {highlight}mimo auth list{/highlight} pour voir tous les fournisseurs configurés",
   "tui.tips.agent_create":
     "Exécutez {highlight}mimo agent create{/highlight} pour créer un agent en mode guidé",
-  "tui.tips.github_trigger":
-    "Utilisez {highlight}/opencode{/highlight} dans les issues/PR GitHub pour déclencher des actions IA",
   "tui.tips.github_install":
     "Exécutez {highlight}mimo github install{/highlight} pour configurer le workflow GitHub",
   "tui.tips.github_oc":
@@ -220,8 +229,6 @@ export const dict = {
     "Activez {highlight}scroll_acceleration{/highlight} dans {highlight}tui.json{/highlight} pour un défilement fluide",
   "tui.tips.username_toggle":
     "Activez/désactivez l'affichage du nom d'utilisateur via la palette de commandes ({highlight}Ctrl+P{/highlight})",
-  "tui.tips.docker":
-    "Exécutez {highlight}docker run -it --rm ghcr.io/anomalyco/opencode{/highlight} pour une utilisation conteneurisée",
   "tui.tips.zen":
     "Utilisez {highlight}/connect{/highlight} avec MiMo Code pour des modèles testés et sélectionnés",
   "tui.tips.agents_md":
@@ -267,20 +274,26 @@ export const dict = {
   "tui.skill.pptx-official.description": "Créer, modifier et lire des présentations Microsoft PowerPoint (.pptx)",
   "tui.skill.mimocode.description": "Documentation intégrée des fonctionnalités, config et commandes MiMoCode",
   "tui.skill.evolve.description": "Réécrivez chaque couche de vous-même — outils, hooks, connaissances, workflows, même l'UI",
-  "tui.skill.frontend-design.description": "Conseils pour un design d'interface visuel distinctif et intentionnel",
   "tui.skill.loop.description": "Planifier l'exécution récurrente d'un prompt",
   "tui.skill.html-to-video-pipeline.description": "L'arme ultime pour vidéos courtes — créez des vidéos courtes avec du HTML",
   "tui.skill.arxiv.description": "Rechercher, citer, télécharger et suivre des articles arXiv",
   "tui.skill.skill-creator.description": "Créer, réviser et améliorer des skills d'agent",
   "tui.skill.research-paper-writing.description": "Rédiger, polir et critiquer des articles académiques avec l'œil d'un relecteur",
-  "tui.skill.design-blueprint.description":
-    "Produire un plan de design (DESIGN.md + Decision Trace) avant tout mockup",
+  "tui.skill.playwright.description": "Automatiser de vrais parcours navigateur depuis le terminal",
+  "tui.skill.codex.description": "Exécuter Codex CLI de façon autonome dans les scripts, la CI, Docker et Kubernetes",
+  "tui.skill.claude-code.description": "Déléguer des tâches de programmation à Claude Code CLI",
+  "tui.skill.grok-build.description": "Utiliser Grok Build depuis la ligne de commande",
   "tui.skill.super-research.description":
     "Recherche autonome — expériences, revues, analyse quantitative, benchmarks, RCA, ablation, reproduction & rédaction d'articles",
   "tui.skill.deep-research.description":
     "Investigation multi-sources approfondie avec rapport cité et vérifié",
   "tui.skill.modern-python-toolchain.description":
     "Configuration de projet Python moderne avec uv, ruff et pyright",
+  "tui.skill.data-analytics.description":
+    "Analyser les données produit et métier, définir des KPI et créer des tableaux de bord et rapports",
+  "tui.skill.product-design.description": "Rechercher, auditer, prototyper et valider des designs produit et UX",
+  "tui.skill.sales.description":
+    "Préparer les rendez-vous, étudier les comptes, planifier les ventes et utiliser les outils commerciaux",
   "tui.skill.compose:ask.description": "Demander une décision ou clarification à l'utilisateur",
   "tui.skill.compose:brainstorm.description": "Explorer les besoins et la conception avant l'implémentation",
   "tui.skill.compose:debug.description": "Débogage systématique avant de proposer un correctif",
@@ -295,6 +308,8 @@ export const dict = {
   "tui.skill.compose:tdd.description": "Développement piloté par les tests — tests avant le code",
   "tui.skill.compose:verify.description": "Lancer la vérification et confirmer la réussite",
   "tui.skill.compose:worktree.description": "Créer un espace de travail isolé pour le développement",
+  "tui.skill.compose-next.description":
+    "Nouvelle orchestration : travail sur une fonctionnalité de bout en bout (grill, spec, implémenter, vérifier, revoir, finaliser) pour modèles avancés",
 
   // Language switching
   "tui.command.language.switch.title": "Changer de langue",
@@ -306,6 +321,8 @@ export const dict = {
   // App-level commands
   "tui.command.session.list.title": "Changer de session",
   "tui.command.session.new.title": "Nouvelle session",
+  "tui.command.session.recover.title": "Reprendre le tour interrompu",
+  "tui.session.recovering": "récupération en cours",
   "tui.command.workflow.list.title": "Workflows",
   "tui.command.model.list.title": "Changer de modèle",
   "tui.command.model.cycle_recent.title": "Modèles récents",
@@ -328,12 +345,22 @@ export const dict = {
   "tui.command.skip_permissions.title_on": "Ignorer les autorisations : ACTIVÉ (auto-approuver les demandes) — cliquer pour désactiver",
   "tui.command.skip_permissions.title_off": "Ignorer les autorisations : DÉSACTIVÉ — cliquer pour activer (auto-approuver les demandes)",
   "tui.command.skip_permissions.toast_on":
-    "Ignorer les autorisations ACTIVÉ — demandes auto-approuvées (sous-agents inclus). Les commandes destructrices demandent encore, mais sont auto-rejetées après 60s sans réponse.",
+    "Ignorer les autorisations ACTIVÉ — demandes auto-approuvées (sous-agents inclus). Les commandes destructrices demandent encore confirmation.",
   "tui.command.skip_permissions.toast_off": "Ignorer les autorisations DÉSACTIVÉ — les demandes nécessitent à nouveau ton approbation.",
+  "tui.command.permission_timeout.title": "Délai d'attente des autorisations",
+  "tui.permission_timeout.title": "Délai d'attente des autorisations",
+  "tui.permission_timeout.hint": "Combien de temps attendre l'approbation humaine avant rejet automatique.",
+  "tui.permission_timeout.option.never": "Jamais",
+  "tui.permission_timeout.option.never_description": "Attendre indéfiniment l'approbation humaine",
+  "tui.permission_timeout.option.tier_description": "Rejet automatique après {{duration}}",
+  "tui.permission_timeout.toast_never": "Délai d'attente désactivé — les demandes attendent indéfiniment.",
+  "tui.permission_timeout.toast_set": "Délai d'attente défini sur {{duration}}.",
   "tui.command.agent.cycle.title": "Cycle d'agents",
   "tui.command.variant.cycle.title": "Cycle de variantes",
   "tui.command.variant.list.title": "Changer de variante de modèle",
   "tui.command.agent.cycle.reverse.title": "Cycle d'agents (inverse)",
+  "tui.agent.locked": "Impossible de changer de mode après être entré en mode {{mode}}",
+  "tui.agent.locked.subset": "Dans cette session, vous pouvez uniquement basculer entre {{agents}}",
   "tui.command.provider.login.title": "Connexion",
   "tui.command.provider.connect.title": "Connecter un fournisseur",
   "tui.command.provider.logout.title": "Déconnexion",
@@ -341,6 +368,10 @@ export const dict = {
   "tui.command.opencode.status.title": "Voir l'état",
   "tui.command.theme.switch.title": "Changer de thème",
   "tui.command.logo.switch.title": "Changer le design du logo",
+  "tui.command.visual_mode.title_on": "Affichage enrichi - passer en mode minimal",
+  "tui.command.visual_mode.title_off": "Affichage minimal - passer en mode enrichi",
+  "tui.visual_mode.enabled": "Affichage enrichi activé : ciel étoilé et effets du logo restaurés ; météores et indicateurs animés suivent le réglage des animations",
+  "tui.visual_mode.disabled": "Affichage enrichi désactivé : étoiles, météores et effets du logo masqués ; indicateurs stabilisés",
   "tui.dialog.logo.title": "Design du logo",
   "tui.dialog.logo.option.classic": "Classique (gras)",
   "tui.dialog.logo.option.thin": "Fin (demi-bloc)",
@@ -360,11 +391,15 @@ export const dict = {
   "tui.dialog.agreement.title": "Conditions et confidentialité",
   "tui.dialog.agreement.message": "Veuillez les lire et les accepter pour continuer.",
   "tui.dialog.agreement.confirm": "Accepter et continuer",
+  "tui.dialog.free_api_sunset.title": "Le service API gratuit est terminé",
+  "tui.dialog.free_api_sunset.message":
+    "Exécutez /login pour vous connecter. Abonnez-vous au MiMo Token Plan ou configurez une API tierce pour utiliser MiMo Code.",
   "tui.command.consent.revoke.title": "Révoquer l'accord du modèle gratuit",
   "tui.consent.revoked": "Accord du modèle gratuit révoqué — vous devrez l'accepter à nouveau",
   "tui.dialog.select.placeholder": "Rechercher",
   "tui.dialog.model.login_hint": "Astuce : exécutez /login pour vous connecter avant de changer de modèle",
-  "tui.model.mimo_auto.name": "MiMo Auto (MiMo-V2.5, gratuit pour une durée limitée)",
+  "tui.model.mimo_auto.name": "MiMo Auto (MiMo-V2.5 gratuit jusqu’au 26 juillet à 18:00 · UTC+8)",
+  "tui.model.mimo_auto.sunset_name": "MiMo Auto (MiMo-V2.5)",
   "tui.dialog.token_plan.title": "Abonnez-vous à un Token Plan ou patientez dans la file",
   "tui.dialog.token_plan.line1":
     "En mode gratuit, les requêtes sont mises en file d'attente. Pour un service stable et de qualité,",
@@ -391,6 +426,28 @@ export const dict = {
   "tui.dialog.export.hint.confirm_action": "pour confirmer",
   "tui.dialog.export.hint.options_action": "pour les options",
   "tui.toast.copied_to_clipboard": "Copié dans le presse-papiers",
+  "tui.toast.try_best.paused_other": "Boucle try-best détectée ; la session {{session}} a été suspendue.",
+  "tui.toast.try_best.handoff_failed": "Impossible de démarrer le transfert vers le harnais sélectionné.",
+  "tui.toast.try_best.continue_failed": "Impossible de poursuivre la session",
+  "tui.toast.session.recover.started": "Reprise du tour interrompu",
+  "tui.toast.session.recover.none": "Aucun tour interrompu à reprendre",
+  "tui.toast.session.recover.failed": "Impossible de reprendre le tour interrompu",
+  "tui.toast.session.recover.busy": "La session est encore active ; réessayez lorsqu'elle sera inactive",
+  "tui.dialog.try_best.title": "Boucle try-best détectée — tour suspendu",
+  "tui.dialog.try_best.reason.edit_repeat": "Des modifications presque identiques ont été répétées {{count}} fois.",
+  "tui.dialog.try_best.reason.edit_repeat_path":
+    "Des modifications presque identiques ont été répétées {{count}} fois dans {{path}}.",
+  "tui.dialog.try_best.reason.bash_retry":
+    "La même commande en échec a été relancée {{count}} fois sans modification réussie.",
+  "tui.dialog.try_best.reason.action_streak":
+    "{{count}} actions consécutives de {{action}} n'ont produit aucun progrès observable.",
+  "tui.dialog.try_best.action.edit": "modification",
+  "tui.dialog.try_best.action.verify": "vérification",
+  "tui.dialog.try_best.action.same_kind": "même type",
+  "tui.dialog.try_best.handoff.title": "Transférer à {{target}}",
+  "tui.dialog.try_best.handoff.description": "Demander à MiMo de déléguer le travail restant à ce harnais",
+  "tui.dialog.try_best.continue.title": "Continuer avec {{model}}",
+  "tui.dialog.try_best.continue.description": "Demander au modèle actuel d'abandonner cette approche et de replanifier",
   "tui.toast.instructions_loaded": "Chargé {{files}}",
   "tui.toast.update_available.title": "Mise à jour disponible",
   "tui.toast.update_available.confirm": "La nouvelle version v{{version}} est disponible. Voulez-vous mettre à jour maintenant ?",
@@ -427,6 +484,7 @@ export const dict = {
   "tui.command.session.ask.title": "Poser une question annexe",
   "tui.command.session.ask.description": "Posez une question à la session actuelle sans la perturber",
   "tui.command.session.ask.placeholder": "Poser une question annexe…",
+  "tui.command.session.ask.busy": "Réflexion…",
   "tui.command.session.unshare.title": "Annuler le partage",
   "tui.command.session.undo.title": "Annuler le message précédent",
   "tui.command.session.redo.title": "Rétablir",
@@ -474,16 +532,16 @@ export const dict = {
   "tui.command.voice.toggle.title_off": "Saisie vocale : désactivée — cliquer pour activer",
   "tui.voice.enabled": "Saisie vocale activée (chinois/anglais) — cliquez sur [Voice] pour enregistrer",
   "tui.voice.disabled": "Saisie vocale désactivée",
-  "tui.voice.send.enabled": "Envoi vocal activé — dites「发送」ou \"send it\" pour envoyer",
+  "tui.voice.send.enabled": "Envoi vocal activé — en contrôle vocal, dites「发送」ou \"send it\" pour envoyer",
   "tui.voice.send.disabled": "Envoi vocal désactivé",
   "tui.command.voice.send.title": "Basculer l'envoi vocal",
   "tui.command.voice.send.title_on": "Envoi vocal : activé — cliquer pour désactiver",
   "tui.command.voice.send.title_off": "Envoi vocal : désactivé — cliquer pour activer",
-  "tui.voice.control.enabled": "Contrôle vocal activé — utilise le modèle multimodal pour l'édition intelligente (plus lent)",
-  "tui.voice.control.disabled": "Contrôle vocal désactivé — utilise la transcription ASR rapide",
-  "tui.command.voice.control.title": "Basculer le contrôle vocal (multimodal)",
-  "tui.command.voice.control.title_on": "Contrôle vocal : activé (multimodal) — cliquer pour désactiver",
-  "tui.command.voice.control.title_off": "Contrôle vocal : désactivé (ASR rapide) — cliquer pour activer",
+  "tui.voice.control.enabled": "Édition intelligente activée — comprend votre intention d'édition ; nécessite un temps de réflexion",
+  "tui.voice.control.disabled": "Passé en saisie rapide — sans compréhension d'intention ; plus rapide, plus précise en dialecte ou sous bruit",
+  "tui.command.voice.control.title": "Basculer édition intelligente / saisie rapide",
+  "tui.command.voice.control.title_on": "Édition intelligente : ON — cliquer pour saisie rapide",
+  "tui.command.voice.control.title_off": "Saisie rapide : ON — cliquer pour édition intelligente",
   "tui.voice.error.no_auth": "Utilisez /connect pour vous connecter à MiMo, ou configurez voice.asr_model pour un autre fournisseur",
   "tui.voice.error.no_auth_provider": "Le fournisseur vocal \"{{provider}}\" n'est pas authentifié, vérifiez son apiKey",
   "tui.voice.error.provider_not_found": "Fournisseur \"{{provider}}\" indisponible — /connect pour s'authentifier, ou déclarez models dans la config pour les endpoints personnalisés",
@@ -493,6 +551,8 @@ export const dict = {
   "tui.voice.error.no_recorder": "Aucun outil d'enregistrement trouvé, installez sox",
   "tui.voice.error.too_short": "Enregistrement trop court",
   "tui.voice.error.network": "La transcription a échoué, vérifiez votre réseau",
+  "tui.voice.error.protocol": "La réponse du contrôle vocal n'est pas un appel voice_input valide",
+  "tui.voice.error.stale": "Le texte a changé pendant l'écoute — édition vocale ignorée",
   "tui.command.prompt.stash.title": "Mettre l'invite de côté",
   "tui.command.prompt.stash.pop.title": "Récupérer l'invite",
   "tui.command.prompt.stash.list.title": "Liste des invites mises de côté",
@@ -529,14 +589,6 @@ export const dict = {
     "Aucune connexion requise — exécutez simplement mimo. Pour les modèles payants/premium, choisissez plutôt la connexion navigateur MiMo.",
   "cli.providers.mimo_login.decrypt_retry": "Échec du déchiffrement, veuillez réessayer ({remaining} tentatives restantes)",
   "cli.providers.mimo_login.decrypt_exhausted": "Échec du déchiffrement, nombre maximal de tentatives atteint",
-
-  // Question i18n — plan_enter
-  "tui.question.plan_enter.question": "Voulez-vous basculer en mode plan pour une planification structurée ?",
-  "tui.question.plan_enter.header": "Entrer dans le plan",
-  "tui.question.plan_enter.option.0.label": "Oui",
-  "tui.question.plan_enter.option.0.description": "Basculer vers l'agent plan pour une planification en lecture seule",
-  "tui.question.plan_enter.option.1.label": "Non",
-  "tui.question.plan_enter.option.1.description": "Rester dans le mode actuel",
 
   // Question i18n — plan_exit
   "tui.question.plan_exit.question": "Le plan {{plan}} est terminé. Voulez-vous basculer vers l'agent build pour commencer l'implémentation ?",

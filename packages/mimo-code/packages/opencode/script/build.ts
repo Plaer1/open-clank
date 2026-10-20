@@ -12,46 +12,36 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
+// Refuse to compile with a different Bun than the repository contract. The
+// managed host verifies this pin too, but checking here prevents a direct
+// script invocation from embedding a different runtime in the engine.
+const expectedBunVersion = (await Bun.file(path.resolve(dir, "../../package.json")).json()).packageManager?.split("@")[1]
+if (!expectedBunVersion) {
+  throw new Error("packageManager field not found in root package.json")
+}
+if (process.versions.bun !== expectedBunVersion)
+  throw new Error(
+    `This build requires exactly bun@${expectedBunVersion}, but you are using bun@${process.versions.bun}`,
+  )
+
 await import("./generate.ts")
 
 import { Script } from "@mimo-ai/script"
-import pkg from "../package.json"
 
-const BINARY_PREFIX = "mimocode"
+const BINARY_PREFIX = "openclank-engine"
 
-// Load migrations from migration directories
-const migrationDirs = (
-  await fs.promises.readdir(path.join(dir, "migration"), {
-    withFileTypes: true,
-  })
-)
-  .filter((entry) => entry.isDirectory() && /^\d{4}\d{2}\d{2}\d{2}\d{2}\d{2}/.test(entry.name))
-  .map((entry) => entry.name)
-  .sort()
-
-const migrations = await Promise.all(
-  migrationDirs.map(async (name) => {
-    const file = path.join(dir, "migration", name, "migration.sql")
-    const sql = await Bun.file(file).text()
-    const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(name)
-    const timestamp = match
-      ? Date.UTC(
-          Number(match[1]),
-          Number(match[2]) - 1,
-          Number(match[3]),
-          Number(match[4]),
-          Number(match[5]),
-          Number(match[6]),
-        )
-      : 0
-    return { sql, timestamp, name }
-  }),
-)
-console.log(`Loaded ${migrations.length} migrations`)
+if (Script.release) {
+  throw new Error("Upstream MiMo release publishing is disabled; use the Open Clank release workflow")
+}
 
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
+const targetArgument = process.argv.indexOf("--target")
+const explicitTarget = targetArgument < 0 ? undefined : process.argv[targetArgument + 1]
+if (targetArgument >= 0 && (!explicitTarget || explicitTarget.startsWith("--"))) {
+  throw new Error("--target requires an explicit engine target")
+}
 const plugin = createSolidTransformPlugin()
 // const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
 // Web UI temporarily disabled
@@ -145,7 +135,12 @@ const allTargets: {
   },
 ]
 
-const targets = singleFlag
+const targetName = (item: (typeof allTargets)[number]) =>
+  [item.os === "win32" ? "windows" : item.os, item.arch, item.avx2 === false ? "baseline" : undefined, item.abi]
+    .filter(Boolean).join("-")
+const targets = explicitTarget
+  ? allTargets.filter((item) => targetName(item) === explicitTarget)
+  : singleFlag
   ? allTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
@@ -165,6 +160,8 @@ const targets = singleFlag
       return true
     })
   : allTargets
+
+if (explicitTarget && targets.length !== 1) throw new Error(`Unsupported engine target: ${explicitTarget}`)
 
 await $`rm -rf dist`
 
@@ -204,8 +201,7 @@ process.on("exit", () => {
 
 const binaries: Record<string, string> = {}
 if (!skipInstall) {
-  await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
-  await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
+  await $`bun ci`.cwd(path.resolve(dir, "../.."))
 }
 for (const item of targets) {
   const name = [
@@ -237,22 +233,25 @@ for (const item of targets) {
     external: ["node-gyp"],
     format: "esm",
     minify: true,
-    splitting: true,
+    // Bun 1.3.14 assigns nondeterministic hashes to shared chunks when a
+    // compiled build has several entrypoints. Keeping the entries independent
+    // is slightly larger, but makes identical source produce byte-identical
+    // release payloads and preserves the embedded worker entrypoints.
+    splitting: false,
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(BINARY_PREFIX, "bun") as any,
-      outfile: `dist/${name}/bin/mimo`,
-      execArgv: [`--user-agent=mimocode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/openclank-engine`,
+      execArgv: [`--user-agent=openclank-engine/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     files: embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {},
     entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
     define: {
       MIMOCODE_VERSION: `'${Script.version}'`,
-      OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
       MIMOCODE_CHANNEL: `'${Script.channel}'`,
@@ -262,7 +261,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/mimo`
+    const binaryPath = `dist/${name}/bin/openclank-engine`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
@@ -275,22 +274,21 @@ for (const item of targets) {
 
   await $`rm -rf ./dist/${name}/bin/tui`
   await Bun.file(`dist/${name}/README.md`).write(
-    `This is the ${item.os}-${item.arch} binary for [@mimo-ai/cli](https://www.npmjs.com/package/@mimo-ai/cli). Install that package directly.\n`,
+    `Private Open Clank managed engine for ${item.os}-${item.arch}. Install and verify it through Open Clank.\n`,
   )
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {
-        name: `@mimo-ai/${name}`,
+        name: `@open-clank/${name}`,
         version: Script.version,
-        description: "Platform-specific binary for @mimo-ai/cli.",
+        description: "Private platform-specific Open Clank managed engine.",
         license: "MIT",
-        author: "Xiaomi MiMo Team",
-        homepage: "https://mimo.xiaomi.com/coder",
+        author: "Open Clank contributors",
         repository: {
           type: "git",
-          url: "git+https://github.com/XiaomiMiMo/MiMo-Code.git",
+          url: "git+https://github.com/open-clank/open-clank.git",
         },
-        keywords: ["ai", "coding", "agent", "cli", "mimo"],
+        keywords: ["open-clank", "ai", "agent", "engine"],
         os: [item.os],
         cpu: [item.arch],
       },

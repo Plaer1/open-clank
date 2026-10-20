@@ -75,7 +75,7 @@ async function showModelSelector() {
     header.className = 'modal-header';
 
     const title = document.createElement('h4');
-    title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>Model Comparison';
+    title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>Model Comparison';
     // Absorb the free space so the injected minimize (_) and close (✕) cluster
     // together on the right instead of being spread apart by space-between.
     title.style.marginRight = 'auto';
@@ -992,6 +992,7 @@ async function showModelSelector() {
         const lower = (modelId || '').toLowerCase();
         return _imageModelPrefixes.some(p => lower.includes(p));
       }
+      let _managedCatalogPromise = null;
       async function _probeOne(m) {
         if (_isImageModel(m.model)) {
           return { status: 'ok', model: m.model, skipped: true, skipReason: 'Image' };
@@ -1000,13 +1001,22 @@ async function showModelSelector() {
         if (state._compareMode === 'search' && !m.model) {
           return { status: 'ok', model: m.model, skipped: true, skipReason: 'No model' };
         }
-        const res = await fetch(`${state.API_BASE}/api/probe-selected`, {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ models: [{ endpoint_id: m.endpointId || '', model: m.model, endpoint: m.endpoint || '', with_tools: state._compareMode === 'agent' }] }),
-        });
-        const data = await res.json();
-        return (data.results || [])[0] || { status: 'fail', error: 'No response' };
+        if (!_managedCatalogPromise) {
+          _managedCatalogPromise = fetch(`${state.API_BASE}/api/models`, { credentials: 'same-origin' })
+            .then(res => {
+              if (!res.ok) throw new Error('Provider catalog unavailable');
+              return res.json();
+            });
+        }
+        const data = await _managedCatalogPromise;
+        const available = (data.items || []).some(item =>
+          item.endpoint_id === (m.endpointId || '')
+          && ((item.models || []).includes(m.model)
+            || (item.catalog || []).some(entry => entry.model_id === m.model))
+        );
+        return available
+          ? { status: 'ok', model: m.model }
+          : { status: 'fail', model: m.model, error: 'Route is no longer available' };
       }
 
       // Helper: update a probe row's visual state

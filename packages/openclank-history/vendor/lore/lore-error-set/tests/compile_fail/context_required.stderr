@@ -1,0 +1,15 @@
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+  --> tests/compile_fail/context_required.rs:37:12
+   |
+37 |     result.forward()
+   |            ^^^^^^^-- argument #1 of type `&str` is missing
+   |
+note: method defined here
+  --> src/ext.rs
+   |
+   |     fn forward<Target>(self, context: &str) -> Result<T, Target>
+   |        ^^^^^^^
+help: provide the argument
+   |
+37 |     result.forward(/* &str */)
+   |                    ++++++++++

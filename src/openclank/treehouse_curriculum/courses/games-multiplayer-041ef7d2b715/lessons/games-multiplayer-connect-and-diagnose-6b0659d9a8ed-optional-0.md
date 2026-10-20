@@ -1,0 +1,1 @@
+The diagnosis targets delivery quality and correction behavior after connection, while NAT failure targets connectivity/relay paths.

@@ -8,11 +8,13 @@ All modules should import from here instead of accessing files directly.
 import json
 import time
 import logging
+from threading import RLock
 from typing import Any
 
 from src.constants import SETTINGS_FILE, FEATURES_FILE
 
 logger = logging.getLogger(__name__)
+SETTINGS_LOCK = RLock()
 
 # Tiny TTL cache for settings/features. get_setting() is called on hot paths
 # (every chat, every preprocess); without this it re-parses the JSON each call.
@@ -29,6 +31,9 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    "code_index_max_threads": 2,
+    "code_index_settings_revision": 0,  # internal monotonic revision, not client writable
+    "agent_settings": {"compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": 20000, "max_context": None}, "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}}},
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -42,6 +47,8 @@ DEFAULT_SETTINGS = {
     "image_quality": "medium",
     "vision_model": "",
     "vision_enabled": True,
+    # Desktop capture is a separate owner-scoped opt-in and is never model-controlled.
+    "desktop_capture_enabled": False,
     # Ordered fallback chain for the Vision model (image analysis, OCR, tagging).
     "vision_model_fallbacks": [],
     # Public base URL used to build clickable deep-links in outgoing alerts
@@ -64,11 +71,9 @@ DEFAULT_SETTINGS = {
     "search_url": "",
     "search_result_count": 5,
     # SafeSearch level applied to every provider that exposes one.
-    # "strict"   — block adult / explicit results (default; matches what users
-    #              expect from a research tool and avoids unrelated NSFW URLs
-    #              bleeding in via provider "related" / spam recommendations)
-    # "moderate" — provider-default behavior (filter explicit but allow
-    #              suggestive content)
+    # "strict"   — apply the provider's strongest filtering level (default;
+    #              keeps unrelated low-quality/spam recommendations out)
+    # "moderate" — provider-default filtering behavior
     # "off"      — disable filtering entirely (advanced users only)
     #
     # Providers that honor this setting (translated to each provider's native
@@ -84,6 +89,7 @@ DEFAULT_SETTINGS = {
     # niche search instances.
     "search_safesearch": "strict",
     "brave_api_key": "",
+    "kagi_api_key": "",
     "google_pse_key": "",
     "google_pse_cx": "",
     "tavily_api_key": "",
@@ -134,7 +140,7 @@ DEFAULT_SETTINGS = {
     "tool_path_extra_roots": [],
     "task_endpoint_id": "",
     "task_model": "",
-    "default_endpoint_id": "mimo",
+    "default_endpoint_id": "mimo:auto",
     "default_model": "xiaomi/mimo-v2.5-pro",
     # Optional prose style used only for normal document writing/editing.
     # Email replies use email_writing_style instead because greetings,
@@ -154,6 +160,13 @@ DEFAULT_SETTINGS = {
     # Ordered fallback chain for the Utility model (summarization, naming,
     # tidy actions, etc.).
     "utility_model_fallbacks": [],
+    # Dedicated managed route for memory extraction, graph enrichment, and
+    # reversible tidy/consolidation work.  Empty means unset; migration may
+    # seed it once from the owner's Utility binding, after which the routes
+    # are independent.
+    "memory_endpoint_id": "",
+    "memory_model": "",
+    "memory_model_fallbacks": [],
     "teacher_model": "",
     "teacher_enabled": False,
     "teacher_tier2_enabled": False,
@@ -171,6 +184,12 @@ DEFAULT_SETTINGS = {
     "reminder_llm_persona": "",
     "reminder_ntfy_topic": "Reminders",
     "reminder_email_to": "",
+    # Optional account selector for installations with more than one SMTP
+    # account. Empty keeps the integration's default-account behavior.
+    "reminder_email_account_id": "",
+    # Ordered additional delivery targets. Each entry may provide a channel
+    # plus the channel-specific fields used by dispatch_reminder.
+    "reminder_endpoints": [],
     # Generic outbound webhook channel: pick any saved Integration as the
     # target and supply a JSON payload template. Use {{title}} and {{message}}
     # as placeholders — they are JSON-escaped before substitution, so the
@@ -235,8 +254,21 @@ def load_settings() -> dict:
 def save_settings(settings: dict):
     """Persist settings to disk (atomic; see core.atomic_io)."""
     from core.atomic_io import atomic_write_json
-    atomic_write_json(SETTINGS_FILE, settings, indent=2)
-    _invalidate_caches()
+    from src.openclank.code_index_settings import preserve_scheduler_revision
+    with SETTINGS_LOCK:
+        # Existing unrelated callers save whole snapshots. Preserve the latest
+        # indexing revision even if one of those snapshots predates an admin
+        # save; never silently restore an older native CPU ceiling.
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as stream:
+                persisted = json.load(stream)
+            if not isinstance(persisted, dict):
+                persisted = {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            persisted = {}
+        value = preserve_scheduler_revision(settings, persisted)
+        atomic_write_json(SETTINGS_FILE, value, indent=2)
+        _invalidate_caches()
 
 
 def get_setting(key: str, default: Any = None) -> Any:
@@ -267,13 +299,22 @@ def is_setting_overridden(key: str) -> bool:
 PER_USER_MODEL_SETTING_KEYS = frozenset({
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
+    "memory_endpoint_id", "memory_model", "memory_model_fallbacks",
     "research_endpoint_id", "research_model",
     "task_endpoint_id", "task_model",
-    "vision_model", "vision_enabled", "vision_model_fallbacks",
+    "vision_model", "vision_enabled", "vision_model_fallbacks", "desktop_capture_enabled",
     "image_model", "image_gen_enabled", "image_quality",
     "teacher_model", "teacher_enabled", "teacher_tier2_enabled",
     "tts_enabled", "tts_provider", "tts_model", "tts_voice", "tts_speed",
     "stt_enabled", "stt_provider", "stt_model", "stt_language",
+    # Reminder delivery is user-owned too. Keeping these in the scoped
+    # preference set prevents regular users' saves from being rejected as
+    # global admin policy.
+    "reminder_channel", "reminder_llm_synthesis", "reminder_llm_persona",
+    "reminder_ntfy_topic", "reminder_email_to", "reminder_email_account_id",
+    "reminder_webhook_integration_id", "reminder_webhook_payload_template",
+    "reminder_endpoints",
+    "agent_settings",
 })
 
 

@@ -1,0 +1,1 @@
+For a nonnegative random variable, Markov's inequality bounds P(X≥a) by E[X]/a for a>0. Concentration bounds control tail probabilities under stated assumptions; they do not remove uncertainty.

@@ -1,0 +1,1 @@
+Do not divide by 2 for codes: AB and BA are different.

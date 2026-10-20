@@ -6,11 +6,19 @@ When the agent takes >= 2 rounds or >= 2 tool calls to complete a task,
 we ask the LLM to distill the approach into a reusable skill.
 """
 
+import asyncio
 import json
 import logging
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+async def _complete_text(**kwargs) -> str:
+    """Lazy import keeps extractor-only tests free of application startup."""
+    from src.openclank.modality_facade import complete_text
+
+    return await complete_text(**kwargs)
 
 SKILL_EXTRACT_PROMPT = (
     "You are analyzing an AI agent's work session. The agent took {rounds} rounds "
@@ -128,24 +136,25 @@ async def maybe_extract_skill(
     round_count: int,
     tool_count: int,
     owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
 ):
-    """Extract a skill if the agent run was complex enough."""
-    if not model:
-        logger.debug("[skill-extract] No model provided, skipping")
-        return None
+    """Extract a skill if the agent run was complex enough.
+
+    ``endpoint_url``, ``model``, and ``headers`` remain compatibility-only;
+    execution is resolved by the owner's managed ``utility`` route.
+    """
+    completion_owner = owner if owner is not None else getattr(session, "owner", None)
 
     # Quiet by default; flip to DEBUG when chasing extractor issues.
     logger.debug(
-        "[skill-extract] start: rounds=%d tools=%d model=%s owner=%s",
-        round_count, tool_count, model, owner,
+        "[skill-extract] start: rounds=%d tools=%d route=utility owner=%s",
+        round_count, tool_count, completion_owner,
     )
     if round_count < 2 and tool_count < 2:
         logger.debug("[skill-extract] BELOW threshold (need rounds>=2 or tools>=2)")
         return None
 
     try:
-        from src.llm_core import llm_call_async
-
         # Get recent messages
         history = session.get_context_messages()
         recent = history[-CONTEXT_WINDOW:] if len(history) > CONTEXT_WINDOW else history
@@ -188,17 +197,19 @@ async def maybe_extract_skill(
         import time as _time
         _t0 = _time.monotonic()
         logger.debug(
-            "[skill-extract] calling LLM (endpoint=%s, ctx=%d msgs, timeout=30s)",
-            endpoint_url, len(recent),
+            "[skill-extract] calling managed utility route (ctx=%d msgs, timeout=30s)",
+            len(recent),
         )
-        response = await llm_call_async(
-            endpoint_url,
-            model,
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Conversation:\n{conversation}"},
-            ],
-            headers=headers,
+        response = await asyncio.wait_for(
+            _complete_text(
+                owner=completion_owner or "",
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"Conversation:\n{conversation}"},
+                ],
+                purpose="utility",
+                root_operation_id=root_operation_id,
+            ),
             timeout=30,
         )
         logger.debug(
@@ -259,20 +270,6 @@ async def maybe_extract_skill(
             logger.debug("[skill-extract] '%s' already exists — dropped as duplicate", title)
             return None
 
-        # Auto-publish gate: if the user has `auto_approve_skills` on, the
-        # newly-extracted skill is created `published` immediately rather
-        # than waiting for the next audit batch. The audit still runs later
-        # and can demote it back to `draft` (or delete) on failure. Default
-        # ON matches the UI label "Auto-approve skills".
-        _initial_status = "draft"
-        try:
-            from routes.prefs_routes import _load_for_user as _load_prefs
-            _prefs = _load_prefs(owner) or {}
-            if _prefs.get("auto_approve_skills", True):
-                _initial_status = "published"
-        except Exception:
-            pass
-
         entry = skills_manager.add_skill(
             title=title,
             problem=data.get("problem", ""),
@@ -283,7 +280,7 @@ async def maybe_extract_skill(
             confidence=data.get("confidence", 0.7),
             session_id=getattr(session, "session_id", None),
             owner=owner,
-            status=_initial_status,
+            status="draft",
         )
         try:
             from src.event_bus import fire_event

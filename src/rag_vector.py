@@ -14,6 +14,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Set
 
 from src.constants import CHROMA_DIR
+from src.index_walk import prune_index_dirs, is_indexable_file
 from pathlib import Path
 
 from src.embedding_lanes import (
@@ -23,7 +24,6 @@ from src.embedding_lanes import (
     collection_name,
     dedupe_results,
     lane_count,
-    migrate_legacy_collection,
     query_lanes,
 )
 
@@ -33,6 +33,10 @@ DEFAULT_FILE_EXTENSIONS: Set[str] = {
     '.txt', '.md', '.py', '.json', '.yaml', '.yml',
     '.csv', '.html', '.css', '.js', '.pdf'
 }
+
+# Tool-internal directories that match DEFAULT_FILE_EXTENSIONS but are never
+# Directory-walk pruning is single-sourced in src.index_walk so the vector and
+# keyword indexers apply the same hidden/junk policy and cannot drift (#5559).
 
 VECTOR_WEIGHT = 0.7
 KEYWORD_WEIGHT = 0.3
@@ -94,7 +98,7 @@ class VectorRAG:
                 self._lanes[0].collection,
             )
             self._model = self._lanes[0].client
-            migrate_legacy_collection(COLLECTION_NAME, self._lanes)
+
             logger.info(
                 "VectorRAG ready (lanes=%s docs=%s)",
                 [lane.name for lane in self._lanes],
@@ -497,8 +501,15 @@ class VectorRAG:
         failed = 0
 
         try:
-            for root, _, files in os.walk(directory):
+            for root, dirs, files in os.walk(directory):
+                # Prune in place so os.walk never descends into hidden or junk
+                # directories (#5559), via the shared index_walk policy. The
+                # passed-in root is exempt: a user who deliberately targets a
+                # hidden directory gets it.
+                prune_index_dirs(dirs)
                 for fname in files:
+                    if not is_indexable_file(fname):
+                        continue
                     fpath = os.path.join(root, fname)
                     ext = Path(fname).suffix.lower()
                     if ext not in file_extensions:

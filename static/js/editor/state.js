@@ -1,8 +1,8 @@
 /**
- * Editor state store — a single mutable object that the gallery editor
+ * Editor state store — a single mutable object that Imps
  * and its tool modules read and write directly.
  *
- * Migration: galleryEditor.js used to own ~110 module-scope `let`
+ * Migration: imps.js used to own ~110 module-scope `let`
  * declarations and capture them via closure. Tool modules can't import
  * a `let` binding's mutations across module boundaries, so we move the
  * state into a single exported OBJECT whose properties are freely
@@ -10,9 +10,9 @@
  * exactly the way the old code wrote `_transformW`.
  *
  * Slices land here one tool at a time; this file grows as more state
- * migrates out of galleryEditor.js. Defaults match the legacy
+ * migrates out of imps.js. Defaults match the legacy
  * module-scope initializers verbatim — every `state.foo = …` reset
- * site in galleryEditor.js still works unchanged.
+ * site in imps.js still works unchanged.
  */
 export const state = {
   // ── Transform tool ──
@@ -207,6 +207,16 @@ export const state = {
   // Gallery image id this editor session is editing, or null for
   // blank-canvas drafts.
   imageId: null,
+  // Files opaque resource ref for the writable original (set by
+  // openResource). Save resolves the managed project through this.
+  imageRef: null,
+  // Managed Imps project identity + CAS revisions. Save/load go through
+  // /api/imps/projects/* with these; null project means "create one".
+  managedProvider: null,
+  managedResourceId: null,
+  projectId: null,
+  projectRevision: 0,
+  expectedImageRevision: '',
   // Original file extension so save-over-original re-encodes in the
   // same format (JPEG vs PNG matters: JPEG cuts upload size 5-10× for
   // camera photos over remote tunnels).

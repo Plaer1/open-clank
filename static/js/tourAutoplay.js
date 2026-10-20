@@ -19,7 +19,6 @@ const TOUR_FOR_MODAL = {
   'compare-model-overlay':  'tour-compare',
   'theme-modal':            'tour-theme',
   'settings-modal':         'tour-settings',
-  'gallery-modal':          'tour-gallery',
 };
 
 const SEEN_KEY = (tour) => `odysseus-tour-autoplay-seen-${tour}`;

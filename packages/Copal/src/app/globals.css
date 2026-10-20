@@ -5,8 +5,8 @@
 @source not "../../treehouse";
 @source not "../../.next.bak-*";
 @source not "../../.node_modules.bak-*";
-@source not "../../.robonotes";
-@source not "../../.futures";
+@source not "../../.clanker/futures";
+@source not "../../.clankers/robonotes";
 @source not "../../sample-vault";
 
 @custom-variant dark (&:is(.dark *));
@@ -53,7 +53,7 @@
 
 :root {
   --radius: 0.625rem;
-  /* Imported from /home/e/Downloads/Dark-Reader-Settings (1).json:
+  /* Imported from a local Dark Reader settings export:
      darkSchemeBackgroundColor #1d2815, darkSchemeTextColor #f6f5dd.
      Copal keeps its own slate surfaces; Dark Reader supplies contrast and tint. */
   --darkreader-bg-raw: #1d2815;

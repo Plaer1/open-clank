@@ -1,0 +1,1 @@
+Primes have only 1 and themselves as positive divisors. Modular arithmetic underlies cryptography, but this toy exercise is not a secure cryptosystem.

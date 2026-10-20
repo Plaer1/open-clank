@@ -18,7 +18,6 @@ const SHOW_MODALS = new Set([
   'calendar-modal',
   'compare-modal',     // not currently a real id, defensive
   'cookbook-modal',
-  'gallery-modal',
   'doclib-modal',
   'library-modal',     // chat-history library (sessions.js)
   'memory-modal',      // brain / memories

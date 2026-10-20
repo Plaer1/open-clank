@@ -40,17 +40,19 @@ Body sections (any subset; rendered as headings):
     Anything else (raw paragraphs after the last known section) is preserved
     in `body_extra` and round-trips on save.
 
-Usage counters (`uses`, `last_used`) live in a sidecar `_usage.json` keyed
-by skill name, so the SKILL.md file doesn't churn on every retrieval.
+Runtime retrieval/use/outcome events live in the append-only shared
+`_usage_events.jsonl` stream keyed by immutable skill ID and owner. Audit and
+necessity metadata remains in `_usage.json`, so SKILL.md does not churn.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -201,6 +203,13 @@ def _as_float(v: Any, default: float = 0.8) -> float:
         return default
 
 
+def _as_int(v: Any, default: int = 1) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def emit_frontmatter(fm: Dict[str, Any]) -> str:
     lines = []
     for k, v in fm.items():
@@ -319,6 +328,10 @@ def emit_body(sections: Dict[str, Any]) -> str:
 @dataclass
 class Skill:
     name: str                                          # slug, dir name
+    skill_id: str = ""                                 # immutable identity
+    revision: int = 1                                  # monotonic content revision
+    parent_revision: Optional[int] = None
+    content_hash: str = ""                             # canonical content SHA-256
     description: str = ""
     version: str = "1.0.0"
     category: str = "general"
@@ -329,6 +342,10 @@ class Skill:
     status: str = "draft"                              # draft | published
     confidence: float = 0.8
     source: str = "learned"
+    source_status: Optional[str] = None
+    source_uri: Optional[str] = None
+    source_revision: Optional[str] = None
+    source_memory_ids: List[str] = field(default_factory=list)
     teacher_model: Optional[str] = None
     owner: Optional[str] = None
     created: str = ""                                  # ISO8601
@@ -351,18 +368,18 @@ class Skill:
     def _compute_hidden(self) -> bool:
         """Should mimo hide this skill from its delivered index?
 
-        Matches index_for() logic: published + teacher-escalation drafts are
-        visible; all other drafts are hidden.
+        Matches index_for(): staged drafts never reach the active skill index.
         """
-        if self.status == "published":
-            return False
-        if self.status == "draft" and self.source == "teacher-escalation":
-            return False
-        return True
+        return self.status != "published"
 
     def to_frontmatter(self) -> Dict[str, Any]:
+        self.content_hash = self.compute_content_hash()
         fm: Dict[str, Any] = {
             "name": self.name,
+            "skill_id": self.skill_id,
+            "revision": max(1, int(self.revision or 1)),
+            "parent_revision": self.parent_revision,
+            "content_hash": self.content_hash,
             "description": self.description,
             "version": self.version,
             "category": self.category,
@@ -374,6 +391,11 @@ class Skill:
         fm["status"] = self.status
         fm["confidence"] = round(float(self.confidence), 3)
         fm["source"] = self.source
+        if self.source_status:   fm["source_status"] = self.source_status
+        if self.source_uri:      fm["source_uri"] = self.source_uri
+        if self.source_revision: fm["source_revision"] = self.source_revision
+        if self.source_memory_ids:
+            fm["source_memory_ids"] = list(self.source_memory_ids)
         if self.teacher_model: fm["teacher_model"] = self.teacher_model
         if self.owner:         fm["owner"] = self.owner
         hidden = self._compute_hidden()
@@ -383,8 +405,13 @@ class Skill:
         return fm
 
     def to_dict(self) -> Dict[str, Any]:
+        self.content_hash = self.compute_content_hash()
         d = {
-            "id": self.name,        # slug doubles as id
+            "id": self.skill_id or self.name,
+            "skill_id": self.skill_id or self.name,
+            "revision": max(1, int(self.revision or 1)),
+            "parent_revision": self.parent_revision,
+            "content_hash": self.content_hash,
             "name": self.name,
             "description": self.description,
             "version": self.version,
@@ -396,6 +423,10 @@ class Skill:
             "status": self.status,
             "confidence": round(float(self.confidence), 3),
             "source": self.source,
+            "source_status": self.source_status,
+            "source_uri": self.source_uri,
+            "source_revision": self.source_revision,
+            "source_memory_ids": list(self.source_memory_ids),
             "teacher_model": self.teacher_model,
             "owner": self.owner,
             "created": self.created,
@@ -415,6 +446,33 @@ class Skill:
         d["steps"] = list(self.procedure)
         return d
 
+    def compute_content_hash(self) -> str:
+        """Hash the authored contract, excluding mutable lifecycle state."""
+        payload = {
+            "name": self.name,
+            "description": self.description,
+            "version": self.version,
+            "category": self.category,
+            "tags": list(self.tags),
+            "platforms": list(self.platforms),
+            "requires_toolsets": list(self.requires_toolsets),
+            "fallback_for_toolsets": list(self.fallback_for_toolsets),
+            "source": self.source,
+            "source_status": self.source_status,
+            "source_uri": self.source_uri,
+            "source_revision": self.source_revision,
+            "source_memory_ids": list(self.source_memory_ids),
+            "teacher_model": self.teacher_model,
+            "owner": self.owner,
+            "when_to_use": self.when_to_use,
+            "procedure": list(self.procedure),
+            "pitfalls": list(self.pitfalls),
+            "verification": list(self.verification),
+            "body_extra": self.body_extra,
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
     @classmethod
     def from_markdown(cls, text: str, *, path: Optional[str] = None) -> "Skill":
         fm, body = parse_frontmatter(text)
@@ -423,6 +481,14 @@ class Skill:
         name = slugify(raw_name if raw_name not in (None, "") else fm.get("description", ""), fallback="skill")
         return cls(
             name=name,
+            skill_id=str(fm.get("skill_id") or ""),
+            revision=max(1, _as_int(fm.get("revision"), 1)),
+            parent_revision=(
+                _as_int(fm["parent_revision"], 1)
+                if fm.get("parent_revision") not in (None, "")
+                else None
+            ),
+            content_hash=str(fm.get("content_hash") or ""),
             description=str(fm.get("description", "") or ""),
             version=str(fm.get("version", "1.0.0") or "1.0.0"),
             category=str(fm.get("category", "general") or "general"),
@@ -433,6 +499,14 @@ class Skill:
             status=str(fm.get("status", "draft") or "draft"),
             confidence=_as_float(fm.get("confidence", 0.8), 0.8),
             source=str(fm.get("source", "learned") or "learned"),
+            source_status=(
+                str(fm.get("source_status")) if fm.get("source_status") else None
+            ),
+            source_uri=str(fm.get("source_uri")) if fm.get("source_uri") else None,
+            source_revision=(
+                str(fm.get("source_revision")) if fm.get("source_revision") else None
+            ),
+            source_memory_ids=_as_list(fm.get("source_memory_ids")),
             teacher_model=str(fm.get("teacher_model")) if fm.get("teacher_model") else None,
             owner=str(fm.get("owner")) if fm.get("owner") else None,
             created=str(fm.get("created") or _now_iso()),
@@ -458,4 +532,4 @@ class Skill:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

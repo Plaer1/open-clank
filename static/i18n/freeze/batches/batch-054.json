@@ -1,0 +1,2748 @@
+{
+  "id": "batch-054",
+  "group": "settings",
+  "surface": "settings",
+  "entry_count": 215,
+  "character_count": 17974,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.factory.default.restored",
+      "source": "Factory default restored",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:682"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.f14f2bef",
+      "source": "Failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1026",
+        "static/js/admin.js:1348",
+        "static/js/admin.js:1380",
+        "static/js/admin.js:733",
+        "static/js/cookbookRunning.js:2048",
+        "static/js/settings.js:3396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.change.admin.status",
+      "source": "Failed to change admin status",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:230",
+        "static/js/admin.js:239"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.user",
+      "source": "Failed to delete user",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:205"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.extract",
+      "source": "Failed to extract",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3859"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load",
+      "source": "Failed to load",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1079",
+        "static/js/cookbook.js:2738",
+        "static/js/cookbook.js:2827",
+        "static/js/documentLibrary.js:1097",
+        "static/js/documentLibrary.js:2162",
+        "static/js/documentLibrary.js:2596",
+        "static/js/emailInbox.js:429",
+        "static/js/emailLibrary.js:4601",
+        "static/js/settings.js:3979"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.contacts.check.carddav.config.above",
+      "source": "Failed to load contacts (check CardDAV config above).",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4855"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.default.chat.settings",
+      "source": "Failed to load default chat settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:731"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.default.chat",
+      "source": "Failed to load endpoints for default chat",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:718"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.memory.model",
+      "source": "Failed to load endpoints for memory model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:828"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.research",
+      "source": "Failed to load endpoints for research",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1736"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.stt",
+      "source": "Failed to load endpoints for STT",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1309"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.teacher.model",
+      "source": "Failed to load endpoints for teacher model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:890"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.tts",
+      "source": "Failed to load endpoints for TTS",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1139"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.endpoints.for.utility.model",
+      "source": "Failed to load endpoints for utility model",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:773"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.features",
+      "source": "Failed to load features",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1407"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.logs.http.value",
+      "source": "Failed to load logs: HTTP {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1684"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.mcp.servers",
+      "source": "Failed to load MCP servers",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:806"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.memory.model.settings",
+      "source": "Failed to load memory model settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:840"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.models",
+      "source": "Failed to load models",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:335",
+        "static/js/compare/index.js:1375",
+        "static/js/compare/selector.js:1334"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.models.for.image.settings",
+      "source": "Failed to load models for image settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1006"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.models.for.vision.settings",
+      "source": "Failed to load models for vision settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1063"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.reminder.settings",
+      "source": "Failed to load reminder settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.research.search.settings",
+      "source": "Failed to load research search settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1871"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.research.settings",
+      "source": "Failed to load research settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1755"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.search.settings",
+      "source": "Failed to load search settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1425"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.server",
+      "source": "Failed to load server",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5737"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.settings",
+      "source": "Failed to load settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1013"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.stt.settings",
+      "source": "Failed to load STT settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1319"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.teacher.model.settings",
+      "source": "Failed to load teacher model settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:937"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.tokens",
+      "source": "Failed to load tokens",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.tools.730e1584",
+      "source": "Failed to load tools",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:690",
+        "static/js/admin.js:802",
+        "static/js/settings.js:5735"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.tts.settings",
+      "source": "Failed to load TTS settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1149"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.users",
+      "source": "Failed to load users",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:247"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.utility.model.settings",
+      "source": "Failed to load utility model settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:786"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.vault.status",
+      "source": "Failed to load vault status",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5524"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.vision.settings",
+      "source": "Failed to load vision settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1070"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.load.webhooks",
+      "source": "Failed to load webhooks",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1360"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.open.email.settings.page",
+      "source": "Failed to open Email settings page",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.parse.logs.data",
+      "source": "Failed to parse logs data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1697"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.refresh.reminder.channels",
+      "source": "Failed to refresh reminder channels",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3151"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename.user",
+      "source": "Failed to rename user",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:182",
+        "static/js/admin.js:191"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.reminder.settings",
+      "source": "Failed to save reminder settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3257"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.update.privilege",
+      "source": "Failed to update privilege",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:153"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.value",
+      "source": "Failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1454",
+        "static/js/admin.js:730",
+        "static/js/settings.js:5658",
+        "static/js/settings.js:5702"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.value.945eb533",
+      "source": "Failed ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5800"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fastmail",
+      "source": "Fastmail",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:446",
+        "static/js/settings.js:3516",
+        "static/js/settings.js:4994"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorite.session",
+      "source": "Favorite session",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.features.fc338f87",
+      "source": "Features",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:79"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.root",
+      "source": "Files root",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.focus.chat.input",
+      "source": "Focus chat input",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2199"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.for.gmail.icloud.and.yahoo.paste.your.app.password.not",
+      "source": "For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password). For Migadu and Fastmail, your mailbox password usually works. Outlook / Office 365 generally requires OAuth and will not work with this password form.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5047"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.gallery.images",
+      "source": "gallery images",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1527"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.generate.app.password",
+      "source": "Generate App Password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5163"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.get.your.api.key.from",
+      "source": "Get your API key from",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1354"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.global.limit.must.be.greater.than.zero",
+      "source": "Global limit must be greater than zero.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gmail",
+      "source": "Gmail",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3511",
+        "static/js/settings.js:4989"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gmail.needs.an.app.password",
+      "source": "Gmail needs an App Password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5086"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.759730a9",
+      "source": "google",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3534",
+        "static/js/settings.js:3535",
+        "static/js/settings.js:5040",
+        "static/js/settings.js:5041"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.account.connected.email.is.ready",
+      "source": "✓ Google account connected — email is ready",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7155"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.api.key",
+      "source": "Google API key",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.drive.uses.browser.based.oauth.on.first.run.no",
+      "source": "Google Drive uses browser-based OAuth on first run. No env vars needed — just click Add and authorize when prompted.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:467"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.oauth.failed.value",
+      "source": "Google OAuth failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.oauth2.required.for.workspace.edu.accounts",
+      "source": "Google OAuth2 — required for Workspace / .edu accounts",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3533",
+        "static/js/settings.js:5039"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.results.via.api.2.500.free.queries.at",
+      "source": "Google results via API. 2,500 free queries at",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1357"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.google.workspace.edu",
+      "source": "Google Workspace / .edu",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3512",
+        "static/js/settings.js:4990"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.grant.admin.rights.to.value.they.ll.get.full.access",
+      "source": "Grant admin rights to \"{0}\"? They'll get full access to all settings and users — including the power to demote or remove other admins (you included).",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:217"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.header.31341c6f",
+      "source": "Header",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4427"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.header.value",
+      "source": "Header{4}",
+      "placeholders": [
+        "4"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4428"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.hello.this.is.a.test.of.text.to.speech",
+      "source": "Hello, this is a test of text to speech.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1207"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.hide.the.settings.cog.you.can.re.open.this.panel",
+      "source": "Hide the Settings cog? You can re-open this panel any time by typing /settings in the chat input.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1978",
+        "static/js/settings.js:1981"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.capture.paused.value.ordinary.saves.continue",
+      "source": "History capture paused: {0}. Ordinary saves continue.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:274",
+        "static/js/historySettings.js:72"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.capture.value",
+      "source": "History capture {0}.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:274",
+        "static/js/historySettings.js:73"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.settings.could.not.be.saved",
+      "source": "History settings could not be saved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:263"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.settings.rejected.value",
+      "source": "History settings rejected ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:51"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.settings.saved",
+      "source": "History settings saved.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:261"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.settings.unavailable",
+      "source": "History settings unavailable.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:277"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.history.settings.unavailable.value",
+      "source": "History settings unavailable ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:40"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.value.1c020459",
+      "source": "Host{11}",
+      "placeholders": [
+        "11"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3538"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.value.3a6db87b",
+      "source": "Host{10}",
+      "placeholders": [
+        "10"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5044"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.value.a639056d",
+      "source": "Host{16}",
+      "placeholders": [
+        "16"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5050"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.value.e72c86d7",
+      "source": "Host{21}",
+      "placeholders": [
+        "21"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3544"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.how.do.i.get.these",
+      "source": "How do I get these?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.http.77b5f8e3",
+      "source": "http",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5767"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.http.basic.auth.user.pass",
+      "source": "= HTTP basic auth (user:pass).",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4427"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.generation.eef91184",
+      "source": "Image generation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:35"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imap.receiving",
+      "source": "IMAP (Receiving)",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3537",
+        "static/js/settings.js:5043"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.failed",
+      "source": "Import failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1512",
+        "static/js/document.js:9743",
+        "static/js/memory.js:3123",
+        "static/js/memory.js:3637",
+        "static/js/memory.js:3656",
+        "static/js/memory.js:3700",
+        "static/js/memory.js:3869",
+        "static/js/settings.js:4834"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.failed.3d4acf61",
+      "source": "Import failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1514",
+        "static/js/chat.js:1613",
+        "static/js/document.js:9763",
+        "static/js/memory.js:3865",
+        "static/js/skills.js:1970"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.failed.server.returned.value",
+      "source": "Import failed: server returned {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1507"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.successful",
+      "source": "Import successful.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1510"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.legacy.path.approval",
+      "source": "Imported legacy path approval",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6400"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.importing",
+      "source": "Importing...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1491",
+        "static/js/calendar.js:2694"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.in.app.browser.notification",
+      "source": "In-app browser notification",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2899",
+        "static/js/settings.js:2975"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.indexing",
+      "source": "Indexing...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1117"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep.location",
+      "source": "Keep Location",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6979"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.keep.permissions",
+      "source": "Keep permissions",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6491"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.label.74341e3c",
+      "source": "Label",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4573"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.last.used.value",
+      "source": "Last used: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1192"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.last.value.value",
+      "source": "Last: {5} {6}",
+      "placeholders": [
+        "5",
+        "6"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1331"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.leave.blank.to.keep.current",
+      "source": "Leave blank to keep current",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.leave.blank.to.keep.current.44879bed",
+      "source": "(leave blank to keep current)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4978"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.leave.blank.to.keep.existing",
+      "source": "Leave blank to keep existing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4576"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.limit.866924ea",
+      "source": "Limit:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1924",
+        "static/js/settings.js:1936"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.limits",
+      "source": "Limits",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:88"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.models",
+      "source": "Loading models...",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.tools",
+      "source": "Loading tools...",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:770"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.lock",
+      "source": "Lock",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5492"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.log.out",
+      "source": "Log out",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.log.out.of.bitwarden.cli.you.ll.need.to.re",
+      "source": "Log out of Bitwarden CLI? You'll need to re-enter your master password to log back in.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.login.4e5a2893",
+      "source": "Login",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5490",
+        "static/js/settings.js:5497"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.make.admin",
+      "source": "Make admin",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:219",
+        "static/js/admin.js:64"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.make.default",
+      "source": "Make Default",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.master.password",
+      "source": "Master Password",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5486"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mcp",
+      "source": "MCP",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mcp.c3ecbf70",
+      "source": "mcp",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6257"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mcp.tool.server",
+      "source": "MCP Tool Server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6257"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.read.58e243df",
+      "source": "Memory read",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1154"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.skills",
+      "source": "Memory & skills",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:36"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.memory.write.9216b747",
+      "source": "Memory write",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1155",
+        "static/js/settings.js:5827"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.migadu",
+      "source": "Migadu",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:445",
+        "static/js/settings.js:3513",
+        "static/js/settings.js:4991"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.min.value.characters",
+      "source": "Min {0} characters",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2508"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.model.s.allowed",
+      "source": "model(s) allowed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:311"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.endpoint.down",
+      "source": "Move endpoint down",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2951"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.endpoint.up",
+      "source": "Move endpoint up",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2948"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ms.bd868a44",
+      "source": "ms)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1690",
+        "static/js/settings.js:1693"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ms.top",
+      "source": "ms · top:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1697"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.my.service",
+      "source": "My Service",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4424"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.and.prompt.are.required",
+      "source": "Name and prompt are required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:595"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.is.required",
+      "source": "Name is required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1371",
+        "static/js/admin.js:993"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.required",
+      "source": "Name required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4040",
+        "static/js/settings.js:4528"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.this.value.agent.so.you.can.tell.it.apart",
+      "source": "Name this {2} agent so you can tell it apart from other ones (e.g. \"{3} — laptop\").",
+      "placeholders": [
+        "2",
+        "3"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5890"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.value",
+      "source": "Name{3}",
+      "placeholders": [
+        "3"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3529"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.value.bc91b1dc",
+      "source": "Name{5}",
+      "placeholders": [
+        "5"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5035"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.need.at.least.a.name.or.email",
+      "source": "Need at least a Name or Email",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3675",
+        "static/js/settings.js:5437"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.needs.auth",
+      "source": "needs auth",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4250"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.needs.authorization",
+      "source": "Needs authorization",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:704",
+        "static/js/settings.js:5679"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.network.error.7eb7b1a1",
+      "source": "network error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5663"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.network.error.b6c76067",
+      "source": "Network error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4616"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.never.used.984ec5ee",
+      "source": "Never used",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1192"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.account",
+      "source": "New Account",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3525"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.password.min.value",
+      "source": "New password (min {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2493"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.persona.save.stores.it.under.saved",
+      "source": "New persona — Save stores it under Saved",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:656"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.session",
+      "source": "New session",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2192"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.username",
+      "source": "New username",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:168"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.access",
+      "source": "No access",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6580"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.api.key.needed.but.rate.limited.heavy.use.can",
+      "source": "No API key needed, but rate-limited — heavy use can return empty results. Configure a fallback below.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1353"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.api.tokens",
+      "source": "No API tokens",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1184"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.capabilities",
+      "source": "no capabilities",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6366"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.compatibility.roots.yet",
+      "source": "No compatibility roots yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7047"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.contacts.yet",
+      "source": "No contacts yet.",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4861",
+        "static/js/settings.js:4882"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.directories.indexed",
+      "source": "No directories indexed",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1043"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.durable.agent.permissions.were.present",
+      "source": "No durable agent permissions were present.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6558"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.email.accounts.configured",
+      "source": "No email accounts configured",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.files.indexed",
+      "source": "No files indexed",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1060"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.files.or.folders.have.been.shared.with.this.account",
+      "source": "No files or folders have been shared with this account.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6609",
+        "static/js/settings.js:6634"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.integrations.configured",
+      "source": "No integrations configured",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2921",
+        "static/js/settings.js:3060",
+        "static/js/settings.js:3962",
+        "static/js/settings.js:4300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.key",
+      "source": "(no key)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1856"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.locations.have.been.shared.with.this.account",
+      "source": "No Locations have been shared with this account.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6999"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.locations.registered.yet",
+      "source": "No Locations registered yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6998"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.logs.found.matching.current.filters",
+      "source": "No logs found matching current filters.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1622"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.mcp.manager",
+      "source": "No MCP manager",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/admin_tools.py:351"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.mcp.manager.available",
+      "source": "No MCP manager available",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/admin_tools.py:222"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.mcp.servers.configured.a6d3302a",
+      "source": "No MCP servers configured",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:700"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.allowed",
+      "source": "No models allowed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:112",
+        "static/js/admin.js:306"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.models.available",
+      "source": "No models available",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:272",
+        "static/js/compare/selector.js:1309",
+        "static/js/models.js:642"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.people.access.has.been.shared.yet",
+      "source": "No People access has been shared yet.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6761"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.persistent.agent.permissions",
+      "source": "No persistent agent permissions.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6433"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.reason.provided",
+      "source": "No reason provided",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:612"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.results.returned",
+      "source": "⚠ No results returned (",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1693"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tools",
+      "source": "No tools",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:774"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.tools.found",
+      "source": "No tools found",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:565"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.users.found",
+      "source": "No users found",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:45"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.webhooks.configured",
+      "source": "No webhooks configured",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1317"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.connected.click.below.to.authorize",
+      "source": "Not connected — click below to authorize",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3534",
+        "static/js/settings.js:5040"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.detected",
+      "source": "(not detected)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1004"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.npx",
+      "source": "npx",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:422",
+        "static/js/admin.js:440",
+        "static/js/admin.js:456",
+        "static/js/admin.js:458",
+        "static/js/admin.js:466",
+        "static/js/admin.js:468",
+        "static/js/admin.js:470",
+        "static/js/admin.js:472",
+        "static/js/admin.js:474",
+        "static/js/admin.js:476",
+        "static/js/admin.js:478",
+        "static/js/admin.js:480",
+        "static/js/admin.js:482",
+        "static/js/admin.js:483",
+        "static/js/admin.js:485",
+        "static/js/settings.js:5747"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ntfy.add.in.integrations.first",
+      "source": "ntfy (add in Integrations first)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2839",
+        "static/js/settings.js:3071"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.only.admins.can.hide.settings",
+      "source": "Only admins can hide Settings.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1965"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.only.required.for.login.unlock",
+      "source": "Only required for Login / Unlock",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5486"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.and.manage.copal.views",
+      "source": "Open and manage Copal views",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:534"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.calendar",
+      "source": "Open Calendar",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2200"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.api",
+      "source": "Open Clank API",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:552"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.effective.tool.policy",
+      "source": "Open Clank effective tool policy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:54"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.search.and.research.policy",
+      "source": "Open Clank search and research policy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:46"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.services.and.approved.agent.integrations",
+      "source": "Open Clank services and approved agent integrations",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:47"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.compare",
+      "source": "Open Compare",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2201",
+        "static/js/slashCommands.js:5606"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.deep.research",
+      "source": "Open Deep Research",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2203",
+        "static/js/slashCommands.js:5599"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.editor",
+      "source": "Open Editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2207",
+        "static/js/slashCommands.js:5564"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.gallery",
+      "source": "Open Gallery",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2204",
+        "static/js/slashCommands.js:5592"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.library",
+      "source": "Open Library",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2205",
+        "static/js/slashCommands.js:5585"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.memory",
+      "source": "Open Memory",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2206"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.theme",
+      "source": "Open Theme",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2209"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.tools",
+      "source": "Open Tools",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2216"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.optional.label.for.this.account.e.g.work.or.personal",
+      "source": "Optional label for this account (e.g. “Work” or “Personal”). Leave blank to use the email address.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3529",
+        "static/js/settings.js:5035"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.optional.leave.blank.for.read.only",
+      "source": "— optional, leave blank for read-only",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3543",
+        "static/js/settings.js:5049"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.optional.leave.blank.to.use.email",
+      "source": "(optional — leave blank to use email)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3529",
+        "static/js/settings.js:5035"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.optional.webhook.payload.template",
+      "source": "Optional webhook payload template",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2937"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.os.default.voice",
+      "source": "OS default voice",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1178"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.outlook.office.365",
+      "source": "Outlook / Office 365",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3515",
+        "static/js/settings.js:4993"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.outlook.office.365.needs.oauth",
+      "source": "Outlook / Office 365 needs OAuth",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3576",
+        "static/js/settings.js:5101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.owner.value",
+      "source": "Owner: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1191"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.min.value",
+      "source": "Password (min {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:383"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.must.be.at.least.value.characters",
+      "source": "Password must be at least {0} characters",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.set.to.empty",
+      "source": "Password set to empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2519"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.updated",
+      "source": "Password updated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2519"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.value",
+      "source": "Password{17}",
+      "placeholders": [
+        "17"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3541"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.value.43b0125d",
+      "source": "Password{21}",
+      "placeholders": [
+        "21"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5055"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.value.5483580d",
+      "source": "Password{13}",
+      "placeholders": [
+        "13"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5047"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.password.value.f888d5a6",
+      "source": "Password{30}",
+      "placeholders": [
+        "30"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3549"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.passwords.don.t.match",
+      "source": "Passwords don't match",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2509"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.people.value.value.policy.value",
+      "source": "People · {0} · {1} · policy {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6716"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.persona.deleted",
+      "source": "Persona deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:666"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.phone.optional",
+      "source": "Phone (optional)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4711"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.phone1.phone2",
+      "source": "phone1, phone2",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4907"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

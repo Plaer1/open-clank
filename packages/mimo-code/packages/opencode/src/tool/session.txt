@@ -19,6 +19,11 @@ JSON calls always wrap the action in an `operation` object — see examples belo
             language, then switch to it. (Orchestrator-only — a child cannot
             switch back; the user returns manually via the session-parent keybind.)
 - list:     enumerate this Orchestrator's child sessions (id, title, mode, status).
+- dashboard: the fleet at a glance — one grouped TABLE of every child correlated
+            to its liveness (progressing/idle/stalled + age), turnCount, mode,
+            and the git worktree backing isolated children (branch, commits-ahead,
+            dir). Use it when you (or the user) want the whole fleet + its
+            worktree/branch mapping in one structured view rather than flat `list`.
 - cancel:   stop a running child session. `sessionID` required.
 - ask:      ask a session a ONE-SHOT, READ-ONLY side question over a FROZEN
             snapshot of its history, without disturbing its running turn.
@@ -45,6 +50,7 @@ JSON calls always wrap the action in an `operation` object — see examples belo
 {"operation":{"action":"create","task":"Implement email/password login","mode":"build"}}
 {"operation":{"action":"create","task":"Design the billing schema","mode":"compose","model":"standard","title":"Billing"}}
 {"operation":{"action":"list"}}
+{"operation":{"action":"dashboard"}}
 {"operation":{"action":"switch","sessionID":"ses_..."}}
 {"operation":{"action":"cancel","sessionID":"ses_..."}}
 {"operation":{"action":"ask","session_id":"ses_...","question":"what is your current progress?"}}

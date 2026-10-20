@@ -2,7 +2,6 @@
 """Initialize all application components and dependencies."""
 import os
 import logging
-import sqlite3
 from typing import Dict, Any
 
 from src.constants import (
@@ -36,26 +35,10 @@ def create_directories():
 
 
 def prepare_frankenmemory_database() -> str:
-    """Create/read the durable DB identity inherited by every fm-mcp child."""
-    os.makedirs(os.path.dirname(FM_DB_PATH), exist_ok=True)
-    with sqlite3.connect(FM_DB_PATH) as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS fm_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT OR IGNORE INTO fm_meta(key,value) VALUES ('database_id', lower(hex(randomblob(16))))"
-        )
-        database_id = connection.execute(
-            "SELECT value FROM fm_meta WHERE key='database_id'"
-        ).fetchone()[0]
-    expected = os.environ.get("FM_DB_ID", "").strip()
-    if expected and expected != database_id:
-        raise RuntimeError(
-            f"frankenmemory database identity mismatch: expected {expected}, opened {database_id}"
-        )
-    os.environ["FM_DB_ID"] = database_id
-    return database_id
-        
+    """Admit native current schema and read the durable identity."""
+    from src.frankenmemory_database import prepare_frankenmemory_database as prepare
+    return prepare(FM_DB_PATH)
+
 def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     """
     Initialize all manager and handler instances.
@@ -85,33 +68,11 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     from src.default_persona import configure as configure_default_persona
     configure_default_persona(preset_manager)
 
-    # Initialize memory vector store (share embedding model with RAG if available)
-    # Gate behind MEMORY_VECTOR_ENABLED: Chroma vector path is retired when
-    # frankenmemory is the active provider. RAG (rag_manager) is NOT affected.
+    # Frankenmemory owns memory retrieval and document RAG. Keep the historical
+    # component slot empty for callers that still read it; no environment
+    # toggle can resurrect Chroma as a second authority.
     memory_vector = None
-    memory_vector_enabled = os.environ.get("MEMORY_VECTOR_ENABLED", "0").lower() in ("1", "true", "yes")
-    if memory_vector_enabled:
-        try:
-            from src.memory_vector import MemoryVectorStore
-            embedding_model = getattr(rag_manager, '_model', None) if rag_manager else None
-            memory_vector = MemoryVectorStore(DATA_DIR, embedding_model=embedding_model)
-            if memory_vector.healthy:
-                if memory_vector.count() == 0:
-                    existing = memory_manager.load()
-                    if existing:
-                        memory_vector.rebuild(existing)
-                        logger.info(f"Rebuilt memory vector index from {len(existing)} existing entries")
-                logger.info("MemoryVectorStore initialized")
-            else:
-                # Keep the unhealthy object (do NOT reset to None): consumers gate on
-                # `.healthy`, and service_health.chromadb_health() needs a present
-                # object to report DEGRADED/DOWN instead of DISABLED ("not configured").
-                logger.warning("MemoryVectorStore DEGRADED: ChromaDB vector memory unavailable")
-        except Exception as e:
-            logger.warning(f"MemoryVectorStore DEGRADED: {e}")
-            memory_vector = None
-    else:
-        logger.info("MemoryVectorStore DISABLED (MEMORY_VECTOR_ENABLED not set)")
+    logger.info("Legacy Chroma memory vector path is retired")
 
     # Register memory providers
     memory_provider = os.environ.get("MEMORY_PROVIDER", "frankenmemory")
@@ -126,6 +87,11 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
                 "FM_DB_ID": database_id,
                 "FM_SCOPE_AUTHORITY": "trusted-caller",
             },
+            # Broker credentials are projected only into scoped child
+            # lifetools processes. The app owns the underlying stdio provider
+            # and must never loop back into its own not-yet-ready HTTP broker.
+            broker_url="",
+            broker_token="",
         )
         native = NativeMemoryProvider(memory_manager, memory_vector)
         native.enabled = False

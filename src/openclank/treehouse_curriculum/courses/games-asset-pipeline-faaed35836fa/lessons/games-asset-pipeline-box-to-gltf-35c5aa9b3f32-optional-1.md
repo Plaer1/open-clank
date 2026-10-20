@@ -1,0 +1,1 @@
+Check shape first, then material assignment, then animation; compare orientation by the marked face.

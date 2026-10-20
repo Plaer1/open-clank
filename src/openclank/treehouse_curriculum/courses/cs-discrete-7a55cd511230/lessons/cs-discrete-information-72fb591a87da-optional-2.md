@@ -1,0 +1,1 @@
+Prefix codes let a decoder identify boundaries without external separators. Huffman coding combines the least probable symbols recursively for an optimal prefix code under its fixed symbol-probability assumptions; model overhead and other coding families change practical comparisons.

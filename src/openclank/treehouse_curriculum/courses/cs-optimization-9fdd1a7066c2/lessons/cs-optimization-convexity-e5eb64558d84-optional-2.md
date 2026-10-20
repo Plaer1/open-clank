@@ -1,0 +1,1 @@
+Linear programs have linear objectives/constraints; convex quadratic programs and conic programs add structured geometry. Second-order cones and positive-semidefinite matrix cones enable further models. Their solver/runtime guarantees depend on problem size, conditioning, accuracy, and formulation.

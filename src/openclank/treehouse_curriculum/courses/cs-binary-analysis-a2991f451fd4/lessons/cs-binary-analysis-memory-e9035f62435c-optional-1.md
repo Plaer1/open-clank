@@ -1,0 +1,1 @@
+A readable byte sequence does not establish the intended data type.

@@ -1,0 +1,1 @@
+The changes address time, color dependence and audio dependence; the test can start, play and restart without a pointer.

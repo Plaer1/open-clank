@@ -1,0 +1,1 @@
+Return1 and 0; m can equal lo, so lo=m may not shrink the interval.

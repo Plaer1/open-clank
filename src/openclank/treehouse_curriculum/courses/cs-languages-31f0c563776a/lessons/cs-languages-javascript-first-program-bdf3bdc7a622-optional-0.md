@@ -1,0 +1,1 @@
+Original returns/logs 5. The changed argument yields 2; subtraction with original arguments yields -1. The host loads the script through src; logging does not write a paragraph or specify a process exit.

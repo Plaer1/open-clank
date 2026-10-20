@@ -1,0 +1,1 @@
+Add ColorRect Ramp directly beneath Main at(16,48), size160×24, with ShaderMaterial→Shader containing this unit's complete canvas ramp. Strength0.5 predicts levels0.1/0.25/0.4 at u0/0.5/1. Keep it above the game playfield. Numeric prediction and actual screen appearance are separate evidence; collision is unchanged.

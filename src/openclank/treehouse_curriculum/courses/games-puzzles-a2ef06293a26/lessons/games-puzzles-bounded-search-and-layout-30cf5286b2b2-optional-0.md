@@ -1,0 +1,1 @@
+The three outcomes are distinguished; graph topology/cost determines search, while layout controls presentation.

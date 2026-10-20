@@ -1,0 +1,1 @@
+Corrected x=1; the saved-state item affects future results, and the side effect is deduplicated or suppressed during replay.

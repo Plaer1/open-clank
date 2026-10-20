@@ -1,0 +1,1 @@
+Use a real h1 and navigation anchor with href, meaningful main/nav structure, and label for matching input id. Changing h1 changes visible text; the tab title stays My practice cards unless title changes too. Keep one h1 and the existing h2/h3 nesting. Changing a label or input id alone can break association.

@@ -15,33 +15,15 @@ def is_admin_only_task_action(task_type: str | None, action: str | None) -> bool
 
 
 def owner_has_admin_task_privileges(owner: str | None) -> bool:
-    try:
-        from src.auth_helpers import _auth_disabled
-        if _auth_disabled():
-            return True
-    except Exception:
-        pass
-
-    if owner:
-        try:
-            from core.middleware import INTERNAL_TOOL_USER
-            if owner == INTERNAL_TOOL_USER:
-                return True
-        except Exception:
-            pass
-
+    """Persisted task owners must resolve to a real configured administrator."""
+    owner = str(owner or "").strip()
+    if not owner:
+        return False
     try:
         from core.auth import AuthManager
         auth = AuthManager()
         if not auth.is_configured:
-            return True
-        if not owner:
             return False
-        return bool(auth.is_admin(owner))
+        return auth.is_admin(owner.lower()) is True
     except Exception:
-        pass
-
-    if not owner:
         return False
-
-    return False

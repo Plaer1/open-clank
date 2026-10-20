@@ -43,10 +43,21 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
 
     @router.get("/api/export")
     async def export_data(request: Request):
-        """Export all user data as a downloadable JSON file."""
+        """Export settings plus the owner's curated memories as JSON.
+
+        Raw turns, pending/rejected candidates, quarantine, and independent
+        graph overlays are engine data and are not represented by this
+        portable account export.
+        """
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        from src.memory_scope import memory_owner as resolve_memory_owner
+
+        memory_owner = resolve_memory_owner(
+            user
+            or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
+            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
+        )
 
         # Memories (filtered by owner when auth is enabled)
         memories = []
@@ -60,6 +71,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                 "text": record.text,
                 "category": record.category,
                 "source": record.source,
+                "source_type": record.source_type,
                 "owner": record.owner,
                 "session_id": record.session_id,
                 "pinned": record.pinned,
@@ -95,6 +107,22 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         features = _sanitize_export(features, removed_secret_fields, "features")
         preferences = _sanitize_export(preferences, removed_secret_fields, "preferences")
 
+        # S29: account-wide achievement ledger (lifetime awards, receipts,
+        # predicate state, backfill cursors). Keyed by immutable account id.
+        achievement_ledger = {"awards": [], "receipts": [], "predicateState": None, "backfillCursors": []}
+        try:
+            from src.openclank.copal_treehouse_repository import TreeHouseRepository
+            from src.constants import DATA_DIR
+            th_path = os.environ.get("TREEHOUSE_REPOSITORY_PATH") or os.path.join(str(DATA_DIR), "treehouse.sqlite3")
+            th_repo = TreeHouseRepository(th_path)
+            auth_manager = getattr(request.app.state, "auth_manager", None)
+            account_id = auth_manager.account_id(user) if auth_manager is not None and hasattr(auth_manager, "account_id") else memory_owner
+            if account_id:
+                achievement_ledger = th_repo.export_achievement_ledger(str(account_id))
+        except Exception:
+            logger.exception("Failed to export TreeHouse achievement ledger")
+        achievement_ledger = _sanitize_export(achievement_ledger, removed_secret_fields, "achievementLedger")
+
         export_data = {
             "version": 2,
             "exported_at": datetime.now().isoformat(),
@@ -103,6 +131,8 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             "manifest": {
                 "owner": memory_owner,
                 "memory_authority": memory_authority,
+                "memory_tiers": ["curated"],
+                "memory_graph_included": False,
                 "memory_count": len(memories),
                 "memory_sha256": hashlib.sha256(
                     json.dumps(memories, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -115,9 +145,10 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             "settings": settings,
             "features": features,
             "preferences": preferences,
+            "achievementLedger": achievement_ledger,
         }
 
-        filename = f"odysseus_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"open-clank-backup-{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         return Response(
             content=json.dumps(export_data, indent=2, ensure_ascii=False),
             media_type="application/json",
@@ -129,7 +160,13 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
         """Import user data from a previously exported JSON file. Merges with existing data."""
         require_admin(request)
         user = get_current_user(request)
-        memory_owner = user or os.environ.get("ODYSSEUS_MEMORY_OWNER") or "legacy"
+        from src.memory_scope import memory_owner as resolve_memory_owner
+
+        memory_owner = resolve_memory_owner(
+            user
+            or os.environ.get("OPEN_CLANK_MEMORY_OWNER")
+            or os.environ.get("ODYSSEUS_MEMORY_OWNER")
+        )
         try:
             body = await request.json()
         except Exception:
@@ -177,6 +214,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     session_id=mem.get("session_id"),
                     category=mem.get("category") or "fact",
                     source=mem.get("source") or "backup_restore",
+                    source_type=mem.get("source_type"),
                     metadata=metadata,
                 )
                 if mem.get("pinned"):
@@ -218,9 +256,6 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     continue
                 if title.lower() in existing_titles:
                     continue
-                owner = skill.get("owner")
-                if user and not owner:
-                    owner = user
                 # Skills live on disk as SKILL.md files; the old JSON-era
                 # skills_manager.save() no longer exists. Write each new skill
                 # via add_skill (source="user" skips auto-dedup — this is an
@@ -236,7 +271,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     source="user",
                     teacher_model=skill.get("teacher_model"),
                     confidence=skill.get("confidence", 0.8),
-                    owner=owner,
+                    owner=user,
                     category=skill.get("category", "general"),
                     when_to_use=skill.get("when_to_use"),
                     procedure=skill.get("procedure"),
@@ -245,7 +280,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
                     platforms=skill.get("platforms"),
                     requires_toolsets=skill.get("requires_toolsets"),
                     fallback_for_toolsets=skill.get("fallback_for_toolsets"),
-                    status=skill.get("status", "draft"),
+                    status="draft",
                     version=skill.get("version", "1.0.0"),
                 )
                 if result.get("_deduped"):
@@ -290,6 +325,21 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager, memory_p
             current.update(body["preferences"])
             _save_for_user(user, current)
             imported.append("preferences")
+
+        # ── S29 achievement ledger ──
+        if "achievementLedger" in body and isinstance(body["achievementLedger"], dict):
+            try:
+                from src.openclank.copal_treehouse_repository import TreeHouseRepository
+                from src.constants import DATA_DIR
+                th_path = os.environ.get("TREEHOUSE_REPOSITORY_PATH") or os.path.join(str(DATA_DIR), "treehouse.sqlite3")
+                th_repo = TreeHouseRepository(th_path)
+                auth_manager = getattr(request.app.state, "auth_manager", None)
+                account_id = auth_manager.account_id(user) if auth_manager is not None and hasattr(auth_manager, "account_id") else memory_owner
+                if account_id:
+                    counts = th_repo.restore_achievement_ledger(str(account_id), body["achievementLedger"])
+                    imported.append(f"achievementLedger (+{counts.get('awards', 0)} awards)")
+            except Exception:
+                logger.exception("Failed to restore TreeHouse achievement ledger")
 
         if not imported:
             return {"ok": False, "message": "No recognized data found in the file"}

@@ -1,0 +1,1 @@
+NP-hard means every NP problem reduces to the target using the specified reduction. NP-complete adds membership in NP. A reduction's direction matters. Undecidable problems differ from decidable problems with high computational cost.

@@ -1,0 +1,1 @@
+B is dominated; A is feasible at cap 3, and C maximizes damage at cap 6; the uncertainty is tied to the model.

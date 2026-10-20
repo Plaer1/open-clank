@@ -1,0 +1,1 @@
+On a writable disposable personal page, link to a second page and verify navigation. Save/reopen, then inspect a supported export. Record any fidelity difference. Official Help remains the read-only source; use a separate personal note for your observations.

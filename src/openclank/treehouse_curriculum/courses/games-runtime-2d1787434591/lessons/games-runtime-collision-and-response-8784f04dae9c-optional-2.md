@@ -1,0 +1,1 @@
+The supplied Bevy target remains(200,0). Predicate abs(x−200)≤20 and abs(y)≤20 gives true at(180,0), false at(179.99,0), true at(200,20), false at(200,20.01). Artwork and sampled physics are different; the supplied large-step example can skip contact.

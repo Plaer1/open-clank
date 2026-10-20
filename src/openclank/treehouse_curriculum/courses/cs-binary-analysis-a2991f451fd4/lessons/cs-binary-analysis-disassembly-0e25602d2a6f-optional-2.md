@@ -1,0 +1,1 @@
+Actual local `otool -tvV toy` showed _bump with sub/str/ldr/add/add/ret. No claim that all x+1 functions compile to this sequence; flags, target, inlining, and overflow rules matter.

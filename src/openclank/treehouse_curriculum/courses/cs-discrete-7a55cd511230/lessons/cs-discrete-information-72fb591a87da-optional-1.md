@@ -1,0 +1,1 @@
+Highly repetitive data can compress; that does not establish universal compression.

@@ -1,0 +1,1 @@
+A type's fixed range remains relevant even when a small example works.

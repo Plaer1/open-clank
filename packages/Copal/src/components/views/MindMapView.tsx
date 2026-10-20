@@ -22,7 +22,7 @@ import {
   reparentHeading,
   moveHeadingSection,
   moveHeadingSectionTo,
-} from '../../../static/js/copal/notesModel';
+} from '../../../../../static/js/copal/notesModel';
 
 /* ── Tree node type ── */
 interface TreeNode {

@@ -1,0 +1,54 @@
+.copal-notes-workspace.copal-wiki-workspace { position:relative; display:grid; grid-template-columns:240px minmax(0,1fr) auto; grid-template-rows:auto minmax(0,1fr); }
+.copal-wiki-workspace > .copal-notes-explorer, .copal-wiki-workspace > .copal-notes-ribbon { display:none; }
+.copal-wiki-workspace > .copal-notes-main { grid-column:2; grid-row:2; min-width:0; min-height:0; }
+.copal-wiki-workspace > .copal-notes-sidebar { grid-column:3; grid-row:2; }
+.copal-wiki-workspace > .copal-wiki-navigation { grid-column:1; grid-row:2; width:auto; }
+.copal-wiki-tools { grid-column:1 / -1; flex:none; padding:8px 12px; border-bottom:1px solid var(--border-color, #444); background:var(--surface, transparent); }
+.copal-wiki-page-actions, .copal-wiki-authoring, .copal-wiki-library-actions, .copal-wiki-collections { display:flex; align-items:center; gap:5px; flex-wrap:wrap; }
+.copal-wiki-title { flex:1; min-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.copal-wiki-authoring { margin-top:7px; }
+.copal-wiki-format { color:inherit; background:transparent; border:1px solid var(--border-color, #555); border-radius:5px; padding:5px 8px; cursor:pointer; }
+.copal-wiki-format:hover, .copal-wiki-page:hover { background:var(--hover-bg, #ffffff12); }
+.copal-wiki-navigation { width:240px; min-height:0; display:flex; flex-direction:column; gap:9px; padding:12px; overflow:hidden; border-right:1px solid var(--border-color, #444); }
+.copal-wiki-navigation > header { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+.copal-wiki-search { width:100%; box-sizing:border-box; }
+.copal-wiki-navigation-results { flex:1; min-height:0; overflow:auto; }
+.copal-wiki-pages { display:flex; flex-direction:column; gap:4px; }
+.copal-wiki-page { display:flex; flex-direction:column; text-align:left; color:inherit; background:transparent; border:1px solid transparent; border-radius:6px; padding:9px; cursor:pointer; }
+.copal-wiki-page strong { overflow-wrap:anywhere; }
+.copal-wiki-page span { opacity:.65; font-size:12px; margin-top:3px; }
+.copal-wiki-page[aria-current=page], .copal-wiki-collections [aria-pressed=true], .copal-wiki-page-actions [aria-pressed=true] { background:var(--hover-bg, #ffffff12); border-color:var(--accent-color, #7b9ce1); }
+.copal-wiki-library-actions { margin-top:7px; }
+.copal-wiki-backlinks, .copal-wiki-library-menu { max-width:100%; }
+.copal-wiki-backlinks[open], .copal-wiki-library-menu[open] { padding:5px; }
+.copal-wiki-backlinks .copal-btn, .copal-wiki-library-menu .copal-btn { margin:5px; }
+.copal-wiki-readonly { display:flex; gap:12px; align-items:center; margin-top:7px; }
+.copal-wiki-insert-form { display:flex; flex-direction:column; gap:12px; }
+.copal-wiki-insert-form label { display:flex; flex-direction:column; gap:5px; }
+.copal-wiki-insert-error { color:var(--error-color, #ef8a8a); }
+
+
+/* The generic rendered article owns this scroller. CodeMirror/native leaf
+   bodies keep their own existing overflow and viewport ownership. */
+.copal-note-leaf-content.copal-rendered-article-scroll { overflow:auto; overscroll-behavior:contain; }
+.copal-rendered-article-scroll > .copal-markdown { min-height:0; }
+.copal-readonly-source { margin:0; padding:20px; white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* Editor compact classes describe its drawers, not Wiki page navigation.
+   Wiki responds to the actual applet body width, independently of the shell. */
+.copal-wiki-window .copal-view { container-type:inline-size; }
+.copal-notes-workspace.copal-wiki-workspace:is(.narrow,.compact) { grid-template-columns:180px minmax(0,1fr) auto; grid-template-rows:auto minmax(0,1fr); }
+.copal-wiki-workspace:is(.narrow,.compact) > .copal-wiki-navigation { grid-column:1; grid-row:2; max-height:none; }
+.copal-wiki-workspace:is(.narrow,.compact) > .copal-notes-main { grid-column:2; grid-row:2; }
+.copal-wiki-workspace:is(.narrow,.compact) > .copal-notes-sidebar { grid-column:3; grid-row:2; }
+@container (max-width:560px) {
+  .copal-notes-workspace.copal-wiki-workspace:is(.narrow,.compact), .copal-notes-workspace.copal-wiki-workspace { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(190px, min(260px, 35%)) minmax(0,1fr); }
+  .copal-wiki-workspace > .copal-wiki-navigation { grid-column:1 !important; grid-row:2 !important; max-height:260px; padding:7px; border-right:0; border-bottom:1px solid var(--border-color, #444); }
+  .copal-wiki-navigation-results { min-height:65px; }
+  .copal-wiki-workspace > .copal-notes-main, .copal-wiki-workspace > .copal-notes-sidebar { grid-column:1 !important; grid-row:3 !important; }
+  .copal-wiki-tools { padding:7px; }
+}
+
+/* Global compact-button sizing must not compress multi-line article rows. */
+body .copal-wiki-navigation button.copal-wiki-page { height:auto !important; min-height:54px; flex:0 0 auto; width:100%; box-sizing:border-box; overflow:visible; }
+.copal-wiki-page > strong, .copal-wiki-page > span { flex:none; }

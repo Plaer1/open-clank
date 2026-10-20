@@ -11,12 +11,14 @@ does. Real fm-mcp binary, no fakes (management order).
 import asyncio
 import logging
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from src.frankenmemory_provider import FrankenmemoryProvider
+from src.memory_provider import MemoryProviderError, MemoryRecord, MemoryRequestRejectedError
 
-FM_BIN = os.path.join(
+FM_BIN = os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN") or os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "mcp_servers/frankenmemory/target/release/fm-mcp",
 )
@@ -81,6 +83,315 @@ async def test_failure_logs_are_never_empty(tmp_path, caplog):
     with pytest.raises(Exception) as raised:
         await provider.recall("boom", owner="alice")
     assert str(raised.value).strip()
+
+
+async def test_stdio_tool_rejection_is_not_labeled_as_transport_ambiguity():
+    provider = FrankenmemoryProvider(command="/unused")
+
+    class OwnerTask:
+        @staticmethod
+        def done():
+            return False
+
+    class ImmediateQueue:
+        async def put(self, item):
+            _name, _arguments, future = item
+            future.set_result(SimpleNamespace(
+                isError=True,
+                content=[SimpleNamespace(text="operation tuple mismatch")],
+            ))
+
+    provider._owner_task = OwnerTask()
+    provider._requests = ImmediateQueue()
+
+    with pytest.raises(MemoryRequestRejectedError, match="tuple mismatch"):
+        await provider._call_tool("memory_forget", {"action": "commit"})
+
+
+async def test_capture_passes_explicit_review_only_mode(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+    calls = []
+
+    async def fake_call_tool(name, args):
+        calls.append((name, args))
+        return {"record_ids": ["candidate_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    result = await provider.capture(
+        "My name is Alice",
+        "Nice to meet you.",
+        owner="alice",
+        session_id="ses-review",
+        capture_mode="review_only",
+    )
+
+    assert result == {"record_ids": ["candidate_1"]}
+    assert calls == [
+        (
+            "capture",
+            {
+                "user_text": "My name is Alice",
+                "assistant_text": "Nice to meet you.",
+                "capture_mode": "review_only",
+                "workspace_id": provider._workspace_id,
+                "workspace_path": provider._workspace_id,
+                "owner": "alice",
+                "source": "odysseus",
+                "session_id": "ses-review",
+                "session_key": "ses-review",
+            },
+        )
+    ]
+
+
+async def test_preferred_v2_reads_do_not_hide_legacy_only_rows(monkeypatch, tmp_path):
+    """The shadow projection must enrich migrated rows, not truncate the bank."""
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    monkeypatch.setenv("FM_V2_READ_MODE", "preferred")
+    v2 = SimpleNamespace(id="m_v2", text="new", category="fact")
+    legacy = [
+        {"id": "m_v2", "content": "old", "kind": "fact"},
+        {"id": "m_legacy", "content": "still visible", "kind": "fact"},
+    ]
+
+    async def fake_v2(**_kwargs):
+        return [v2]
+
+    async def fake_call(name, _args):
+        assert name == "list_memories"
+        return {"records": legacy, "next_cursor": "next"}
+
+    monkeypatch.setattr(provider, "list_v2_records", fake_v2)
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    records, cursor = await provider.list_page(owner="alice", limit=10)
+    assert [record.id for record in records] == ["m_v2", "m_legacy"]
+    assert records[0].text == "new"
+    assert cursor == "next"
+
+
+async def test_preferred_v2_recall_merges_legacy_only_rows(monkeypatch, tmp_path):
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    monkeypatch.setenv("FM_V2_READ_MODE", "preferred")
+
+    def fake_v2(*_args, **_kwargs):
+        return [{"id": "m_v2", "text": "new", "kind": "fact", "recall_score": 1.0}]
+
+    async def fake_call(name, _args):
+        if name == "get_memory":
+            return {"record": {"id": "m_v2", "content": "old", "kind": "fact"}}
+        assert name == "recall"
+        return {"memories": [
+            {"id": "m_v2", "content": "old", "kind": "fact", "score": 0.4},
+            {"id": "m_legacy", "content": "still visible", "kind": "fact", "score": 0.3},
+        ]}
+
+    monkeypatch.setattr("src.frankenmemory_v2.search_current_records", fake_v2)
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    hits = await provider.recall("visible", owner="alice", top_k=10)
+    assert [hit.memory.id for hit in hits] == ["m_v2", "m_legacy"]
+    assert hits[0].memory.text == "new"
+
+
+async def test_preferred_v2_recall_ranks_the_merged_result(monkeypatch, tmp_path):
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    monkeypatch.setenv("FM_V2_READ_MODE", "preferred")
+
+    monkeypatch.setattr(
+        "src.frankenmemory_v2.search_current_records",
+        lambda *_args, **_kwargs: [
+            {"id": "m_v2", "text": "weak lexical hit", "kind": "fact", "recall_score": 0.1}
+        ],
+    )
+
+    async def fake_call(name, _args):
+        if name == "get_memory":
+            return {"record": {"id": "m_v2", "content": "weak lexical hit", "kind": "fact"}}
+        assert name == "recall"
+        return {"memories": [
+            {"id": "m_legacy", "content": "strong semantic hit", "kind": "fact", "score": 0.99}
+        ]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    hits = await provider.recall("query", owner="alice", top_k=1)
+    assert [(hit.memory.id, hit.score) for hit in hits] == [("m_legacy", 0.99)]
+
+
+async def test_preferred_v2_recall_tolerates_malformed_legacy_scores(monkeypatch, tmp_path):
+    """A non-numeric legacy score over the wire degrades to unscored, not a crash."""
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    monkeypatch.setenv("FM_V2_READ_MODE", "preferred")
+
+    def fake_v2(*_args, **_kwargs):
+        return [{"id": "m_v2", "text": "new", "kind": "fact", "recall_score": 1.0}]
+
+    async def fake_call(name, _args):
+        if name == "get_memory":
+            return {"record": {"id": "m_v2", "content": "old", "kind": "fact"}}
+        assert name == "recall"
+        return {"memories": [
+            {"id": "m_v2", "content": "old", "kind": "fact", "score": "not-a-number"},
+            {"id": "m_legacy", "content": "still visible", "kind": "fact", "score": {"bad": "wire"}},
+        ]}
+
+    monkeypatch.setattr("src.frankenmemory_v2.search_current_records", fake_v2)
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    hits = await provider.recall("visible", owner="alice", top_k=10)
+    assert [(hit.memory.id, hit.score) for hit in hits] == [("m_v2", 1.0), ("m_legacy", None)]
+
+
+async def test_remember_sets_v2_kind_from_requested_category(monkeypatch, tmp_path):
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+
+    async def fake_call(_name, _args):
+        return {"record_ids": ["m_project"]}
+
+    mirrored = []
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    monkeypatch.setattr("src.frankenmemory_v2.mirror_record", lambda record, **_kwargs: mirrored.append(record) or True)
+    record = await provider.remember("ships Friday", owner="alice", category="project")
+    assert record.kind == "project"
+    assert mirrored[0].kind == "project"
+
+
+async def test_review_only_remember_does_not_activate_a_v2_block(monkeypatch, tmp_path):
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+
+    async def fake_call(_name, _args):
+        return {"record_ids": ["candidate_project"]}
+
+    mirrored = []
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    monkeypatch.setattr("src.frankenmemory_v2.mirror_record", lambda record, **_kwargs: mirrored.append(record) or True)
+    record = await provider.remember(
+        "possible project fact",
+        owner="alice",
+        category="project",
+        capture_mode="review_only",
+    )
+    assert record.metadata["pending_review"] is True
+    assert mirrored == []
+
+
+async def test_accepted_candidate_is_mirrored_to_v2(monkeypatch, tmp_path):
+    provider = FrankenmemoryProvider(command="/unused", env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+
+    async def fake_call(_name, _args):
+        return {"reviewed": True, "accepted": True, "curated_id": "m_curated"}
+
+    async def fake_current(memory_id, *, owner=None, workspace_id=None):
+        assert memory_id == "m_curated"
+        assert workspace_id == provider._workspace_id
+        return MemoryRecord(id=memory_id, text="approved", owner=owner, workspace_id=workspace_id)
+
+    mirrored = []
+    monkeypatch.setattr(provider, "_call_tool", fake_call)
+    monkeypatch.setattr(provider, "_get_legacy_current", fake_current)
+    monkeypatch.setattr("src.frankenmemory_v2.mirror_record", lambda record, **kwargs: mirrored.append((record, kwargs)) or True)
+    result = await provider.review_candidate(
+        "candidate-1", accept=True, reason="approved", owner="alice"
+    )
+    assert result["curated_id"] == "m_curated"
+    assert mirrored[0][0].id == "m_curated"
+    assert mirrored[0][1]["action"] == "review_candidate"
+
+
+async def test_remember_never_reports_a_raw_capture_as_saved(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+
+    async def fake_call_tool(_name, _args):
+        return {"record_ids": ["raw_1", "candidate_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    with pytest.raises(RuntimeError, match="did not admit"):
+        await provider.remember("short fact", owner="alice")
+
+
+async def test_remember_reports_agent_provenance(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+
+    async def fake_call_tool(_name, _args):
+        return {"record_ids": ["m_1"]}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    record = await provider.remember(
+        "Agent-discovered fact",
+        owner="alice",
+        source="ai_agent",
+    )
+    assert record.source_type == "ai"
+
+
+async def test_lifecycle_contracts_keep_authenticated_scope(monkeypatch):
+    provider = FrankenmemoryProvider(command="/nonexistent/fm-mcp")
+    calls = []
+
+    async def fake_call_tool(name, args):
+        calls.append((name, args))
+        if name == "memory_explain":
+            return {"explanation": {"id": args["id"], "source_uri": "message://alice/1"}}
+        return {"ok": True}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    await provider.retention(
+        "set",
+        owner="alice",
+        raw_days=14,
+        candidate_days=45,
+        recovery_seconds=60,
+    )
+    await provider.forget(
+        "commit",
+        owner="alice",
+        selector_kind="source_message_id",
+        selector="message-1",
+        preview_token="preview-token",
+        operation_id="0123456789abcdef0123456789abcdef",
+    )
+    await provider.export_scope(owner="alice")
+    explanation = await provider.explain("memory-1", owner="alice")
+
+    assert explanation == {"id": "memory-1", "source_uri": "message://alice/1"}
+    assert calls == [
+        (
+            "memory_retention",
+            {
+                "action": "set",
+                "owner": "alice",
+                "workspace_id": provider._workspace_id,
+                "raw_days": 14,
+                "candidate_days": 45,
+                "recovery_seconds": 60,
+            },
+        ),
+        (
+            "memory_forget",
+            {
+                "action": "commit",
+                "owner": "alice",
+                "workspace_id": provider._workspace_id,
+                "selector_kind": "source_message_id",
+                "selector": "message-1",
+                "preview_token": "preview-token",
+                "operation_id": "0123456789abcdef0123456789abcdef",
+            },
+        ),
+        (
+            "memory_export",
+            {"owner": "alice", "workspace_id": provider._workspace_id},
+        ),
+        (
+            "memory_explain",
+            {
+                "id": "memory-1",
+                "owner": "alice",
+                "workspace_id": provider._workspace_id,
+            },
+        ),
+    ]
 
 
 @needs_fm
@@ -245,8 +556,30 @@ async def test_graph_groom_ops_round_trip(tmp_path):
 
 
 @needs_fm
-async def test_code_index_round_trip(tmp_path):
-    """G3: opt-in code graph — index, search via cues, impact, remove."""
+async def test_code_index_round_trip(tmp_path, monkeypatch):
+    """G3: admitted background index preserves search/impact/remove behavior."""
+    import json
+    import sqlite3
+    from pathlib import Path
+    from src import constants, secret_storage
+    from src.openclank.file_policy import FilePolicyRepository
+
+    data = tmp_path / "code-authority"
+    data.mkdir()
+    monkeypatch.setattr(constants, "DATA_DIR", str(data))
+    monkeypatch.setattr(secret_storage, "_KEY_PATH", data / ".app_key")
+    monkeypatch.setattr(secret_storage, "_fernet", None)
+    paths = {"OPEN_CLANK_DATA_DIR": str(data), "ODYSSEUS_DATA_DIR": str(data),
+        "OPEN_CLANK_AUTHORITY_DB_PATH": str(data / "authority.db"),
+        "OPEN_CLANK_AUTHORITY_AUTH_PATH": str(data / "auth.json"),
+        "FM_DB_PATH": str(data / "fm.db")}
+    for name, value in paths.items():
+        assert Path(value).resolve().is_relative_to(tmp_path.resolve()), name
+        monkeypatch.setenv(name, value)
+    users = {"alice": {"account_id": "transport-code-alice", "is_admin": False}}
+    Path(paths["OPEN_CLANK_AUTHORITY_AUTH_PATH"]).write_text(json.dumps({"users": users}), encoding="utf-8")
+    authority = FilePolicyRepository(paths["OPEN_CLANK_AUTHORITY_DB_PATH"])
+    authority.sync_subjects(users)
     repo = tmp_path / "mini-repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "lib.py").write_text("def orbital_planner():\n    return 1\n")
@@ -254,29 +587,68 @@ async def test_code_index_round_trip(tmp_path):
         "from lib import orbital_planner\ndef main():\n    orbital_planner()\n"
     )
 
-    provider = FrankenmemoryProvider(command=FM_BIN, env={"FM_DB_PATH": str(tmp_path / "fm.db")})
+    location = authority.create_location(actor_subject_id="transport-admin", path=str(repo), kind="directory", capabilities=("read",))
+    for kind in ("people", "agent"):
+        authority.create_binding(actor_subject_id="transport-admin", binding_class=kind, subject_id="transport-code-alice", location_id=location.id, capabilities=("read",))
+    workspace = authority.create_workspace(actor_subject_id="transport-code-alice", owner_subject_id="transport-code-alice", location_id=location.id, name="Mini repo")
+    provider = FrankenmemoryProvider(command=FM_BIN, workspace_id=workspace.id, env=paths)
+    assert provider._local_db_path() == paths["FM_DB_PATH"]
+    if os.environ.get("OPEN_CLANK_TEST_FM_MCP_BIN"):
+        assert provider._command == os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"]
     await asyncio.create_task(provider.initialize())
-
-    scope = {"owner": "alice", "workspace_id": provider._workspace_id}
-    indexed = await provider._call_tool("code_index", {"action": "index", "path": str(repo), **scope})
-    assert indexed["files_indexed"] == 2
-    assert indexed["symbols"] == 2
-
-    status = await provider._call_tool("code_index", {"action": "status", "path": str(repo), **scope})
-    assert status["files"] == 2
-
-    hits = await provider._call_tool("graph_walk", {"op": "cues", "query": "orbital planner", **scope})
-    assert any(h["node"]["name"].endswith("::orbital_planner") for h in hits["hits"])
-
-    impact = await provider._call_tool(
-        "code_index", {"action": "impact", "path": str(repo), "rel_path": "src/lib.py", **scope}
-    )
-    assert any(f.endswith("src/app.py") for f in impact["impacted_files"])
-
-    removed = await provider._call_tool("code_index", {"action": "remove", "path": str(repo), **scope})
-    assert removed["files_removed"] == 2
-
-    await asyncio.create_task(provider.shutdown())
+    scope = {"owner": "alice", "workspace_id": workspace.id}
+    admitted = dict(owner="alice", owner_subject_id="transport-code-alice", workspace_id=workspace.id,
+        location_id=location.id, workspace_revision=workspace.revision, policy_generation=authority.generation(),
+        root=str(repo), subscriber_id="view:round-trip", origin="agent")
+    try:
+        with pytest.raises(MemoryRequestRejectedError, match="legacy index unavailable"):
+            await provider._call_tool("code_index", {"action": "index", "path": str(repo), **scope})
+        await provider.code_index_lifecycle(action="ensure", **admitted)
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            current = await provider.code_index_lifecycle(action="status", **admitted)
+            if current["lifecycle"] == "ready":
+                break
+            assert asyncio.get_running_loop().time() < deadline, current
+            await asyncio.sleep(0.02)
+        assert current["head_generation"] is not None
+        status = await provider._call_tool("code_index", {"action": "status", "path": str(repo), **scope})
+        assert status["files"] == 2
+        assert status["symbols"] == 2
+        hits = await provider._call_tool("graph_walk", {"op": "cues", "query": "orbital planner", **scope})
+        # Cues can return the same node through separate evidence channels.
+        symbols = {h["node"]["id"]: h["node"] for h in hits["hits"]
+                   if h["node"]["kind"] == "code_symbol" and h["node"].get("label") == "orbital_planner"}
+        assert len(symbols) == 1
+        symbol = next(iter(symbols.values()))
+        with sqlite3.connect("file:" + paths["FM_DB_PATH"] + "?mode=ro", uri=True) as database:
+            files_before = database.execute("SELECT * FROM code_files ORDER BY codebase,rel_path").fetchall()
+            payload = database.execute(
+                "SELECT payload_json FROM code_file_evidence WHERE owner=? AND workspace_id=? AND rel_path=?",
+                ("alice", workspace.id, "src/lib.py")).fetchone()
+            assert payload is not None
+            evidence = json.loads(payload[0])
+            declaration = next(item for item in evidence["declarations"] if item["name"] == "orbital_planner")
+            assert symbol["name"] == current["checkout_id"] + "::src/lib.py::" + declaration["id"]
+        with pytest.raises(MemoryRequestRejectedError, match="workspace") as refusal:
+            await provider._call_tool("memory_forget", {"action": "preview", "selector_kind": "record_id", "selector": symbol["id"], **scope})
+        assert refusal.value.code == "code_node_forget_requires_workspace_erase"
+        unchanged = await provider.code_index_lifecycle(action="status", **admitted)
+        assert unchanged["head_generation"] == current["head_generation"]
+        assert unchanged["lifecycle"] == "ready"
+        assert await provider._call_tool("graph_walk", {"op": "cues", "query": "orbital planner", **scope}) == hits
+        with sqlite3.connect("file:" + paths["FM_DB_PATH"] + "?mode=ro", uri=True) as database:
+            assert database.execute("SELECT * FROM code_files ORDER BY codebase,rel_path").fetchall() == files_before
+        impact = await provider._call_tool("code_index", {"action": "impact", "path": str(repo), "rel_path": "src/lib.py", **scope})
+        assert any(f.endswith("src/app.py") for f in impact["impacted_files"])
+        removed = await provider.code_index_lifecycle(action="remove", **{**admitted, "root": None})
+        assert removed["lifecycle"] == "erased"
+        with sqlite3.connect("file:" + paths["FM_DB_PATH"] + "?mode=ro", uri=True) as database:
+            assert database.execute("SELECT count(*) FROM code_files").fetchone()[0] == 0
+        remaining = await provider._call_tool("graph_walk", {"op": "cues", "query": "orbital planner", **scope})
+        assert remaining["hits"] == []
+    finally:
+        await asyncio.create_task(provider.shutdown())
 
 
 @needs_fm
@@ -369,3 +741,197 @@ async def test_two_process_owner_scope_isolates_curated_raw_and_graph(tmp_path):
             await bob.recall("key", owner="alice")
     finally:
         await asyncio.gather(alice.shutdown(), bob.shutdown())
+
+
+@needs_fm
+async def test_native_owner_reset_rejects_stale_preview_and_stays_erased_after_restart(tmp_path):
+    """Actual MCP closure, not a mocked nuke response or the live user's store."""
+    db_path = str((tmp_path / "reset" / "fm.db").resolve())
+    workspace = "reset-transport-workspace"
+
+    def provider_for(owner):
+        return FrankenmemoryProvider(
+            command=FM_BIN,
+            workspace_id=workspace,
+            env={"FM_DB_PATH": db_path, "FM_OWNER": owner, "FM_WORKSPACE_ID": workspace},
+        )
+
+    alice, bob = provider_for("alice"), provider_for("bob")
+    try:
+        await asyncio.gather(alice.initialize(), bob.initialize())
+        alice_record = await alice.remember("Alice remembers the amber reset marker.", owner="alice")
+        bob_record = await bob.remember("Bob remembers the cobalt retained marker.", owner="bob")
+        graph = {
+            "nodes": [{"kind": "object", "name": "reset-marker"}],
+            "cues": [{"cue": "reset marker", "node": {"kind": "object", "name": "reset-marker"}}],
+        }
+        for provider, owner in [(alice, "alice"), (bob, "bob")]:
+            await provider._call_tool("graph_upsert", {**graph, "owner": owner, "workspace_id": workspace})
+
+        async def cues(provider, owner):
+            return await provider._call_tool(
+                "graph_walk",
+                {"op": "cues", "query": "reset marker", "owner": owner, "workspace_id": workspace},
+            )
+
+        assert (await cues(alice, "alice"))["hits"]
+        bob_cues = await cues(bob, "bob")
+        assert bob_cues["hits"]
+        stale = await alice.reset_owner("reset_preview", owner="alice", components=["memories"])
+        assert set(stale["expanded_components"]) == {"memories", "graph", "ingest"}
+        assert stale["components"]["memories"]["count"] > 0
+        await alice.remember("Alice adds a late violet reset marker.", owner="alice")
+        # owner_lifecycle currently sends this refusal as an MCP internal
+        # error (the provider's transport-error subtype), unlike tool-level
+        # isError refusals. Assert the shared failure contract and exact reason;
+        # the state checks below prove the stale commit erased nothing.
+        with pytest.raises(MemoryProviderError, match="preview is stale"):
+            await alice.reset_owner(
+                "reset_commit", owner="alice", components=["memories"],
+                expected_counts=stale["components"],
+            )
+        assert await alice.get(alice_record.id, owner="alice") is not None
+
+        preview = await alice.reset_owner("reset_preview", owner="alice", components=["memories"])
+        result = await alice.reset_owner(
+            "reset_commit", owner="alice", components=["memories"],
+            expected_counts=preview["components"],
+        )
+        assert result["complete"] is True
+        for phase in ("after commit", "after restart"):
+            if phase == "after restart":
+                await asyncio.gather(alice.shutdown(), bob.shutdown())
+                alice, bob = provider_for("alice"), provider_for("bob")
+                await asyncio.gather(alice.initialize(), bob.initialize())
+            assert await alice.list_memories(owner="alice") == [], phase
+            assert await alice.recall("amber violet reset marker", owner="alice") == [], phase
+            assert await alice.get(alice_record.id, owner="alice") is None, phase
+            assert await alice.inspect_tier("raw", owner="alice") == [], phase
+            assert (await cues(alice, "alice"))["hits"] == [], phase
+            empty = await alice.reset_owner("reset_preview", owner="alice", components=["memories"])
+            assert all(empty["components"][part]["count"] == 0 for part in ("memories", "graph", "ingest")), phase
+            kept = await bob.get(bob_record.id, owner="bob")
+            assert kept is not None and kept.text == bob_record.text, phase
+            assert (await cues(bob, "bob"))["hits"] == bob_cues["hits"], phase
+    finally:
+        await asyncio.gather(alice.shutdown(), bob.shutdown())
+
+
+async def test_resolved_question_stays_visible_in_provider_reads(tmp_path, monkeypatch):
+    """S02 — a resolved question archives its compatibility row by design.
+
+    The provider read paths must still surface the answer: ``versioned_list``
+    hides only stale OPEN questions whose legacy row is gone, and ``list_page``
+    surfaces the resolved answer on the first page even though the legacy
+    cursor no longer returns the archived row.
+    """
+    from tests.test_memory_versioned import (
+        _curated,
+        _curated_add,
+        _curated_archive,
+        _question_block,
+    )
+    from src.memory_versioned import transition_knowledge
+
+    path = str(tmp_path / "fm.db")
+    _question_block(path, "name", "question-name")
+    _question_block(path, "stale", "question-stale")
+    _curated(path)
+    _curated_add(path, "question-name")
+    _curated_add(path, "question-stale", archived=1)
+    transition_knowledge(
+        "question-name", "resolve", owner="alice", expected_revision=1,
+        value="E", db_path=path,
+    )
+    # The legacy resolve archives the compatibility row; the stale question's
+    # row was archived without resolution.  From the wire side both are gone.
+    _curated_archive(path, "question-name", 1)
+
+    provider = FrankenmemoryProvider(
+        command="/unused",
+        env={"FM_DB_PATH": path, "FM_WORKSPACE_ID": "global"},
+    )
+
+    async def fake_call_tool(name, arguments):
+        if name == "list_memories":
+            return {"records": [], "next_cursor": None}
+        if name == "get_memory":
+            return {}
+        raise AssertionError(f"unexpected tool call: {name}")
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    listed = await provider.versioned_list(owner="alice")
+    listed_ids = {str(item.get("id")) for item in listed}
+    assert "question-name" in listed_ids
+    assert "question-stale" not in listed_ids
+
+    page, _cursor = await provider.list_page(owner="alice", cursor=None)
+    page_by_id = {str(record.id): record for record in page}
+    assert "question-name" in page_by_id
+    assert page_by_id["question-name"].text == "E"
+    assert "question-stale" not in page_by_id
+
+
+_BINDINGS_SCHEMA = """
+CREATE TABLE fm_v2_principal_bindings (
+    owner_id TEXT NOT NULL,
+    workspace_key TEXT NOT NULL DEFAULT '',
+    project_key TEXT NOT NULL DEFAULT '',
+    binding_key TEXT NOT NULL,
+    assistant_entity_id TEXT NOT NULL,
+    handler_entity_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(owner_id, workspace_key, project_key, binding_key)
+)
+"""
+
+
+async def test_reset_and_purge_drop_python_principal_bindings(tmp_path, monkeypatch):
+    """S03 — fm_v2_principal_bindings is Python-created and unknown to the
+    Rust schema, so the provider wrapper closes that gap after a successful
+    owner reset/purge; a stale binding would otherwise resurrect references
+    to entities the reset just erased."""
+    import sqlite3
+
+    path = str(tmp_path / "fm.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(_BINDINGS_SCHEMA)
+        conn.execute(
+            "INSERT INTO fm_v2_principal_bindings VALUES ('alice','','','binding','a','h',1,'t','t')"
+        )
+        conn.execute(
+            "INSERT INTO fm_v2_principal_bindings VALUES ('bob','','','binding','a','h',1,'t','t')"
+        )
+
+    provider = FrankenmemoryProvider(
+        command="/unused",
+        env={"FM_DB_PATH": path, "FM_WORKSPACE_ID": "global"},
+    )
+
+    async def fake_call_tool(name, arguments):
+        assert name == "owner_lifecycle"
+        if arguments["action"] == "purge":
+            return {"purged": True, "counts": {}}
+        return {"complete": True, "categories": {}}
+
+    monkeypatch.setattr(provider, "_call_tool", fake_call_tool)
+
+    await provider.reset_owner(
+        "reset_commit", owner="alice", components=["memories"], expected_counts={}
+    )
+    with sqlite3.connect(path) as conn:
+        remaining = {
+            row[0]
+            for row in conn.execute("SELECT owner_id FROM fm_v2_principal_bindings")
+        }
+    assert remaining == {"bob"}
+
+    await provider.purge_owner(owner="bob")
+    with sqlite3.connect(path) as conn:
+        remaining = conn.execute(
+            "SELECT count(*) FROM fm_v2_principal_bindings"
+        ).fetchone()
+    assert remaining == (0,)

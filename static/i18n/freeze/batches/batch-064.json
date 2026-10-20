@@ -1,0 +1,491 @@
+{
+  "id": "batch-064",
+  "group": "treehouse.lesson.house-collaborate",
+  "surface": "treehouse",
+  "entry_count": 40,
+  "character_count": 9889,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.body",
+      "source": "Open [Chat](clank://chat) and send one message. Switch to a different workspace (or open a different project), then return to the chat list and reopen the same conversation. The transcript is intact and the session is the same one.\n\n**Observable result:** the chat reopens with the same session identity and the earlier turns still visible. Opening a lesson never starts a model call; sending a message is the paid action and it is always yours to send.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:257"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.explanation",
+      "source": "A chat is bound to a session identity, not to the folder you were looking at. Change workspace and the chat keeps its session ID and transcript. Work context changes; the conversation does not silently become a different one.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:257"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.practice.cleanup",
+      "source": "Nothing to delete. The chat is your own normal conversation.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:288"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.practice.expectedEvidence",
+      "source": "The same chat reopens with its earlier turns after the workspace change.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:289"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.practice.seed",
+      "source": "Send any single message, then switch workspace and reopen this chat.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:287"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.practice.title",
+      "source": "One-message practice chat",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:286"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.result",
+      "source": "The same chat reopened in a different workspace, still recognisably itself.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:257"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.title",
+      "source": "A chat that keeps its identity when the workspace changes",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:257"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.chat-identity.whyThisHelps",
+      "source": "This is what makes it safe to organise work into workspaces without losing the thread of a conversation. Your follow-up questions still land in the same chat, and the answer still knows what came before.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:257"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.body",
+      "source": "Open [Chat](clank://chat) on a session and create a goal with a concrete requirement — for example, \"produce a summary and attach it as a document.\" Work toward it. When the work is done, verify the goal; verification needs the goal's identity and revision plus the evidence you named.\n\n**Observable result:** the goal reaches a verified completed state with its evidence references satisfied. A model statement alone cannot complete it.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:322"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.explanation",
+      "source": "A durable goal is more than a to-do. It records what must be true, and completing it requires the evidence you asked for — not a model saying \"done.\" Goals live with the session and survive the turn that created them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:322"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.practice.cleanup",
+      "source": "Complete or dismiss the goal normally; it is ordinary session state.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:352"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.practice.expectedEvidence",
+      "source": "The goal shows a verified completed state with its evidence reference recorded.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:353"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.practice.seed",
+      "source": "Create one goal whose completion requires a named document or artifact as evidence.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:351"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.practice.title",
+      "source": "Evidence-bearing practice goal",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:350"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.result",
+      "source": "A goal that carries its own requirement for proof before it is called done.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:322"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.title",
+      "source": "Durable goals and evidence",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:322"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.durable-goals.whyThisHelps",
+      "source": "This is the difference between work that looks finished and work you can check. When the goal demands evidence, the verification is yours to review, not a claim to trust.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:322"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.menmery-and-lore.body",
+      "source": "Open [Menmery](clank://memory) and review a pending candidate — accept one you actually want. Then search for a record and open it. Separately, open a document's history and look at the retained versions; those are Lore's material.\n\nRetention budgets live in [Settings → History](clank://settings/history). What is not retained cannot be restored.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:392"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.menmery-and-lore.explanation",
+      "source": "**Menmery** is the sidebar where memory lives: candidates waiting for your review, and search over what you kept. You accept a candidate explicitly; nothing is written behind your back. **Lore** is recovery: retained versions of your work and the receipts that let you restore them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:392"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.menmery-and-lore.result",
+      "source": "Two different tools, used for two different jobs.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:392"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.menmery-and-lore.title",
+      "source": "Menmery review and recall versus Lore recovery",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:392"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.menmery-and-lore.whyThisHelps",
+      "source": "Confusing the two wastes time. Menmery answers \"what does the assistant know about me?\" Lore answers \"how do I get yesterday's version back?\" Review is about the future; restore is about the past.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:392"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.models-brief.body",
+      "source": "Open [Settings → Providers](clank://settings/providers) and note which model is the Default Chat Model. Then open [Chat](clank://chat) and write a brief for something you actually need: name the outcome, the audience and one constraint. Send it on the model you chose.\n\n**What is distinctive:** the model is an account setting, not a hidden global. Providers you add are yours; the same settings panel shows which ones are configured.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:224"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.models-brief.explanation",
+      "source": "Models are configured per account in [Settings → Providers](clank://settings/providers). The Default Chat Model is what a new chat uses; Deep Research and other specialised work can inherit it or set their own. A provider is the service behind a model — add one and its models become selectable.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:224"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.models-brief.result",
+      "source": "A chat opened with the model you chose and a brief that names the outcome you want.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:224"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.models-brief.title",
+      "source": "Account-aware models and a useful brief",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:224"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.models-brief.whyThisHelps",
+      "source": "Choosing the model deliberately is the difference between a cheap draft and a careful review. A brief that names the outcome, the audience and the constraints gets you useful work on the first turn instead of three clarifying rounds.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:224"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.body",
+      "source": "Open [Meatbag Tasks](clank://tasks) and create a scheduled practice reminder. Inspect its payload and its run state. When it runs, open its task chat and confirm the answer is there.\n\n**Observable result:** the run produces a committed receipt and the answer appears in that task's own chat. Creating a schedule without a successful run does not count as work done.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:358"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.explanation",
+      "source": "You can put the clanker on a schedule. When a scheduled task runs, its answer returns to the original task chat — not to whatever conversation happens to be open. Task identity is preserved so follow-up questions land where the work is.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:358"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.practice.cleanup",
+      "source": "Cancel the reminder if you do not want it to run; cancellation is safe and reversible.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:386"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.practice.expectedEvidence",
+      "source": "The task shows its payload and either a committed run receipt or a cancelled status you chose.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:387"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.practice.seed",
+      "source": "Create a one-shot practice reminder and inspect its scheduled payload before it runs.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:385"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.practice.title",
+      "source": "Practice reminder",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:384"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.result",
+      "source": "A scheduled task whose result lands in the chat that owns the task.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:358"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.title",
+      "source": "Scheduled work and answering in its original task chat",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:358"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.scheduled-work.whyThisHelps",
+      "source": "Automation is only useful if its output is findable. A result that answers in the task's own chat keeps the receipt, the transcript and your follow-up in one place.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:358"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.tool-activity.body",
+      "source": "Open [File access](clank://settings/file-access) and read what is permitted. Then open a chat where the assistant used a tool and expand the tool activity for that turn.\n\n**What is distinctive:** permission is a setting you can read, and activity is a record you can inspect. Neither is hidden in the answer text.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:294"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.tool-activity.explanation",
+      "source": "The assistant's reach is bounded by explicit settings. [File access](clank://settings/file-access) states what it may read and write; tool activity in a chat shows what actually ran. Authority is granted in advance, not invented mid-task.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:294"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-collaborate.tool-activity.result",
+      "source": "A clear picture of what the assistant may touch and what it just did.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:294"
+      ],
+      "context": "result",
+      "complexity": "label"
+    }
+  ]
+}

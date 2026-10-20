@@ -21,11 +21,26 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import (
+    ReadFileTool,
+    WriteFileTool,
+    EditFileTool,
+    ApplyPatchTool,
+    LsTool,
+    GlobTool,
+    GrepTool,
+    GetWorkspaceTool,
+    PublishFileTool,
+    ManageFilesTool,
+    scheduled_file_handler,
+)
+from .coding_tools import TodoWriteTool
+from .code_tools import SearchCodeTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
 from .bg_job_tools import ManageBgJobsTool
+from src.desktop_capture import capture_tool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -34,28 +49,34 @@ from .admin_tools import (
 )
 
 TOOL_HANDLERS = {
+    "search_code": SearchCodeTool().execute,
     "bash": BashTool().execute,
     "python": PythonTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
-    "read_file": ReadFileTool().execute,
-    "write_file": WriteFileTool().execute,
-    "edit_file": EditFileTool().execute,
-    "ls": LsTool().execute,
-    "glob": GlobTool().execute,
-    "grep": GrepTool().execute,
+    "read_file": scheduled_file_handler("read_file", ReadFileTool().execute),
+    "write_file": scheduled_file_handler("write_file", WriteFileTool().execute),
+    "edit_file": scheduled_file_handler("edit_file", EditFileTool().execute),
+    "apply_patch": scheduled_file_handler("apply_patch", ApplyPatchTool().execute),
+    "todowrite": TodoWriteTool().execute,
+    "ls": scheduled_file_handler("ls", LsTool().execute),
+    "glob": scheduled_file_handler("glob", GlobTool().execute),
+    "grep": scheduled_file_handler("grep", GrepTool().execute),
     "create_document": CreateDocumentTool().execute,
     "update_document": UpdateDocumentTool().execute,
     "edit_document": EditDocumentTool().execute,
     "suggest_document": SuggestDocumentTool().execute,
     "manage_documents": ManageDocumentTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
+    "publish_file": scheduled_file_handler("publish_file", PublishFileTool().execute),
+    "manage_files": scheduled_file_handler("manage_files", ManageFilesTool().execute),
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
+    "capture_desktop": capture_tool,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,

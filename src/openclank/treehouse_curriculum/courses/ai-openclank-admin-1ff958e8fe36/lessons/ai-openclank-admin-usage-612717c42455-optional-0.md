@@ -1,0 +1,1 @@
+If one provider omits cached-token counts, record cached input as unknown. Do not calculate a cache-hit ratio from zero. When comparing delegated work, include workers and synthesis or label the narrower session scope.

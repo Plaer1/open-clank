@@ -1,7 +1,8 @@
 import path from "path"
+import { createHash } from "node:crypto"
 import { Provider } from "@/provider"
 import { Log } from "@/util"
-import { Context, Duration, Effect, Layer, Record, Schedule, Ref } from "effect"
+import { Context, Duration, Effect, Layer, Record, Schedule, Ref, Cause } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep, pipe } from "remeda"
@@ -20,7 +21,7 @@ import { Wildcard, ToolCompat } from "@/util"
 import { asSchema } from "@ai-sdk/provider-utils"
 import { SessionID } from "@/session/schema"
 import * as Session from "@/session/session"
-import { migrateProjectMemory } from "./checkpoint-paths"
+import { assertCurrentProjectMemory } from "./checkpoint-paths"
 import { ProjectID } from "@/project/schema"
 import { Auth } from "@/auth"
 import { Installation } from "@/installation"
@@ -32,10 +33,78 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { ActorRegistry } from "@/actor/registry"
 import { Memory } from "@/memory"
 import { isRetryableTransientError } from "./retry"
+import { MCP_TOOL_SEARCH_ID } from "@/tool/mcp-tool-search"
+import { ManagedProvider } from "@/acp/managed-provider"
+import { withSdkDispatches } from "@/provider/logging-transport"
+import { contextWindow } from "./overflow"
+
+/** Final actual request-frame hook, also exercised without a model/provider.
+ * UTF8 bytes conservatively upper-bound text tokens, never image/audio cost. */
+export async function appendFinalCodeContext(input: {
+  sessionID: string; messages: ModelMessage[]; system: string[]; options: Record<string, unknown>
+  tools: Record<string, Tool>; activeTools: string[]; usable: number; abort: AbortSignal
+  ephemeral?: boolean; agentID?: string
+  resolvedTools?: unknown; providerFrame?: boolean
+}, read = ManagedProvider.readCodeContext): Promise<ModelMessage[]> {
+  if (input.ephemeral || (input.agentID && input.agentID !== "main") || input.abort.aborted || !Number.isSafeInteger(input.usable) || input.usable <= 0 || input.messages.length > 512 || input.activeTools.length > 128) return input.messages
+  // Unknown media costs must not be approximated by URL/string byte length.
+  function textCostKnown(value: unknown, depth = 0): boolean {
+    if (depth > 32 || value instanceof Uint8Array || value instanceof URL) return false
+    if (!value || typeof value !== "object") return true
+    if (Array.isArray(value)) return value.every((v) => textCostKnown(v, depth + 1))
+    const row = value as Record<string, unknown>
+    if (typeof row.type === "string" && /image|audio|video|file/.test(row.type)) return false
+    return Object.values(row).every((v) => textCostKnown(v, depth + 1))
+  }
+  if (!textCostKnown(input.messages)) return input.messages
+  try {
+    const schemas: Record<string, unknown> = {}
+    if (input.resolvedTools === undefined) for (const name of input.activeTools) {
+      if (!input.tools[name]) return input.messages
+      schemas[name] = { ...input.tools[name], inputSchema: await Promise.resolve(asSchema(input.tools[name].inputSchema).jsonSchema) }
+    }
+    const frame = () => JSON.stringify({ messages: input.messages, system: input.system, options: input.options, tools: input.resolvedTools ?? schemas })
+    const initial = frame()
+    const bytes = Buffer.byteLength(initial, "utf8")
+    const available = Math.min(2048, input.usable - bytes - 1024)
+    if (bytes > 1024 * 1024 || available < 768 || input.abort.aborted) return input.messages
+    const latest = [...input.messages].reverse().find((m) => m.role === "user")
+    const query = typeof latest?.content === "string" ? latest.content : Array.isArray(latest?.content) ? latest.content.filter((p) => p.type === "text").map((p) => "text" in p ? p.text : "").join("\n") : ""
+    if (!query || Buffer.byteLength(query, "utf8") > 4096) return input.messages
+    const fingerprint = createHash("sha256").update(initial).digest("hex")
+    const card = await read({ sessionID: input.sessionID, query, availableByteTokens: available, requestFingerprint: fingerprint, retainedMessages: input.messages as unknown as Record<string, unknown>[] }, input.abort)
+    if (!card || input.abort.aborted || frame() !== initial || !card.includes("[code-evidence-v1 ")) return input.messages
+    const message: ModelMessage = { role: "user", content: input.providerFrame ? [{ type: "text", text: card }] : card }
+    if (Buffer.byteLength(JSON.stringify(message), "utf8") + 1 > available) return input.messages
+    const out = [...input.messages]
+    const index = out.findLastIndex((m) => m.role === "user")
+    out.splice(index < 0 ? out.length : index, 0, message)
+    return out
+  } catch {
+    return input.messages
+  }
+}
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 type Result = Awaited<ReturnType<typeof streamText>>
+
+/** Host projection metadata is an internal routing contract, not an upstream
+ * provider option.  Keep it available on the catalog model for adapter
+ * selection, then remove it from the request option bag before the AI SDK
+ * serializes providerOptions. */
+export function stripManagedProjectionOptions(options: Record<string, any>): Record<string, any> {
+  return Object.fromEntries(Object.entries(options).filter(([key]) => !key.startsWith("_openclank")))
+}
+
+/** Keep one-shot structured title generation compatible with DeepSeek's
+ * non-thinking forced-tool API; primary chat retains its reasoning settings. */
+export function applyEphemeralStructuredOptions(options: Record<string, any>, input: { ephemeral?: boolean; toolChoice?: string; model: Pick<Provider.Model, "providerID" | "api"> }, familyID?: string): void {
+  if (input.ephemeral && input.toolChoice === "required" && input.model.api.npm === "@ai-sdk/openai-compatible" && (familyID === "deepseek" || input.model.providerID === "deepseek")) {
+    options.thinking = { type: "disabled" }
+    delete options.reasoningEffort
+  }
+}
 
 /**
  * Match transient errors that the PERSISTENT_RETRY layer should retry.
@@ -191,13 +260,24 @@ export type StreamInput = {
   messages: ModelMessage[]
   small?: boolean
   tools: Record<string, Tool>
+  activeTools?: string[]
   retries?: number
   toolChoice?: "auto" | "required" | "none"
   agentID?: string
+  /** Isolated one-shot generation (titles and similar helpers). */
+  ephemeral?: boolean
+  /** Correlates an isolated request without changing the owning session. */
+  requestID?: string
 }
 
 export type StreamRequest = StreamInput & {
   abort: AbortSignal
+  // Set on the reactive one-shot retry after a Bedrock/gateway prefill-rejection
+  // 400: hard-prune the trailing assistant (prefill) message(s) before building
+  // the request so the resend ends with a user/tool message. See stream(). The
+  // proactive guard (ProviderTransform.ensureTrailingUserMessage in message())
+  // normally makes this unnecessary; this is a last-resort backstop.
+  dropAssistantPrefill?: boolean
 }
 
 export type Event = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
@@ -238,12 +318,12 @@ const live: Layer.Layer<
       user: MessageV2.User
       sessionID: string
       agentID?: string
+      ephemeral?: boolean
     }) {
       const system: string[] = []
       system.push(
         [
-          // use agent prompt otherwise provider prompt
-          ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+          ...SystemPrompt.agent(input.agent, input.model),
           // any custom prompt passed into this call
           ...input.system,
           // any custom prompt from last user message
@@ -268,6 +348,7 @@ const live: Layer.Layer<
       // R2): it can't Edit MEMORY.md, so teaching it the file-memory manual
       // would assert capabilities the turn doesn't have.
       const servesCheckpoint =
+        !input.ephemeral &&
         input.agent.name !== "chat" &&
         (yield* actorReg.servesCheckpoint(SessionID.make(input.sessionID), input.agentID))
       if (servesCheckpoint) {
@@ -282,7 +363,7 @@ const live: Layer.Layer<
         // create an uppercase sibling and orphan the legacy content). The two
         // checkpoint-flow call sites cover the writer/rebuild paths; this covers
         // the "agent edits MEMORY.md before any checkpoint" path. Idempotent.
-        yield* Effect.promise(() => migrateProjectMemory(projectID)).pipe(Effect.ignore)
+        yield* Effect.promise(() => assertCurrentProjectMemory(projectID))
         system.push(buildMemoryInstructions(SessionID.make(input.sessionID), projectID, yield* memory.root()))
       }
 
@@ -306,11 +387,15 @@ const live: Layer.Layer<
     })
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      const correlationID = input.requestID ?? input.sessionID
+      const managedScope = ManagedProvider.enabled()
+        ? ManagedProvider.requireScope(input.sessionID)
+        : undefined
       const l = log
         .clone()
         .tag("providerID", input.model.providerID)
         .tag("modelID", input.model.id)
-        .tag("session.id", input.sessionID)
+        .tag(input.requestID ? "request.id" : "session.id", correlationID)
         .tag("small", (input.small ?? false).toString())
         .tag("agent", input.agent.name)
         .tag("mode", input.agent.mode)
@@ -321,16 +406,24 @@ const live: Layer.Layer<
 
       const [language, cfg, item, info] = yield* Effect.all(
         [
-          provider.getLanguage(input.model),
+          provider.getLanguage(input.model, managedScope),
           config.get(),
           provider.getProvider(input.model.providerID),
-          auth.get(input.model.providerID),
+          managedScope?.credential
+            ? Effect.succeed(managedScope.credential)
+            : auth.get(input.model.providerID),
         ],
         { concurrency: "unbounded" },
       )
 
-      // TODO: move this to a proper hook
-      const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
+      const managedMetadata = managedScope ? Provider.managedAdapterMetadata(item, input.model) : undefined
+
+      // ChatGPT subscription uses the Codex Responses transport, whose system
+      // prompt belongs in `instructions`. Runtime provider IDs are normalized
+      // connection IDs, so managed mode must classify it from host metadata.
+      const isOpenaiOauth = managedMetadata
+        ? managedMetadata.familyID === "openai" && managedMetadata.billingLane === "subscription" && info?.type === "oauth"
+        : item.id === "openai" && info?.type === "oauth"
 
       const system =
         input.prebuiltSystem ??
@@ -341,6 +434,7 @@ const live: Layer.Layer<
           user: input.user,
           sessionID: input.sessionID,
           agentID: input.agentID,
+          ephemeral: input.ephemeral,
         }))
 
       const variant =
@@ -354,21 +448,37 @@ const live: Layer.Layer<
             sessionID: input.sessionID,
             providerOptions: item.options,
           })
-      const options: Record<string, any> = pipe(
+      const mergedOptions: Record<string, any> = pipe(
         base,
         mergeDeep(input.model.options),
         mergeDeep(input.agent.options),
         mergeDeep(variant),
       )
+      const options = managedMetadata ? stripManagedProjectionOptions(mergedOptions) : mergedOptions
+      applyEphemeralStructuredOptions(options, input, managedMetadata?.familyID)
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
       }
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
-      const messages = isOpenaiOauth
-        ? input.messages
+      if (input.ephemeral && isWorkflow) return yield* Effect.fail(new Error("Ephemeral workflow generation is unsupported"))
+      // Reactive prefill-rejection backstop. The PRIMARY mechanism is the
+      // proactive guard in ProviderTransform.message()
+      // (ensureTrailingUserMessage): we never send a request ending in an
+      // assistant (prefill) turn, and we never delete a completed reply to do so.
+      // This reactive path is defense-in-depth: if any code path still slips a
+      // trailing assistant through to the wire (e.g. a provider-side transform
+      // re-adds one) and the backend 400s on it, run() re-runs with this flag set
+      // to hard-prune the trailing assistant turn(s) so the resend ends with a
+      // user/tool message. It should effectively never fire, but keeping it is
+      // cheap and safe.
+      const requestMessages = input.dropAssistantPrefill
+        ? ProviderTransform.dropTrailingAssistantPrefill(input.messages)
+        : input.messages
+      let messages = isOpenaiOauth
+        ? requestMessages
         : isWorkflow
-          ? input.messages
+          ? requestMessages
           : [
               ...system.map(
                 (x): ModelMessage => ({
@@ -376,10 +486,19 @@ const live: Layer.Layer<
                   content: x,
                 }),
               ),
-              ...input.messages,
+              ...requestMessages,
             ]
 
-      const params = yield* plugin.trigger(
+      const defaults = {
+        temperature: input.model.capabilities.temperature
+          ? (input.agent.temperature ?? ProviderTransform.temperature(input.model))
+          : undefined,
+        topP: input.agent.topP ?? ProviderTransform.topP(input.model),
+        topK: ProviderTransform.topK(input.model),
+        maxOutputTokens: ProviderTransform.maxOutputTokens(input.model),
+        options,
+      }
+      const params = input.ephemeral ? defaults : yield* plugin.trigger(
         "chat.params",
         {
           sessionID: input.sessionID,
@@ -399,7 +518,7 @@ const live: Layer.Layer<
         },
       )
 
-      const { headers } = yield* plugin.trigger(
+      const { headers } = input.ephemeral ? { headers: {} } : yield* plugin.trigger(
         "chat.headers",
         {
           sessionID: input.sessionID,
@@ -414,6 +533,8 @@ const live: Layer.Layer<
       )
 
       const tools = resolveTools(input)
+      const requestedActiveTools = new Set(input.activeTools ?? Object.keys(tools))
+      const activeTools = Object.keys(tools).filter((name) => name !== "invalid" && requestedActiveTools.has(name))
 
       // LiteLLM and some Anthropic proxies require the tools parameter to be present
       // when message history contains tool calls, even if no tools are being used.
@@ -431,8 +552,9 @@ const live: Layer.Layer<
       // during compaction), inject a stub tool to satisfy the validation requirement.
       // The stub description explicitly tells the model not to call it.
       if (
-        (isLiteLLMProxy || input.model.providerID.includes("github-copilot")) &&
-        Object.keys(tools).length === 0 &&
+        (isLiteLLMProxy ||
+          (managedMetadata ? managedMetadata.adapterID === "copilot-chat" : input.model.providerID.includes("github-copilot"))) &&
+        activeTools.length === 0 &&
         hasToolCalls(input.messages)
       ) {
         tools["_noop"] = tool({
@@ -445,6 +567,7 @@ const live: Layer.Layer<
           }),
           execute: async () => ({ output: "", title: "", metadata: {} }),
         })
+        activeTools.push("_noop")
       }
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
@@ -547,7 +670,7 @@ const live: Layer.Layer<
               if (prop !== "startSpan") return Reflect.get(target, prop, receiver)
               return (...args: Parameters<typeof target.startSpan>) => {
                 const span = target.startSpan(...args)
-                span.setAttribute("session.id", input.sessionID)
+                span.setAttribute(input.requestID ? "request.id" : "session.id", correlationID)
                 return span
               }
             },
@@ -558,10 +681,32 @@ const live: Layer.Layer<
       l.debug("streamText starting", {
         messageID: input.user.id,
         msgCount: messages.length,
-        toolCount: Object.keys(tools).length,
+        registeredToolCount: Object.keys(tools).length,
+        activeToolCount: activeTools.length,
       })
+      if (!input.ephemeral) yield* plugin
+        .trigger(
+          "session.llm.request",
+          {
+            sessionID: input.sessionID,
+            providerID: input.model.providerID,
+            modelID: input.model.id,
+            trajectory: [
+              ...system.map((content) => ({ role: "system", content })),
+              ...requestMessages,
+            ],
+            systemPrompt: system,
+          },
+          {},
+        )
+        .pipe(Effect.ignore)
 
+      let sdkDispatchIDs: string[] = []
       return streamText({
+        onStepFinish(step) {
+          Session.getUsage({ model: input.model, usage: step.usage, metadata: step.providerMetadata,
+            captureScope: managedScope, captureDispatchIDs: sdkDispatchIDs, mainReply: !input.ephemeral })
+        },
         onError(error) {
           l.debug("streamText error", {
             messageID: input.user.id,
@@ -573,11 +718,10 @@ const live: Layer.Layer<
           })
         },
         async experimental_repairToolCall(failed) {
-          const registered = Object.keys(tools).filter((x) => x !== "invalid")
           const repaired = await ToolCompat.repairToolCall({
             toolName: failed.toolCall.toolName,
             input: failed.toolCall.input,
-            toolNames: registered,
+            toolNames: activeTools,
             getSchema: (toolName) => failed.inputSchema({ toolName }),
           })
           if (repaired) {
@@ -604,14 +748,14 @@ const live: Layer.Layer<
         topP: params.topP,
         topK: params.topK,
         providerOptions: ProviderTransform.providerOptions(input.model, params.options),
-        activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
+        activeTools,
         tools: ProviderTransform.tools(tools, input.model),
         toolChoice: input.toolChoice,
         maxOutputTokens: params.maxOutputTokens,
         abortSignal: input.abort,
         headers: {
-          "x-session-affinity": input.sessionID,
-          ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+          ...(!input.ephemeral ? { "x-session-affinity": input.sessionID } : {}),
+          ...(!input.ephemeral && input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
           ...input.model.headers,
           ...headers,
           "User-Agent": `mimocode/${InstallationVersion}`,
@@ -625,17 +769,33 @@ const live: Layer.Layer<
         // VISIBLE processor-level SessionRetry.policy own long-haul resilience —
         // it publishes `type: "retry"` so the `[retrying attempt #N]` banner
         // shows, and its per-attempt delay is capped at 30s.
-        maxRetries: input.retries ?? 2,
+        // Managed mode centralizes retry/failover in the account-aware
+        // processor. An SDK-internal retry is invisible and would reuse a
+        // credential after the host has cooled or revoked that account.
+        maxRetries: input.ephemeral ? 0 : (ManagedProvider.enabled() ? 0 : (input.retries ?? 2)),
         messages,
         model: wrapLanguageModel({
           model: language,
           middleware: [
             {
               specificationVersion: "v3" as const,
+              async wrapStream({ doStream }) {
+                sdkDispatchIDs = []
+                return withSdkDispatches(managedScope, sdkDispatchIDs, doStream)
+              },
               async transformParams(args) {
                 if (args.type === "stream") {
                   // @ts-expect-error
                   args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
+                  if (managedScope) {
+                    const { prompt, tools: resolvedTools, ...finalOptions } = args.params
+                    args.params.prompt = await appendFinalCodeContext({
+                      sessionID: input.sessionID, messages: prompt as unknown as ModelMessage[], system,
+                      options: finalOptions as Record<string, unknown>, tools, activeTools, resolvedTools,
+                      usable: contextWindow({ cfg, model: input.model }).usable, abort: input.abort,
+                      ephemeral: input.ephemeral, agentID: input.agentID, providerFrame: true,
+                    }) as typeof prompt
+                  }
                 }
                 return args.params
               },
@@ -644,68 +804,125 @@ const live: Layer.Layer<
         }),
         experimental_telemetry: {
           isEnabled: cfg.experimental?.openTelemetry,
-          functionId: "session.llm",
+          functionId: input.ephemeral ? "title.llm" : "session.llm",
           tracer: telemetryTracer,
           metadata: {
             userId: cfg.username ?? "unknown",
-            sessionId: input.sessionID,
+            ...(input.requestID ? { requestId: correlationID } : { sessionId: input.sessionID }),
           },
         },
       })
     })
 
-    const stream: Interface["stream"] = (input) =>
-      Stream.scoped(
-        Stream.unwrap(
-          Effect.gen(function* () {
-            const ctrl = yield* Effect.acquireRelease(
-              Effect.sync(() => new AbortController()),
-              (ctrl) => Effect.sync(() => ctrl.abort()),
-            )
-            const attemptRef = yield* Ref.make(0)
+    const stream: Interface["stream"] = (input) => {
+      // Build the scoped stream for one attempt. `dropAssistantPrefill` forces
+      // run() to hard-prune the trailing assistant prefill before send — used only
+      // by the reactive one-shot retry below.
+      const attempt = (dropAssistantPrefill: boolean) =>
+        Stream.scoped(
+          Stream.unwrap(
+            Effect.gen(function* () {
+              const ctrl = yield* Effect.acquireRelease(
+                Effect.sync(() => new AbortController()),
+                (ctrl) => Effect.sync(() => ctrl.abort()),
+              )
+              const attemptRef = yield* Ref.make(0)
 
-            const publishRetryEvent = (error: unknown, nextAttempt: number) =>
-              Effect.gen(function* () {
-                log.debug("retry attempt", {
-                  sessionID: input.sessionID,
-                  messageID: input.user.id,
-                  attempt: nextAttempt,
-                  reason: error instanceof Error ? error.message : String(error),
-                })
-                if (nextAttempt > 10) return
-                const delayMs = Math.min(500 * 2 ** (nextAttempt - 1), 300_000)
-                yield* Effect.promise(() =>
-                  Bus.publish(Session.Event.RetryAttempt, {
-                    sessionID: SessionID.make(input.sessionID),
+              const publishRetryEvent = (error: unknown, nextAttempt: number) =>
+                Effect.gen(function* () {
+                  log.debug("retry attempt", {
+                    sessionID: input.sessionID,
                     messageID: input.user.id,
                     attempt: nextAttempt,
-                    maxAttempts: 10,
                     reason: error instanceof Error ? error.message : String(error),
-                    nextDelayMs: delayMs,
                   })
-                )
-              })
+                  if (nextAttempt > 10) return
+                  const delayMs = Math.min(500 * 2 ** (nextAttempt - 1), 300_000)
+                  yield* Effect.promise(() =>
+                    Bus.publish(Session.Event.RetryAttempt, {
+                      sessionID: SessionID.make(input.sessionID),
+                      messageID: input.user.id,
+                      attempt: nextAttempt,
+                      maxAttempts: 10,
+                      reason: error instanceof Error ? error.message : String(error),
+                      nextDelayMs: delayMs,
+                    })
+                  )
+                })
 
-            const streamWithTelemetry = run({ ...input, abort: ctrl.signal }).pipe(
-              Effect.tapError((error) => {
-                if (!isTransientCapacityError(error)) return Effect.void
-                return Ref.updateAndGet(attemptRef, (n) => n + 1).pipe(
-                  Effect.flatMap((nextAttempt) => publishRetryEvent(error, nextAttempt))
-                )
-              })
-            )
+              const streamWithTelemetry = run({ ...input, abort: ctrl.signal, dropAssistantPrefill }).pipe(
+                Effect.tapError((error) => {
+                  if (!isTransientCapacityError(error)) return Effect.void
+                  return Ref.updateAndGet(attemptRef, (n) => n + 1).pipe(
+                    Effect.flatMap((nextAttempt) => publishRetryEvent(error, nextAttempt))
+                  )
+                })
+              )
 
-            const result = yield* streamWithTelemetry.pipe(
-              Effect.retry({
-                while: isTransientCapacityError,
-                schedule: persistentRetrySchedule,
-              }),
-            )
+              const result = ManagedProvider.enabled()
+                ? yield* streamWithTelemetry
+                : yield* streamWithTelemetry.pipe(
+                    Effect.retry({
+                      while: isTransientCapacityError,
+                      schedule: persistentRetrySchedule,
+                    }),
+                  )
 
-            return Stream.fromAsyncIterable(result.fullStream, (e) => (e instanceof Error ? e : new Error(String(e))))
-          }),
-        ),
+              // Structurally identical to the pre-guard stream: a bare scoped
+              // stream over the provider's fullStream. No per-event combinator, no
+              // extra catch layer — so the normal (non-error) event flow and the
+              // AbortController scope teardown are exactly as before. The reactive
+              // prefill retry is layered lazily below and only pays a cost when an
+              // actual error surfaces.
+              return Stream.fromAsyncIterable(result.fullStream, (e) =>
+                e instanceof Error ? e : new Error(String(e)),
+              )
+            }),
+          ),
+        )
+
+      // Promote a prefill-rejection 400 — which arrives as an in-band
+      // `{ type: "error", error }` event, not a stream fault — into a stream
+      // FAILURE so the reactive retry can catch it. `Stream.flatMap` short-circuits
+      // every non-matching event straight through with a pure `Stream.succeed` (no
+      // per-event Effect fiber, unlike `Stream.mapEffect`), and the failing branch
+      // is only ever constructed for the specific error event. On a clean stream
+      // this is a transparent passthrough.
+      const promotePrefillRejection = (stream: Stream.Stream<Event, Error, never>) =>
+        stream.pipe(
+          Stream.flatMap((event) =>
+            event.type === "error" && ProviderTransform.isAssistantPrefillRejection(event.error)
+              ? Stream.fail(event.error instanceof Error ? event.error : new Error(String(event.error)))
+              : Stream.succeed(event),
+          ),
+        )
+
+      // Reactive prefill-rejection backstop. The proactive
+      // ProviderTransform.ensureTrailingUserMessage guard runs on every request,
+      // so we should never send a trailing assistant prefill and this path should
+      // effectively never fire. It remains as defense-in-depth: if any path still
+      // slips a trailing assistant through to the wire and the backend 400s with
+      // "does not support assistant message prefill", we key off that deterministic
+      // error body — not the model id — and retry exactly ONCE with the prefill
+      // hard-pruned. Guarded to a single reprune so a persistent failure surfaces
+      // the retry's OWN error, falling back to the original prefill cause only when
+      // the resend is again prefill-rejected.
+      return promotePrefillRejection(attempt(false)).pipe(
+        Stream.catchCause((primaryCause) => {
+          if (!ProviderTransform.isAssistantPrefillRejection(Cause.squash(primaryCause)))
+            return Stream.failCause(primaryCause)
+          // Pruned resend passes events through untouched: any residual error flows
+          // to the processor and surfaces normally (no promotion, no loop).
+          return attempt(true).pipe(
+            Stream.catchCause((retryCause) =>
+              ProviderTransform.isAssistantPrefillRejection(Cause.squash(retryCause))
+                ? Stream.failCause(primaryCause)
+                : Stream.failCause(retryCause),
+            ),
+          )
+        }),
       )
+    }
 
     return Service.of({ stream, buildSystemArray })
   }),
@@ -724,12 +941,17 @@ export const defaultLayer = Layer.suspend(() =>
   ),
 )
 
-function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
+function resolveTools(input: Pick<StreamInput, "tools" | "activeTools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
     Object.keys(input.tools),
     Agent.runtimePermission(input.agent, input.permission),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  return Record.filter(
+    input.tools,
+    (_, key) =>
+      input.user.tools?.[key] !== false &&
+      (!disabled.has(key) || (key === MCP_TOOL_SEARCH_ID && input.activeTools?.includes(key) === true)),
+  )
 }
 
 // Check if messages contain any tool-call content

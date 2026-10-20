@@ -1,57 +1,9 @@
 """Tests for model_context.py — local endpoint detection, token estimation, known model lookup."""
 
-import sys
-import types
-
 import pytest
 
 import src.model_context as model_context
 from src.model_context import is_local_endpoint, estimate_tokens, _lookup_known
-
-
-class _Column:
-    def __init__(self, name):
-        self.name = name
-
-    def __eq__(self, value):
-        return ("eq", self.name, value)
-
-
-class _ModelEndpoint:
-    is_enabled = _Column("is_enabled")
-
-
-class _Query:
-    def __init__(self, rows):
-        self.rows = list(rows)
-
-    def filter(self, *conditions):
-        for condition in conditions:
-            if isinstance(condition, tuple) and condition[0] == "eq":
-                _, field, value = condition
-                self.rows = [row for row in self.rows if getattr(row, field) == value]
-        return self
-
-    def all(self):
-        return list(self.rows)
-
-
-class _Db:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def query(self, model):
-        return _Query(self.rows)
-
-    def close(self):
-        pass
-
-
-def _install_endpoint_db(monkeypatch, rows):
-    mod = types.ModuleType("core.database")
-    mod.ModelEndpoint = _ModelEndpoint
-    mod.SessionLocal = lambda: _Db(rows)
-    monkeypatch.setitem(sys.modules, "core.database", mod)
 
 
 class TestIsLocalEndpoint:
@@ -79,17 +31,8 @@ class TestIsLocalEndpoint:
         # 100.64.0.0/10 is the CGNAT range Tailscale uses.
         assert is_local_endpoint("http://100.64.0.1:5000/v1/chat/completions") is True
 
-    def test_configured_tailscale_proxy_is_remote(self, monkeypatch):
-        _install_endpoint_db(monkeypatch, [
-            types.SimpleNamespace(
-                base_url="http://100.117.136.97:34521/v1",
-                endpoint_kind="proxy",
-                api_key="fake-key",
-                is_enabled=True,
-            )
-        ])
-
-        assert is_local_endpoint("http://100.117.136.97:34521/v1/chat/completions") is False
+    def test_tailscale_address_is_local_without_legacy_endpoint_authority(self):
+        assert is_local_endpoint("http://100.117.136.97:34521/v1/chat/completions") is True
 
     def test_openai_is_remote(self):
         assert is_local_endpoint("https://api.openai.com/v1/chat/completions") is False
@@ -254,20 +197,14 @@ class TestGetContextLength:
 
         assert model_context.get_context_length("mimo://acp", "unknown-mimo-model") == model_context.DEFAULT_CONTEXT
 
-    def _proxy_db(self, monkeypatch):
-        _install_endpoint_db(monkeypatch, [
-            types.SimpleNamespace(
-                base_url="http://100.117.136.97:34521/v1",
-                endpoint_kind="proxy",
-                api_key="fake-key",
-                is_enabled=True,
-            )
-        ])
+    def _proxy_discovery_mode(self, monkeypatch):
+        """Exercise the bounded GET-only migration helper without DB rows."""
+        monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda _url: "proxy")
 
     def test_configured_proxy_known_model_skips_model_listing(self, monkeypatch):
         # A model covered by the known-context table must still resolve without
         # touching /models — the cheap path the proxy short-circuit exists for.
-        self._proxy_db(monkeypatch)
+        self._proxy_discovery_mode(monkeypatch)
 
         def fake_get(*args, **kwargs):
             raise AssertionError("/models must not be queried for a known proxy model")
@@ -281,7 +218,7 @@ class TestGetContextLength:
         # A model missing from the known table (e.g. a new OpenRouter model)
         # must report the catalog's real window, not the bare default (#4886).
         # The catalog is fetched once per endpoint and reused for other models.
-        self._proxy_db(monkeypatch)
+        self._proxy_discovery_mode(monkeypatch)
         fetches = []
 
         def fake_get(url, *args, **kwargs):
@@ -302,7 +239,7 @@ class TestGetContextLength:
     def test_configured_proxy_unknown_model_falls_back_to_default(self, monkeypatch):
         # If the catalog can be read but doesn't list the model, keep the
         # conservative default rather than guessing.
-        self._proxy_db(monkeypatch)
+        self._proxy_discovery_mode(monkeypatch)
 
         def fake_get(url, *args, **kwargs):
             return _FakeResp({"data": [{"id": "some-other-model", "context_length": 4096}]})
@@ -314,7 +251,7 @@ class TestGetContextLength:
 
     def test_configured_proxy_catalog_fetch_failure_uses_default(self, monkeypatch):
         # A failed/unreachable catalog must not raise — fall back to the default.
-        self._proxy_db(monkeypatch)
+        self._proxy_discovery_mode(monkeypatch)
 
         def fake_get(url, *args, **kwargs):
             raise RuntimeError("network down")
@@ -325,15 +262,6 @@ class TestGetContextLength:
         assert model_context.get_context_length(endpoint, "unknown-proxy-model") == model_context.DEFAULT_CONTEXT
 
     def test_keyed_zai_endpoint_never_makes_unauthenticated_context_probe(self, monkeypatch):
-        _install_endpoint_db(monkeypatch, [
-            types.SimpleNamespace(
-                base_url="https://api.z.ai/api/coding/paas/v4",
-                endpoint_kind="auto",
-                api_key="fake-key",
-                is_enabled=True,
-            )
-        ])
-
         def fake_get(*args, **kwargs):
             raise AssertionError("keyed first-party context lookup must not send an unauthenticated request")
 

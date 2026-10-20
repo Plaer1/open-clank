@@ -1,0 +1,1 @@
+The 5×5 partition separates rooms until doorway(2,2) opens. Alternatively carve the declared path (0,2),(1,2),(2,2),(3,2),(4,2) through an initially solid grid: that route exists, but no room-size guarantee follows. Partitioning controls room shape; a digger controls its carved trace. Neither alone proves every gameplay requirement.

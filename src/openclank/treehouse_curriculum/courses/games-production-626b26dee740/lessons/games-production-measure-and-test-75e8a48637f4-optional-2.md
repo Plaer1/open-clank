@@ -1,0 +1,1 @@
+Record build/OS and actual pass/fail for normal win, exact collision edge, restart after timeout/failure and a missing image in a copied package. A reproduced failure is useful evidence of pending work; it is not a successful package receipt.

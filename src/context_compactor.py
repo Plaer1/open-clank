@@ -5,16 +5,23 @@ Auto-compacts conversation history when approaching context window limits.
 Summarizes older messages via the same LLM, preserving key context.
 """
 
+import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from src.model_context import get_context_length, estimate_tokens
-from src.llm_core import llm_call_async
-from src.endpoint_resolver import resolve_endpoint
 from core.models import ChatMessage
 
 logger = logging.getLogger(__name__)
+
+
+async def _complete_text(**kwargs) -> str:
+    """Lazy import avoids loading the managed engine for trim-only callers."""
+    from src.openclank.modality_facade import complete_text
+
+    return await complete_text(**kwargs)
 
 
 def _content_as_text(content: Any) -> str:
@@ -68,6 +75,14 @@ What is the system/code/task state right now? What was the last thing discussed?
 - Specific values: model names, ports, paths, credentials references, versions
 
 Keep the summary under 1000 tokens. Be dense — every token should carry information. Do not include pleasantries or meta-commentary."""
+
+
+def normalize_compaction_summary(summary: str) -> str:
+    """Remove redundant leading title text before adding our wrapper."""
+    text = (summary or "").strip()
+    text = re.sub(r"^(?:#{1,3}\s*)?Conversation Summary\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\*\*Conversation Summary\*\*\s*", "", text, flags=re.IGNORECASE)
+    return text.lstrip()
 
 
 def _sanitize_tool_messages(msgs: List[Dict]) -> List[Dict]:
@@ -139,7 +154,7 @@ def _truncate_text_to_token_budget(text: str, token_budget: int) -> str:
 
     notice = (
         "\n\n[Notice: the pasted message was too large for this model's context "
-        "window, so Odysseus kept the beginning and end.]"
+        "window, so Open Clank kept the beginning and end.]"
     )
     keep_chars = max(200, max_chars - len(notice))
     head_len = max(100, int(keep_chars * 0.7))
@@ -309,6 +324,30 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     return result
 
 
+def session_has_persistent_engine(session) -> bool:
+    """True when a persistent ACP engine compactor is the sole owner.
+
+    Binds on the actual protocol (``model_target.transport == "acp"`` /
+    managed engine URLs), never on missing ``core.models.Session`` attributes
+    (``has_persistent_engine`` / ``mimo_session_id`` / ``transport``) or UI
+    mode labels. Finite/plain host contexts return False and keep host
+    compaction.
+    """
+    endpoint_url = str(getattr(session, "endpoint_url", "") or "").strip()
+    if endpoint_url.startswith("mimo://") or endpoint_url.startswith("openclank://"):
+        return True
+    try:
+        from src.endpoint_resolver import resolve_model_target
+
+        target = resolve_model_target(
+            endpoint_url=endpoint_url,
+            model=getattr(session, "model", None),
+        )
+        return target.transport == "acp"
+    except Exception:
+        return False
+
+
 async def maybe_compact(
     session,
     endpoint_url: str,
@@ -316,11 +355,27 @@ async def maybe_compact(
     messages: List[Dict],
     headers: Optional[Dict] = None,
     owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+    has_persistent_engine: bool = False,
 ) -> tuple:
     """Check context usage and compact if above threshold.
 
+    ``headers`` is retained for compatibility but is never used for execution;
+    summary generation resolves through the owner's managed ``utility`` route.
+
+    ``has_persistent_engine`` is the actual execution protocol/session binding
+    (ACP managed sessions), not a UI Agent/Chat label. When it is true the
+    single active compactor is the engine-side MiMo compactor and this host
+    pre-dispatch compactor must not run. Finite/plain contexts keep host
+    compaction, which writes an active-context projection instead of replacing
+    source history.
+
     Returns (messages, context_length, was_compacted).
     """
+    if has_persistent_engine:
+        # One active compactor per execution context: MiMo owns ACP sessions.
+        return messages, get_context_length(endpoint_url, model), False
+
     context_length = get_context_length(endpoint_url, model)
     used = estimate_tokens(messages)
     pct = (used / context_length) * 100 if context_length else 0
@@ -361,12 +416,6 @@ async def maybe_compact(
         if "[Conversation summary" in m.get("content", "")
     )
 
-    # Use utility model if configured, otherwise fall back to session model
-    util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
-    compact_url = util_url or endpoint_url
-    compact_model = util_model or model
-    compact_headers = util_headers if util_url else headers
-
     prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace(
         "{count}", str(len(older))
     ).replace(
@@ -378,16 +427,17 @@ async def maybe_compact(
     ]
 
     try:
-        summary = await llm_call_async(
-            compact_url,
-            compact_model,
-            summary_messages,
-            temperature=0.2,
-            max_tokens=SUMMARY_MAX_TOKENS,
-            headers=compact_headers,
+        completion_owner = owner if owner is not None else getattr(session, "owner", None)
+        summary = await asyncio.wait_for(
+            _complete_text(
+                owner=completion_owner or "",
+                messages=summary_messages,
+                purpose="utility",
+                root_operation_id=root_operation_id,
+                temperature=0.2,
+                max_output_tokens=SUMMARY_MAX_TOKENS,
+            ),
             timeout=30,
-            owner=owner,
-            session_id=getattr(session, "id", None),
         )
     except Exception as e:
         logger.error(f"Compaction summary failed: {e}")
@@ -395,6 +445,7 @@ async def maybe_compact(
         # silently dropping the older half. was_compacted=False signals the
         # caller nothing was summarized; trim_for_context handles length.
         return messages, context_length, False
+    summary = normalize_compaction_summary(summary)
 
     summary_msg = {
         "role": "system",
@@ -421,7 +472,7 @@ async def maybe_compact(
 
 def _update_session_history(session, split_point: int, summary: str,
                             system_msg_count: int = 0):
-    """Update the in-memory session history after compaction.
+    """Write the active-context projection after host finite-context compaction.
 
     `split_point` is the index in `convo_msgs` (system-stripped). The
     in-memory `session.history` includes leading system messages, so the
@@ -429,6 +480,10 @@ def _update_session_history(session, split_point: int, summary: str,
     Prepending `session.history[:system_msg_count]` to the new history
     preserves persona, preset, and RAG system messages that would
     otherwise be dropped.
+
+    This writes an active projection through ``replace_messages``; the
+    canonical source parts were already archived by the session manager and
+    must remain retrievable after every successful or failed compaction.
     """
     if not session or not hasattr(session, "history"):
         return
@@ -441,10 +496,17 @@ def _update_session_history(session, split_point: int, summary: str,
     # messages so the system prompt survives compaction.
     system_prefix = list(session.history[:system_msg_count])
     recent_history = session.history[effective_split:]
+    summary = normalize_compaction_summary(summary)
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",
-        metadata={"compacted": True, "summarized_count": split_point},
+        metadata={
+            "compacted": True,
+            "summarized_count": split_point,
+            "compaction_trigger": "automatic",
+            "compaction_actor": "host_finite",
+            "source_boundary_split": effective_split,
+        },
     )
     new_history = system_prefix + [summary_msg] + recent_history
     try:
@@ -453,6 +515,19 @@ def _update_session_history(session, split_point: int, summary: str,
     except Exception:
         manager = None
     if manager and getattr(session, "id", None):
-        if manager.replace_messages(session.id, new_history):
+        # Projection writer: archives source, preserves retained IDs, never
+        # rekeys original history identity. Archive-unavailable raises
+        # recoverable and aborts — never fall through to an in-memory rewrite
+        # that would look like a successful compaction.
+        from src.openclank.conversation_archive import ArchiveUnavailableError
+
+        try:
+            if manager.replace_messages(session.id, new_history):
+                return
+        except ArchiveUnavailableError:
+            logger.warning(
+                "active projection write aborted; archive unavailable for %s",
+                getattr(session, "id", None),
+            )
             return
     session.history = new_history

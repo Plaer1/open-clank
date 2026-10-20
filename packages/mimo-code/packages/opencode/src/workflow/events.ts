@@ -46,7 +46,7 @@ export const WorkflowAgentFailed = BusEvent.define(
     label: z.string().optional(),
     /** Phase title at failure time, either AgentOpts.phase or run.currentPhase. */
     phase: z.string().optional(),
-    reason: z.enum(["over-cap", "spawn-reject", "timeout", "actor-error", "no-deliverable"]),
+    reason: z.enum(["over-cap", "spawn-reject", "timeout", "actor-error", "no-deliverable", "model-unavailable"]),
     /** For actor-error: the outcome.error message if available. */
     errorMessage: z.string().optional(),
   }),

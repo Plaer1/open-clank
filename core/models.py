@@ -37,6 +37,11 @@ class ChatMessage:
     role: str
     content: str
     metadata: Optional[Dict[str, Any]] = None
+    # Server-reserved durable identity. It lets a root operation be handed to
+    # preprocessing children before the message insert while remaining the
+    # actual chat_messages primary key. It is never accepted from API input or
+    # included as a separate response field.
+    persistence_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for API responses."""
@@ -76,6 +81,12 @@ class Session:
     is_important: bool = False
     message_count: int = 0
     incognito: bool = False
+    # Stable normalized provider execution identity. The endpoint fields above
+    # remain a nonsecret compatibility projection for existing clients.
+    provider_model_route_id: Optional[str] = None
+    # Stable server Workspace identity. The physical path is derived only
+    # after current policy resolution for each turn.
+    workspace_id: Optional[str] = None
 
     def __post_init__(self):
         if self.headers is None:

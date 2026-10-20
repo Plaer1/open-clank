@@ -1,0 +1,1 @@
+Weight each type's prior by its signal likelihood, then normalize.

@@ -1,12 +1,23 @@
 """User preferences API — per-user key/value store backed by a JSON file."""
 import json
 import os
-from typing import Optional
-from fastapi import APIRouter, Request
+import threading
+import tempfile
+
+PREFERENCE_LOCK = threading.RLock()
+from typing import Iterable, Optional
+from fastapi import APIRouter, HTTPException, Request
 from src.auth_helpers import get_current_user
 from src.constants import USER_PREFS_FILE
 
 PREFS_FILE = USER_PREFS_FILE
+_MEMORY_MODES = frozenset({"off", "automatic", "manual"})
+_PERMISSION_MODES = frozenset({"manual", "yolo", "auto"})
+_TRUST_PREF_MASTER = "memory_trust_auto"
+_TRUST_PREF_KINDS = "memory_trust_auto_kinds"
+_TRUST_KINDS = frozenset({"instruction", "persona", "fact", "episodic", "fabric", "wiki"})
+_MOBILE_CONTROL_SIDE_PREF = "mobile_control_side"
+_MOBILE_CONTROL_SIDES = frozenset({"left", "right", "system"})
 
 
 def _load():
@@ -21,7 +32,8 @@ def _load():
 
 def _save(prefs):
     os.makedirs(os.path.dirname(PREFS_FILE) or ".", exist_ok=True)
-    tmp = f"{PREFS_FILE}.tmp.{os.getpid()}"
+    fd, tmp = tempfile.mkstemp(prefix=".prefs-", dir=os.path.dirname(PREFS_FILE) or ".")
+    os.close(fd)
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(prefs, f, indent=2)
         f.flush()
@@ -38,11 +50,12 @@ def _load_for_user(user: Optional[str] = None) -> dict:
             users = all_prefs["_users"]
             return dict(next(iter(users.values()), {}))
         return dict(all_prefs["_users"].get(user, {}))
-    # Legacy flat format — return as-is
+    if user is not None and all_prefs:
+        raise ValueError("Legacy preferences require .clanker/tools/migrations/python/secondary.py prefs")
     return dict(all_prefs)
 
 
-def _save_for_user(user: Optional[str], prefs: dict):
+def _save_for_user_unlocked(user: Optional[str], prefs: dict):
     """Save preferences for a specific user."""
     all_prefs = _load()
     if user is None:
@@ -61,9 +74,42 @@ def _save_for_user(user: Optional[str], prefs: dict):
         _save(prefs)
         return
     if "_users" not in all_prefs:
+        if all_prefs:
+            raise ValueError("Legacy preferences require .clanker/tools/migrations/python/secondary.py prefs")
         all_prefs = {"_users": {}}
     all_prefs["_users"][user] = prefs
     _save(all_prefs)
+
+
+def _save_for_user(user: Optional[str], prefs: dict, *, allow_logging=False):
+    with PREFERENCE_LOCK:
+        updated = dict(prefs)
+        if not allow_logging:
+            current = _load_for_user(user)
+            if "logging_preferences" in current:
+                updated["logging_preferences"] = current["logging_preferences"]
+            else:
+                updated.pop("logging_preferences", None)
+        return _save_for_user_unlocked(user, updated)
+
+
+def _update_for_user(user, patch):
+    with PREFERENCE_LOCK:
+        current = _load_for_user(user)
+        current.update(patch)
+        _save_for_user(user, current)
+        return current
+
+
+def _mobile_control_side(value) -> str:
+    """Normalize the mobile layout preference without mutating stored prefs."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _MOBILE_CONTROL_SIDES:
+            return normalized
+    return "system"
+
+
 
 
 def setup_prefs_routes():
@@ -72,20 +118,59 @@ def setup_prefs_routes():
     @router.get("")
     async def get_all_prefs(request: Request):
         user = get_current_user(request)
-        return _load_for_user(user)
+        prefs = _load_for_user(user)
+        if _MOBILE_CONTROL_SIDE_PREF in prefs:
+            prefs[_MOBILE_CONTROL_SIDE_PREF] = _mobile_control_side(
+                prefs[_MOBILE_CONTROL_SIDE_PREF]
+            )
+        return prefs
 
     @router.get("/{key}")
     async def get_pref(request: Request, key: str):
         user = get_current_user(request)
         prefs = _load_for_user(user)
-        return {"key": key, "value": prefs.get(key)}
+        value = prefs.get(key, False) if key == "code_context_enabled" else prefs.get(key)
+        if key == "permission_mode":
+            value = value if value in _PERMISSION_MODES else "manual"
+        elif key == _MOBILE_CONTROL_SIDE_PREF:
+            value = _mobile_control_side(value)
+        return {"key": key, "value": value}
 
     @router.put("/{key}")
     async def set_pref(request: Request, key: str, body: dict):
         user = get_current_user(request)
         prefs = _load_for_user(user)
-        prefs[key] = body.get("value")
-        _save_for_user(user, prefs)
+        value = body.get("value") if isinstance(body, dict) else None
+        if key == "permission_mode":
+            if not isinstance(value, str) or value.strip().lower() not in _PERMISSION_MODES:
+                raise HTTPException(status_code=422, detail="permission_mode must be manual, yolo, or auto")
+            value = value.strip().lower()
+        elif key == _TRUST_PREF_MASTER:
+            if not isinstance(value, bool):
+                raise HTTPException(status_code=422, detail="memory_trust_auto must be a boolean")
+        elif key == "code_context_enabled":
+            if type(value) is not bool:
+                raise HTTPException(status_code=422, detail="code_context_enabled must be a boolean")
+        elif key == _TRUST_PREF_KINDS:
+            if not isinstance(value, dict) or any(
+                kind not in _TRUST_KINDS or not isinstance(enabled, bool)
+                for kind, enabled in value.items()
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="memory_trust_auto_kinds must map known kinds to booleans",
+                )
+            value = {kind: value[kind] for kind in sorted(value)}
+        elif key == _MOBILE_CONTROL_SIDE_PREF:
+            if not isinstance(value, str) or value.strip().lower() not in _MOBILE_CONTROL_SIDES:
+                raise HTTPException(
+                    status_code=422,
+                    detail="mobile_control_side must be left, right, or system",
+                )
+            value = value.strip().lower()
+        if key == "logging_preferences":
+            raise HTTPException(422, "Use the validated Logging policy endpoint")
+        prefs = _update_for_user(user, {key: value})
         return {"key": key, "value": prefs[key]}
 
     return router

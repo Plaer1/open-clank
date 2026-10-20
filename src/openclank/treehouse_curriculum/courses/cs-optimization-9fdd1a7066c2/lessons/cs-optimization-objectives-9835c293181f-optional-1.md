@@ -1,0 +1,1 @@
+An attractive infeasible option is not a solution to the constrained problem.

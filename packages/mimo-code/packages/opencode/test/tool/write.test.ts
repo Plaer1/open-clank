@@ -11,10 +11,18 @@ import { Format } from "../../src/format"
 import { Truncate } from "../../src/tool"
 import { Tool } from "../../src/tool"
 import { Agent } from "../../src/agent/agent"
-import { SessionID, MessageID } from "../../src/session/schema"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
+import type { MessageV2 } from "../../src/session/message-v2"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import {
+  bindMemorySessionClient,
+  closeSharedMcpClient,
+  registerManagedMcpClient,
+  unregisterManagedMcpClient,
+} from "../../src/memory/mcp-client"
 
 const ctx = {
   sessionID: SessionID.make("ses_test-write-session"),
@@ -22,13 +30,50 @@ const ctx = {
   callID: "",
   agent: "build",
   abort: AbortSignal.any([]),
-  messages: [],
+  messages: [] as MessageV2.WithParts[],
   metadata: () => Effect.void,
   ask: () => Effect.void,
 }
 
+function withRead(filePath: string, fingerprint?: string) {
+  const messageID = MessageID.make("msg_read")
+  return {
+    ...ctx,
+    messages: [
+      {
+        info: {
+          id: messageID,
+          sessionID: ctx.sessionID,
+          role: "assistant",
+        },
+        parts: [
+          {
+            id: PartID.make("part_read"),
+            messageID,
+            sessionID: ctx.sessionID,
+            type: "tool",
+            tool: "read",
+            callID: "call_read",
+            state: {
+              status: "completed",
+              input: { file_path: filePath },
+              output: "",
+              title: `Read ${filePath}`,
+              metadata: fingerprint ? { fingerprint } : {},
+              time: { start: 0, end: 0 },
+            },
+          },
+        ],
+      },
+    ] as unknown as MessageV2.WithParts[],
+  }
+}
+
 afterEach(async () => {
   await Instance.disposeAll()
+  await closeSharedMcpClient()
+  unregisterManagedMcpClient("lifetools_policy_test")
+  delete process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE
 })
 
 const it = testEffect(
@@ -66,6 +111,17 @@ describe("tool.write", () => {
 
           expect(result.output).toContain("Wrote file successfully")
           expect(result.metadata.exists).toBe(false)
+          expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+          expect(result.metadata.file.operation).toBe("write")
+          expect(result.metadata.file.page).toEqual({
+            unit: "byte",
+            cursor: 0,
+            next_cursor: null,
+            has_more: false,
+            returned: 13,
+            total: 13,
+          })
+          expect(result.metadata.file.fingerprint).toBe(result.metadata.fingerprint)
 
           const content = yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))
           expect(content).toBe("Hello, World!")
@@ -103,7 +159,7 @@ describe("tool.write", () => {
         Effect.gen(function* () {
           const filepath = path.join(dir, "existing.txt")
           yield* Effect.promise(() => fs.writeFile(filepath, "old content", "utf-8"))
-          const result = yield* run({ file_path: filepath, content: "new content" })
+          const result = yield* run({ file_path: filepath, content: "new content" }, withRead(filepath))
 
           expect(result.output).toContain("Wrote file successfully")
           expect(result.metadata.exists).toBe(true)
@@ -119,10 +175,29 @@ describe("tool.write", () => {
         Effect.gen(function* () {
           const filepath = path.join(dir, "file.txt")
           yield* Effect.promise(() => fs.writeFile(filepath, "old", "utf-8"))
-          const result = yield* run({ file_path: filepath, content: "new" })
+          const result = yield* run({ file_path: filepath, content: "new" }, withRead(filepath))
 
           expect(result.metadata).toHaveProperty("filepath", filepath)
           expect(result.metadata).toHaveProperty("exists", true)
+        }),
+      ),
+    )
+
+    it.live("requires a prior read before overwriting an existing file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "prior-read.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "original", "utf-8"))
+
+          const exit = yield* run({ file_path: filepath, content: "replacement" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          const msg = exit._tag === "Failure" ? String(exit.cause) : ""
+          expect(msg).toContain("has not been read")
+          expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("original")
+
+          const ok = yield* run({ file_path: filepath, content: "replacement" }, withRead(filepath))
+          expect(ok.output).toContain("Wrote file successfully")
         }),
       ),
     )
@@ -214,6 +289,83 @@ describe("tool.write", () => {
   })
 
   describe("error handling", () => {
+    it.live("leaves the file untouched when shared project policy rejects it", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "blocked.txt")
+          const client = {
+            callTool: async () => ({
+              content: [{ type: "text", text: JSON.stringify({ enforced: true, allowed: false }) }],
+            }),
+          } as unknown as Client
+          process.env.OPEN_CLANK_PROJECT_POLICY_BRIDGE = "required"
+          registerManagedMcpClient("lifetools_policy_test", client)
+          bindMemorySessionClient(
+            ctx.sessionID,
+            "lifetools_policy_test",
+            "alice",
+            "global",
+          )
+
+          const exit = yield* run({ file_path: filepath, content: "blocked" }).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => Bun.file(filepath).exists())).toBeFalse()
+        }),
+      ),
+    )
+
+    it.live("refuses to overwrite an existing binary file", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const binaryPath = path.join(dir, "binary.txt")
+          const original = Buffer.from([0x61, 0x00, 0x62])
+          yield* Effect.promise(() => fs.writeFile(binaryPath, original))
+
+          const exit = yield* run({ file_path: binaryPath, content: "replacement" }, withRead(binaryPath)).pipe(
+            Effect.exit,
+          )
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(binaryPath))).toEqual(original)
+        }),
+      ),
+    )
+
+    it.live("rejects an expected_fingerprint mismatch and leaves the file untouched", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "guarded.txt")
+          yield* Effect.promise(() => fs.writeFile(filepath, "original", "utf-8"))
+          const staleFingerprint = "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+          const exit = yield* run(
+            {
+              file_path: filepath,
+              content: "replacement",
+              expected_fingerprint: staleFingerprint,
+            },
+            withRead(filepath, staleFingerprint),
+          ).pipe(Effect.exit)
+
+          expect(exit._tag).toBe("Failure")
+          expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("original")
+        }),
+      ),
+    )
+
+    it.live("reports Lore history status honestly and does not claim recoverability", () =>
+      provideTmpdirInstance((dir) =>
+        Effect.gen(function* () {
+          const filepath = path.join(dir, "history-status.txt")
+          const result = yield* run({ file_path: filepath, content: "body" })
+          expect(result.metadata.history.durable).toBe(false)
+          expect(result.metadata.history.coverage).not.toBe("ExactBatch")
+          expect(["unconfigured", "paused", "failed"]).toContain(result.metadata.history.status ?? "unconfigured")
+        }),
+      ),
+    )
+
     // Skip: root bypasses file permissions, chmod 0o444 has no effect when running as root
     it.live.skip("throws error when OS denies write access", () =>
       provideTmpdirInstance((dir) =>
@@ -221,7 +373,9 @@ describe("tool.write", () => {
           const readonlyPath = path.join(dir, "readonly.txt")
           yield* Effect.promise(() => fs.writeFile(readonlyPath, "test", "utf-8"))
           yield* Effect.promise(() => fs.chmod(readonlyPath, 0o444))
-          const exit = yield* run({ file_path: readonlyPath, content: "new content" }).pipe(Effect.exit)
+          const exit = yield* run({ file_path: readonlyPath, content: "new content" }, withRead(readonlyPath)).pipe(
+            Effect.exit,
+          )
           expect(exit._tag).toBe("Failure")
         }),
       ),

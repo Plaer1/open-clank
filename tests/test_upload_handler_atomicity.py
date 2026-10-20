@@ -259,6 +259,20 @@ def test_partial_write_recovery_via_bak(tmp_path):
     )
 
 
+def test_index_cache_reloads_same_mtime_replacement(tmp_path):
+    """A replacement with preserved mtime must not return stale cached JSON."""
+    handler = _make_handler(tmp_path)
+    db_path = _db_path(handler)
+    Path(db_path).write_text('{"entry":"one"}', encoding="utf-8")
+    assert handler._load_upload_index() == {"entry": "one"}
+
+    before = os.stat(db_path)
+    Path(db_path).write_text('{"entry":"two"}', encoding="utf-8")
+    os.utime(db_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert handler._load_upload_index() == {"entry": "two"}
+
+
 # ---------------------------------------------------------------------------
 # Atomicity primitive audit on the production module.
 # ---------------------------------------------------------------------------
@@ -283,9 +297,9 @@ def test_atomic_write_primitives_present_in_production_code():
     assert "self._index_lock" in text, (
         f"{src_path} is missing self._index_lock — concurrent writers are not serialised."
     )
-    # The dedupe path must do its read inside the lock too.
-    assert text.count("with self._index_lock:") >= 2, (
-        "Both dedupe and insert RMW sites must be under _index_lock."
+    # The dedupe path must do its read under the production guard too.
+    assert text.count("with self._index_guard():") >= 2, (
+        "Both dedupe and insert RMW sites must use the serialized index guard."
     )
 
 

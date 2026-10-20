@@ -1,0 +1,1 @@
+Python integers can grow subject to available memory; that does not make fixed-width formats unbounded. Never transfer one language's overflow behavior to another.

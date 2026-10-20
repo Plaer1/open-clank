@@ -6,10 +6,34 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
-from src.search import comprehensive_web_search, fetch_webpage_content
+from src.search import SearchService, fetch_webpage_content
+
+
+async def _search_web_context(query: str, *, time_filter=None, owner: str = ""):
+    """Canonical chat search adapter returning context and source dictionaries."""
+    response = await SearchService().search(
+        query, caller="chat", mode="results", freshness=time_filter,
+        owner=owner or "", deadline=30,
+    )
+    if response.error:
+        raise RuntimeError(response.error.get("message", response.status))
+    sources = [result.as_dict() for result in response.results]
+    context = "\n\n".join(f"{result['title']}\n{result['snippet']}" for result in sources)
+    return context, sources
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from services.memory.principal_context import render_identity_template
 
 logger = logging.getLogger(__name__)
+
+
+def _handler_display_label(owner: Optional[str]) -> str:
+    """Owner-scoped Handler label for read-time %USER% rendering (fail-safe)."""
+    try:
+        from services.memory.principal_context import resolve_handler_display_label
+
+        return resolve_handler_display_label(owner)
+    except Exception:
+        return "Handler"
 
 
 def _clean_search_query(query: str, max_len: int = 200) -> str:
@@ -83,6 +107,18 @@ class ChatProcessor:
         except Exception:
             return {}
 
+    async def append_code_context(self, messages, *, message, session, owner, use_memory=True, incognito=False, context_length=None, auth_manager=None):
+        """Final post-trim host seam; never inspects archival history."""
+        if not owner or not use_memory or incognito:
+            return messages
+        from src.openclank.code_context import append_code_context
+        from src.openclank.file_policy import FilePolicyRepository
+        if auth_manager is None:
+            return messages
+        return await append_code_context(messages=messages, message=message, session=session, provider=self.memory_provider,
+            repository=FilePolicyRepository(), auth_manager=auth_manager, prefs=self._trust_prefs(owner), owner=owner,
+            use_memory=use_memory, incognito=incognito, context_length=context_length, prefs_reader=lambda: self._trust_prefs(owner))
+
     async def build_context_preface(
         self,
         message: str,
@@ -97,6 +133,7 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        root_operation_id: Optional[str] = None,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -176,7 +213,11 @@ class ChatProcessor:
                 try:
                     hits = await self.memory_provider.recall(message, owner=owner, top_k=3)
                     if hits:
-                        ext_text = "\n".join([f"- {h.memory.text}" for h in hits])
+                        handler_label = _handler_display_label(owner)
+                        ext_text = "\n".join([
+                            f"- {render_identity_template(h.memory.text, handler_label=handler_label)}"
+                            for h in hits
+                        ])
                         preface.append(untrusted_context_message(
                             "saved memory: retrieved context",
                             (
@@ -187,7 +228,7 @@ class ChatProcessor:
                         used_ids = []
                         for h in hits:
                             self._last_used_memories.append({
-                                "text": h.memory.text,
+                                "text": render_identity_template(h.memory.text, handler_label=handler_label),
                                 "category": h.memory.category,
                                 "type": "pinned" if h.memory.pinned else "recalled",
                             })
@@ -238,19 +279,18 @@ class ChatProcessor:
         web_sources = []
         if use_web:
             try:
-                from src.llm_core import llm_call
-
-                t_url, t_model, t_headers = session.endpoint_url, session.model, session.headers
+                from src.openclank.modality_facade import complete_text
 
                 # Default fallback is the first non-empty line of the original user message
                 fallback_query = next((line.strip() for line in message.split("\n") if line.strip()), "")
                 search_query = fallback_query
 
                 try:
-                    generated_query = llm_call(
-                        t_url,
-                        t_model,
-                        [
+                    generated_query = (
+                        await complete_text(
+                            owner=owner or "local-installation",
+                            purpose="utility",
+                            messages=[
                             {
                                 "role": "system",
                                 "content": (
@@ -259,11 +299,11 @@ class ChatProcessor:
                                 ),
                             },
                             {"role": "user", "content": message},
-                        ],
-                        headers=t_headers,
-                        temperature=0.1,
-                        max_tokens=50,
-                        timeout=15,
+                            ],
+                            temperature=0.1,
+                            max_output_tokens=50,
+                            root_operation_id=root_operation_id,
+                        )
                     ).strip()
 
                     if generated_query:
@@ -289,8 +329,8 @@ class ChatProcessor:
 
                 if search_query:
                     # Execute web search using the final selected query
-                    web_context, web_sources = comprehensive_web_search(
-                        search_query, time_filter=time_filter, return_sources=True
+                    web_context, web_sources = await _search_web_context(
+                        search_query, time_filter=time_filter, owner=owner or ""
                     )
                     preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:

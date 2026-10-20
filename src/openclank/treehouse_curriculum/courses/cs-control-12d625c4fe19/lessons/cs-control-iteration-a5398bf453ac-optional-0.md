@@ -1,0 +1,1 @@
+Give each (i,total) state and identify the lost progress step.

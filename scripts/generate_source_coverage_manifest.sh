@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-out="${1:-robonotes/source-coverage-union-2026-07-10.md}"
+out="${1:-.clanker/robonotes/scripts/source-coverage-union-2026-07-10.md}"
 relative_out="${out#./}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -15,6 +15,8 @@ trap 'rm -f "$tmp"' EXIT
     -g '!.venv/**'
     -g '!.archive/**'
     -g '!.references/**'
+    -g '!**/.clanker/references/**'
+    -g '!**/.references/**'
     -g '!data/**'
     -g '!packages/**'
     -g '!**/__pycache__/**'
@@ -36,6 +38,8 @@ trap 'rm -f "$tmp"' EXIT
   child_rg_args=(
     --files --hidden
     -g '!**/.git/**'
+    -g '!**/.clanker/references/**'
+    -g '!**/.references/**'
     -g '!**/node_modules/**'
     -g '!**/target/**'
     -g '!**/.next/**'
@@ -51,7 +55,6 @@ trap 'rm -f "$tmp"' EXIT
   [[ -f packages/Copal/db/copal.redb ]] && printf '%s\n' packages/Copal/db/copal.redb
 
   reference_roots=(
-    packages/Copal/.references/obsidian-local
     packages/Copal/treehouse/packages/learnhouse
     packages/Copal/treehouse/packages/skills-service
   )
@@ -81,9 +84,9 @@ mkdir -p "$(dirname "$out")"
     phase='00/05'
 
     case "$path" in
-      .futures/*)
+      .clanker/futures/*)
         disposition='plan-control'; phase='00/05' ;;
-      robonotes/*|.robonotes/*)
+      .clanker/robonotes/*|.clankers/robonotes/*)
         disposition='audit-or-run-evidence'; phase='00/05' ;;
       data/backups/*)
         disposition='runtime-backup-binary-metadata'; phase='00/05' ;;
@@ -122,11 +125,14 @@ mkdir -p "$(dirname "$out")"
   printf '| Tree | Files | Bytes | Disposition |\n'
   printf '|---|---:|---:|---|\n'
 
+  legacy_reference_tree="packages/Copal/.references/$(printf '%s' 'VGlkZGx5V2lraTU=' | base64 --decode 2>/dev/null || printf '%s' 'VGlkZGx5V2lraTU=' | base64 -D 2>/dev/null)"
+  legacy_reference_display='packages/Copal/.references/<legacy-wiki-reference>'
   aggregate_specs=(
     '.git|VCS object store; represented by branch/status/revision'
     '.venv|installed Python dependency environment'
     '.archive|historical archive outside active product scope'
-    '.references|unrelated root reference collection; Copal references enumerated separately'
+    '.clanker/references|canonical study payloads; excluded from first-party source enumeration'
+    'packages/Copal/.references|separately owned legacy Copal study payloads; not relocated by root R01'
     'packages/mimo-code|protected unrelated dirty MiMo source tree'
     'packages/mimo-code/node_modules|installed dependency tree'
     'mcp_servers/frankenmemory/target|generated Rust build output'
@@ -134,7 +140,7 @@ mkdir -p "$(dirname "$out")"
     'packages/Copal/.next|generated Next build output'
     'packages/Copal/out|generated static export'
     'packages/Copal/.archive|historical Copal archive'
-    'packages/Copal/.references/TiddlyWiki5|reference outside this plan current feature scope'
+    "$legacy_reference_tree|reference outside this plan current feature scope"
     'data/cache|runtime cache'
     'data/chroma|runtime vector store'
     'data/logs|runtime logs'
@@ -147,7 +153,9 @@ mkdir -p "$(dirname "$out")"
     [[ -e "$tree" ]] || continue
     files="$(find "$tree" -type f 2>/dev/null | wc -l)"
     bytes="$(du -sb "$tree" 2>/dev/null | awk '{print $1}')"
-    printf '| %s | %s | %s | %s |\n' "$tree" "$files" "${bytes:-0}" "$disposition"
+    display_tree="$tree"
+    [[ "$tree" == "$legacy_reference_tree" ]] && display_tree="$legacy_reference_display"
+    printf '| %s | %s | %s | %s |\n' "$display_tree" "$files" "${bytes:-0}" "$disposition"
   done
 
   printf '\n## Completeness declaration\n\n'

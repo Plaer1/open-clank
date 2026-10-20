@@ -177,6 +177,12 @@ def test_poll_access_token(monkeypatch):
     assert captured["json"]["device_code"] == "DC"
 
 
-def test_agent_loop_host_allowlisted():
-    from src.agent_loop import _API_HOSTS
-    assert "api.githubcopilot.com" in _API_HOSTS
+def test_managed_engine_catalogues_copilot_adapter():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "packages/mimo-code/packages/opencode/src/acp/provider-control.ts"
+    ).read_text(encoding="utf-8")
+    assert 'id: "github-copilot"' in source
+    assert 'adapters: ["copilot-chat"]' in source

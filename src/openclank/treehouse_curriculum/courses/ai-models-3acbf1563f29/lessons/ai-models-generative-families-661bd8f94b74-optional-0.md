@@ -1,0 +1,1 @@
+Reconstructing a supplied example and sampling a new one are different uses. A VAE models a distribution over latent variables rather than merely storing a smaller exact copy. A generated sample still needs evaluation for the intended task.

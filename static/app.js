@@ -1,3 +1,4 @@
+import { uiIcon, mountUiIcons } from './js/uiIcons.js';
 // ============================================
 // Odysseus UI — Main Application Orchestrator
 // ES6 module — entry point, no exports (wires all modules together)
@@ -10,26 +11,29 @@ import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js';
-import compareModule from './js/compare/index.js';
-import documentModule from './js/document.js';
+import chatModule from './js/chat.js?v=20260804doneframe1';
+import compareModule from './js/compare/index.js?v=20260723compareicon2';
+import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js';
 import sessionModule from './js/sessions.js';
-import memoryModule from './js/memory.js';
+import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
-import galleryModule from './js/gallery.js';
-import tasksModule from './js/tasks.js?v=20260630tasksactivity';
+// Gallery applet retired: images open in Files (browse) and Imps (edit).
+import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 import copalModule from './js/copal.js';
+import codeEditorModule from './js/codeEditor.js';
+import filesModule from './js/files.js';
+import { appletPath, resolveAppletLocation } from './js/appletRoutes.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
-import './js/modalManager.js';
+import modalManagerDock from './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
 import './js/tileManager.js';
 import themeModule from './js/theme.js';
@@ -40,12 +44,18 @@ import themeModule from './js/theme.js';
 // unversioned so this can't recur.
 import cookbookModule from './js/cookbook.js';
 import groupModule from './js/group.js';
-import * as researchPanelModule from './js/research/panel.js?v=20260630researchthumb';
+import * as researchPanelModule from './js/research/panel.js';
 import ttsModule from './js/tts-ai.js';
 import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
-import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js';
+import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20261004sidebarhamburger1';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import initPermissionModeControl from './js/permission-mode.js';
+import initInteractionModeControl from './js/interaction-mode.js';
+import { initCustomContextMenu } from './js/custom-context-menu.js';
+import { initWorkbenchMenu } from './js/workbenchMenu.js';
+import { openHelp } from './js/contextualHelp.js';
+import chatWorkspaceModule from './js/chatWorkspace.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -53,7 +63,13 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.copalModule = copalModule;
+window.chatWorkspaceModule = chatWorkspaceModule;
+window.filesModule = filesModule;
 settingsModule.setCopalModule(copalModule);
+window.settingsModule = settingsModule;
+
+// Usage is owned by static/js/usageEntry.js; targets resolve its global at use time.
 
 function _isMobileChatInput() {
   return window.innerWidth <= 768;
@@ -168,10 +184,8 @@ function initRailHoverLabels() {
     'rail-cookbook': 'Cookbook',
     'rail-research': 'Research',
     'rail-email': 'Email',
-    'rail-gallery': 'Gallery',
-    'rail-archive': 'Library',
-    'rail-memory': 'Brain',
-    'rail-notes': 'Notes',
+    'rail-memory': 'Memery',
+    'rail-notes': 'Editor',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
     'rail-settings': 'Settings',
@@ -187,12 +201,30 @@ function initRailHoverLabels() {
   });
 }
 
-// Redirect to login on 401 from any fetch
-const _origFetch = window.fetch;
+// Confirm auth loss before redirecting. Endpoint-local 401s remain visible to
+// their caller; only a confirmed invalid browser session redirects the shell.
+const _origFetch = window.fetch.bind(window);
+let _authStatusCheck = null;
+function _confirmBrowserSession() {
+  if (_authStatusCheck) return _authStatusCheck;
+  _authStatusCheck = _origFetch('/api/auth/status', {
+    credentials: 'same-origin',
+    cache: 'no-store',
+  }).then((status) => status.ok ? status.json() : null)
+    .catch(() => null)
+    .finally(() => { _authStatusCheck = null; });
+  return _authStatusCheck;
+}
 window.fetch = async function(...args) {
   const res = await _origFetch.apply(this, args);
-  if (res.status === 401 && !String(args[0]).includes('/api/auth/')) {
-    window.location.href = '/login';
+  // Some account-scoped panels are optional in the auth-disabled local
+  // profile.  Their deliberate 401 must stay a panel-level error; redirecting
+  // the whole shell to /login makes opening Settings transiently reload the
+  // app (notably the model-sharing panel).
+  const optionalUnauthenticated = String(args[0]).includes('/api/model-shares');
+  if (res.status === 401 && !optionalUnauthenticated && !String(args[0]).includes('/api/auth/')) {
+    const auth = await _confirmBrowserSession();
+    if (!auth || auth.authenticated !== true) window.location.href = '/login';
   }
   return res;
 };
@@ -206,12 +238,22 @@ const el = uiModule.el;
 // changes take effect immediately (previously cached once at page load and
 // went stale when the user changed their default model).
 let _defaultChat = null;
+try {
+  const cachedDefaultChat = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+  if (cachedDefaultChat && cachedDefaultChat.endpoint_url && cachedDefaultChat.model) {
+    _defaultChat = cachedDefaultChat;
+    window.__odysseusDefaultChat = cachedDefaultChat;
+  }
+} catch (_) {}
 async function _refreshDefaultChat() {
   try {
     const d = await (await fetch('/api/default-chat')).json();
     if (d && d.endpoint_url && d.model) {
       _defaultChat = d;
-      try { window.__odysseusDefaultChat = d; } catch (_) {}
+      try {
+        window.__odysseusDefaultChat = d;
+        localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(d));
+      } catch (_) {}
       return d;
     }
   } catch (_) {}
@@ -225,8 +267,24 @@ async function _createDirectChatFromPreferredModel() {
   if (!sessionModule) return false;
 
   const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+  if (
+    pending && pending.url && pending.modelId && pending.endpointId
+    && (!pending.source || pending.source === 'manual')
+  ) {
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, pending.source || 'manual');
+    return true;
+  }
+
+  const dc = await _refreshDefaultChat();
+  if (dc) {
+    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
+    return true;
+  }
+
+  // Preserve an already-resolved automatic choice if the settings request is
+  // temporarily unavailable, but never let it outrank a fresh default.
   if (pending && pending.url && pending.modelId && pending.endpointId) {
-    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId);
+    sessionModule.createDirectChat(pending.url, pending.modelId, pending.endpointId, pending.source || 'manual');
     return true;
   }
 
@@ -238,12 +296,6 @@ async function _createDirectChatFromPreferredModel() {
     return true;
   }
 
-  const dc = await _refreshDefaultChat();
-  if (dc) {
-    sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
-    return true;
-  }
-
   const withModel = sessions.filter(s => s.endpoint_url && s.model);
   if (withModel.length > 0) {
     const last = withModel[0]; // sessions are sorted by recent
@@ -252,50 +304,6 @@ async function _createDirectChatFromPreferredModel() {
   }
 
   return false;
-}
-
-async function _hasUsableChatModel() {
-  try {
-    const pending = sessionModule?.getPendingChat?.();
-    if (pending && pending.url && pending.modelId) return true;
-  } catch (_) {}
-  try {
-    const current = sessionModule?.getSessions?.()
-      ?.find(s => s.id === sessionModule?.getCurrentSessionId?.());
-    if (current && current.endpoint_url && current.model) return true;
-  } catch (_) {}
-  const dc = await _refreshDefaultChat();
-  if (dc && dc.endpoint_url && dc.model) return true;
-  try {
-    const items = window.modelsModule?.getCachedItems?.() || [];
-    if (items.some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length))) {
-      return true;
-    }
-  } catch (_) {}
-  try {
-    const res = await fetch(`${API_BASE}/api/models?background=false`, { credentials: 'same-origin' });
-    if (!res.ok) return false;
-    const data = await res.json();
-    return (data.items || []).some(item => !item.offline && ((item.models || []).length || (item.models_extra || []).length));
-  } catch (_) {
-    return false;
-  }
-}
-
-async function _syncWelcomeModelHint() {
-  const tip = document.getElementById('welcome-tip');
-  const sub = document.getElementById('welcome-sub');
-  if (!tip && !sub) return;
-  const hasModel = await _hasUsableChatModel();
-  if (hasModel) {
-    if (sub && !sub.dataset.researchOrigText) sub.textContent = 'New chat ready.';
-    if (tip) tip.textContent = 'Pick a model if you want, or just type.';
-  } else {
-    if (sub && !sub.dataset.researchOrigText) {
-      sub.innerHTML = 'Welcome, <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">type /setup</span> to get started.';
-    }
-    if (tip) tip.textContent = 'Add an AI endpoint from Settings in the sidebar, or paste an endpoint/API key into the chat.';
-  }
 }
 
 // ============================================
@@ -524,6 +532,20 @@ function initializeEventListeners() {
     });
   }
 
+  // Export menu: Compact current chat context
+  const exportCompactBtn = el('export-compact-btn');
+  if (exportCompactBtn) {
+    exportCompactBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (window.compactCurrentChatContext) {
+        await window.compactCurrentChatContext();
+      } else {
+        uiModule.showError('Compact action is not ready yet');
+      }
+    });
+  }
+
   // Export: PDF
   const exportPdfBtn = el('export-pdf-btn');
   if (exportPdfBtn) {
@@ -572,6 +594,18 @@ function initializeEventListeners() {
       } catch (err) {
         console.error('Save to docs failed:', err);
         uiModule.showError('Failed to save to documents');
+      }
+    });
+  }
+
+  // Export menu: Delete current chat
+  const exportDeleteBtn = el('export-delete-btn');
+  if (exportDeleteBtn) {
+    exportDeleteBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      exportMenu.classList.remove('open');
+      if (sessionModule?.deleteCurrentSessionFromTopMenu) {
+        await sessionModule.deleteCurrentSessionFromTopMenu();
       }
     });
   }
@@ -734,22 +768,9 @@ function initializeEventListeners() {
       };
 
       // Dynamic modals (removed from DOM on close)
-      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal', 'email-lib-modal'];
+      const dynamicModals = ['library-modal', 'archive-modal', 'doclib-modal', 'tasks-modal', 'email-lib-modal'];
       for (const id of dynamicModals) {
         const m = document.getElementById(id);
-        if (id === 'gallery-modal') {
-          const editor = document.getElementById('gallery-editor-container');
-          const editing = !!window.__galleryEditLive || !!(
-            editor &&
-            getComputedStyle(editor).display !== 'none' &&
-            editor.querySelector('.gallery-editor')
-          );
-          if (editing) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            return;
-          }
-        }
         if (m) { dismissModal(m); return; }
       }
 
@@ -782,18 +803,9 @@ function initializeEventListeners() {
     'memory-modal': null,
     'theme-modal': null,
   };
-  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'gallery-modal', 'tasks-modal'];
+  const _dynamicModalIds = ['library-modal', 'archive-modal', 'doclib-modal', 'tasks-modal'];
   function dismissModal(modal) {
     if (!modal || modal.classList.contains('hidden')) return;
-    if (modal.id === 'gallery-modal') {
-      const editor = document.getElementById('gallery-editor-container');
-      const editing = !!window.__galleryEditLive || !!(
-        editor &&
-        getComputedStyle(editor).display !== 'none' &&
-        editor.querySelector('.gallery-editor')
-      );
-      if (editing) return;
-    }
     const content = modal.querySelector('.modal-content') || modal.querySelector('#theme-popup');
     if (content && !content.classList.contains('modal-closing')) {
       content.classList.remove('sheet-ready');
@@ -926,7 +938,7 @@ function initializeEventListeners() {
     const welcomeName = document.querySelector('.welcome-name');
     const welcomeSub = el('welcome-sub');
     const tipEl = el('welcome-tip');
-    const _resIco = '<svg class="welcome-boat" style="position:relative;top:0.5px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>';
+    const _resIco = uiIcon("research",16,{"role":"inherit","className":"welcome-boat","style":"position:relative;top:0.5px;"});
     if (active) {
       if (welcomeName) {
         if (!welcomeName.dataset.researchOrigHtml) welcomeName.dataset.researchOrigHtml = welcomeName.innerHTML;
@@ -1040,19 +1052,6 @@ function initializeEventListeners() {
     });
   }
 
-  // Gallery tool button
-  const toolGalleryBtn = el('tool-gallery-btn');
-  if (toolGalleryBtn) {
-    toolGalleryBtn.addEventListener('click', async () => {
-      if (!galleryModule) return;
-      const Modals = await import('./js/modalManager.js');
-      if (!Modals.toggle('gallery-modal')) {
-        if (galleryModule.isGalleryOpen()) galleryModule.closeGallery();
-        else galleryModule.openGallery();
-      }
-    });
-  }
-
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
@@ -1087,12 +1086,50 @@ function initializeEventListeners() {
   // Notes tool button
   const toolNotesBtn = el('tool-notes-btn');
   if (toolNotesBtn) {
-    toolNotesBtn.addEventListener('click', () => {
-      if (notesModule) {
-        notesModule.togglePanel();
-      }
+    toolNotesBtn.addEventListener('click', (event) => {
+      event.preventDefault();
+      history.pushState({}, '', appletPath('editor'));
+      copalModule.open('notes');
     });
   }
+  const toolCodeBtn = el('tool-code-btn');
+  if (toolCodeBtn) toolCodeBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    history.pushState({}, '', appletPath('editor'));
+    copalModule.open('notes');
+  });
+  const toolFilesBtn = el('tool-files-btn');
+  if (toolFilesBtn) toolFilesBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    history.pushState({}, '', appletPath('files'));
+    filesModule.open();
+  });
+  let imageEditorOpening = false;
+  document.querySelectorAll('[data-image-editor-launcher]').forEach((launcher) => {
+    launcher.addEventListener('click', async (event) => {
+      event.preventDefault();
+      if (imageEditorOpening) return;
+      imageEditorOpening = true;
+      try {
+        const editor = window.impsModule || await import('./js/imps.js');
+        if (editor.isEditorOpen?.()) {
+          const host = document.getElementById('imps-editor-container');
+          if (host) {
+            host.style.display = 'flex';
+            host.querySelector('button, input, [tabindex="0"]')?.focus();
+          }
+          const Modals = await import('./js/modalManager.js');
+          Modals.restore('imps-editor-container');
+        } else {
+          await editor.openEditor(null, null, { w: 1024, h: 1024 }, 'Image Editor');
+        }
+      } catch (error) {
+        uiModule.showError(error.message || 'Image Editor could not be opened');
+      } finally {
+        imageEditorOpening = false;
+      }
+    });
+  });
   // Refresh notes due-reminder badge on load and every 5 minutes
   if (notesModule && notesModule.refreshDueBadge) {
     notesModule.refreshDueBadge();
@@ -1100,8 +1137,8 @@ function initializeEventListeners() {
   }
 
   // URL-based panel routing — bookmark /calendar, /notes, /cookbook etc
-  // and the matching tool opens automatically on page load.
-  const urlPath = window.location.pathname;
+  // and the matching tool opens automatically on page load. Resolved
+  // through the shared applet registry below.
   // Current width of the always-visible icon rail. The rail is resizable
   // and hides on narrow viewports, so read it live each call rather than
   // baking 48px in. Returns 0 when the rail isn't rendered.
@@ -1161,32 +1198,25 @@ function initializeEventListeners() {
       }).observe(sb, { attributes: true, attributeFilter: ['class'] });
     }
   }
-  const _routeOpen = {
-    '/notes':    () => {
-      if (!notesModule) return;
-      _collapseSidebarToRail();
-      notesModule.openPanel();
-      // Promote to fullscreen-with-rail-visible. The pane wires up its own
-      // fullscreen toggle (#notes-fullscreen-toggle); piggyback on that
-      // path so the button icon flips and overflow:hidden gets applied
-      // alongside. Retry on rAF in case the panel mounts a tick later.
-      const _go = () => {
-        const btn = document.getElementById('notes-fullscreen-toggle');
-        const pane = document.querySelector('.notes-pane');
-        if (!pane) return false;
-        if (!pane.classList.contains('notes-pane-fullscreen') && btn) btn.click();
-        return true;
-      };
-      if (!_go()) {
-        requestAnimationFrame(_go);
-        setTimeout(_go, 50);
-        setTimeout(_go, 200);
-      }
+  // One browser-target registry (appletRoutes.js) shared by sidebar links,
+  // rich app links, initial loading and Back/Forward. Direct literal paths
+  // (Files, Editor, Graph, TreeHouse, timeline/todo, calendar, settings) are
+  // canonical; /copal/* and Notes/Code/Bases, Mind/Galaxy stay as aliases.
+  const _targetOpen = {
+    editor: (resolved) => {
+      const view = resolved.openBases ? 'bases'
+        : resolved.mode === 'mind' ? 'mind'
+        : resolved.mode === 'galaxy' ? 'galaxy'
+        : (resolved.view || 'notes');
+      copalModule.open(view, false);
     },
-    '/calendar': () => calendarModule && calendarModule.openCalendar(),
-    '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
-    '/email':    () => {
-      // Collapse the wide sidebar → icon rail (48px) so the user keeps
+    files: () => filesModule.open(),
+    calendar: () => calendarModule && calendarModule.openCalendar(),
+    settings: (resolved) => {
+      settingsModule.open(resolved.panel || undefined);
+    },
+    email: () => {
+      // Collapse the wide sidebar to the icon rail so the user keeps
       // navigation visible alongside the fullscreen email view.
       _collapseSidebarToRail();
       // Spawn a fresh chat first so a reply (or any AI work the user
@@ -1203,10 +1233,7 @@ function initializeEventListeners() {
       // The modal is built synchronously inside openEmailLibrary, so a
       // single frame later it's in the DOM and ready to be flagged.
       // Fullscreen leaves the icon-rail visible on the left so navigation
-      // stays one click away (per #93). Width = viewport minus rail.
-      // Just add the class — the CSS rule for .email-lib-fullscreen .modal-content
-      // owns all the positioning (with !important so it beats openEmailLibrary's
-      // post-mount centering rAF) and reads the rail width from --icon-rail-w.
+      // stays one click away (per #93).
       const _goFullscreen = () => {
         const modal = document.getElementById('email-lib-modal');
         if (!modal) return false;
@@ -1218,12 +1245,26 @@ function initializeEventListeners() {
       setTimeout(_goFullscreen, 50);
       setTimeout(_goFullscreen, 200);
     },
-    '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
-    '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
-    '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
-    '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    memory:   () => document.getElementById('tool-memory-btn')?.click(),
+    tasks:    () => document.getElementById('tool-tasks-btn')?.click(),
+    library:  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
+    cookbook: () => document.getElementById('tool-cookbook-btn')?.click(),
+    usage:    () => window.__openStatsUsage?.(),
   };
-  const _opener = _routeOpen[urlPath];
+  const _openResolvedTarget = (resolved) => {
+    if (!resolved) return false;
+    // Normalize legacy /copal/* and alias addresses onto the canonical
+    // direct path without adding a history entry.
+    const current = window.location.pathname + window.location.search;
+    if (resolved.canonicalPath && resolved.canonicalPath !== current) {
+      history.replaceState({}, '', resolved.canonicalPath);
+    }
+    const open = _targetOpen[resolved.target];
+    if (open) open(resolved);
+    return true;
+  };
+  const _resolved = resolveAppletLocation(window.location.pathname, window.location.search);
+  const _opener = _resolved ? () => _openResolvedTarget(_resolved) : null;
   // Defer the opener — at this point in init, the modules whose handlers
   // we trigger (#rail-new-session click handler, the email-section header
   // click handler in emailInbox, sessionModule's loaded session list) are
@@ -1231,29 +1272,14 @@ function initializeEventListeners() {
   // opener so it runs from sessionModule.loadSessions().finally() below.
   if (_opener) window._odysseusRouteOpener = _opener;
 
-  // Archive browser tool button
-  const toolLibraryBtn = el('tool-library-btn');
-  if (toolLibraryBtn) {
-    toolLibraryBtn.addEventListener('click', () => {
-      if (sessionModule) sessionModule.openLibrary();
-    });
-  }
-
-  // "+" on the Library row → create a new blank document and open it in the
-  // editor (mirrors the email section's compose "+"). stopPropagation so it
-  // doesn't also fire the row's open-library click.
-  const libraryNewDocBtn = el('library-new-doc-btn');
-  if (libraryNewDocBtn) {
-    libraryNewDocBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        if (documentModule && documentModule.newDocument) await documentModule.newDocument();
-      } catch (err) {
-        console.error('New document from Library failed:', err);
-        if (uiModule && uiModule.showError) uiModule.showError('Could not create document');
-      }
-    });
-  }
+  // Back/Forward across direct applet addresses. Copal-family views also
+  // listen for popstate (draft/window state); both run and the registry
+  // normalizes the address so the two stay consistent.
+  window.addEventListener('popstate', () => {
+    const resolved = resolveAppletLocation(window.location.pathname, window.location.search);
+    if (!resolved) return;
+    _openResolvedTarget(resolved);
+  });
 
   // Manage Chats — opens Full Library modal (decoupled from Chats accordion toggle)
   const chatsLibraryBtn = el('chats-library-btn');
@@ -1273,9 +1299,9 @@ function initializeEventListeners() {
 
   const toolThemeBtn = el('tool-theme-btn');
   if (toolThemeBtn) {
+    // Theme lives in Settings -> Appearance (S13 removed the sidebar entry).
     toolThemeBtn.addEventListener('click', () => {
-      const tm = document.getElementById('theme-modal');
-      if (tm) tm.classList.remove('hidden');
+      if (settingsModule && settingsModule.open) settingsModule.open('appearance');
     });
   }
 
@@ -1502,7 +1528,6 @@ function initializeEventListeners() {
         web_search:      ['web-toggle-btn'],
         deep_research:   ['research-toggle-btn', 'tool-research-btn', 'overflow-research-btn', 'rail-research'],
         document_editor: ['overflow-doc-btn', 'rail-documents'],
-        gallery:         ['tool-gallery-btn', 'rail-gallery'],
       };
       Object.entries(map).forEach(([key, ids]) => {
         if (features[key] === false) {
@@ -1678,8 +1703,7 @@ function initializeEventListeners() {
   if (toolMemoryBtn && memoryModal) {
     toolMemoryBtn.addEventListener('click', () => {
       memoryModal.classList.remove('hidden');
-      if (memoryModule && memoryModule.renderMemoryList) memoryModule.renderMemoryList();
-      if (memoryModule && memoryModule.updateMemoryCount) memoryModule.updateMemoryCount();
+      if (memoryModule && memoryModule.loadMemories) memoryModule.loadMemories();
     });
   }
 
@@ -1748,6 +1772,77 @@ function initializeEventListeners() {
     uiModule.showToast(`${label} ${active ? 'on' : 'off'}`, 1800);
   }
 
+  function syncPlanToggle(active) {
+    const btn = el('plan-toggle-btn');
+    const chk = el('plan-toggle');
+    const status = el('plan-mode-status');
+    const statusToggle = el('plan-mode-status-toggle');
+    if (chk) chk.checked = !!active;
+    document.body.classList.toggle('plan-mode-active', !!active);
+    if (status) status.hidden = !active;
+    if (statusToggle) {
+      statusToggle.setAttribute('aria-pressed', String(!!active));
+      statusToggle.setAttribute('aria-label', active ? 'Turn off plan mode' : 'Turn on plan mode');
+    }
+    if (btn) {
+      btn.classList.toggle('active', !!active);
+      btn.setAttribute('aria-pressed', String(!!active));
+      btn.title = active
+        ? 'Plan mode on - next message proposes a plan only'
+        : 'Plan mode';
+    }
+  }
+
+  const CHAT_MODES = ['chat', 'plan', 'agent'];
+
+  function getChatMode() {
+    const mode = String(loadToggleState().chat_mode || 'agent');
+    return CHAT_MODES.includes(mode) ? mode : 'agent';
+  }
+
+  function setChatMode(mode, options = {}) {
+    const normalized = CHAT_MODES.includes(mode) ? mode : 'agent';
+    const st = loadToggleState();
+    st.chat_mode = normalized;
+    // plan_mode stays as the persisted flag the stream-end plan capture
+    // (chat.js) keys off.
+    st.plan_mode = normalized === 'plan';
+    saveToggleState(st);
+    if (typeof window.__odysseusInteractionModeSync === 'function') {
+      window.__odysseusInteractionModeSync(normalized);
+    }
+    syncPlanToggle(normalized === 'plan');
+    // Shell is structurally absent in the read-only modes; reflect that on
+    // the toggle without touching the stored preference.
+    const bashBtn = el('bash-toggle-btn');
+    if (bashBtn) {
+      const readOnly = normalized !== 'agent';
+      bashBtn.classList.toggle('mode-disabled', readOnly);
+      bashBtn.title = readOnly ? 'Shell is unavailable in Chat/Plan mode' : 'Shell Access';
+    }
+    if (normalized !== 'agent') {
+      const resChk = el('research-toggle');
+      if (resChk && resChk.checked) _syncResearchIndicator(false);
+    }
+    if (!options.silent && uiModule?.showToast) {
+      const labels = {
+        chat: 'Chat mode — read-only tools',
+        plan: 'Plan mode on',
+        agent: 'Agent mode — full tools',
+      };
+      uiModule.showToast(labels[normalized], 1600);
+    }
+  }
+
+  function setPlanMode(active, options = {}) {
+    if (active) setChatMode('plan', options);
+    else if (getChatMode() === 'plan') setChatMode('agent', options);
+  }
+
+  // Plan Execute / external callers flip modes through these globals.
+  window.__odysseusSetPlanMode = (active) => setPlanMode(active, { silent: true });
+  window.__odysseusSetChatMode = (mode) => setChatMode(mode, { silent: true });
+
   function applyModeToToggles(mode) {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
@@ -1759,8 +1854,8 @@ function initializeEventListeners() {
     });
   }
 
-  // The composer is always Agent. Storage.loadToggleState() performs the
-  // one-time cleanup of legacy mode=chat state.
+  // Tool toggles keep their historical `_agent` storage keys regardless of
+  // the composer chat/plan/agent mode; the mode itself is applied above.
   applyModeToToggles('agent');
   try { workspaceModule.applyMode('agent'); } catch (_) {}
 
@@ -1823,6 +1918,34 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+
+  // Composer mode control (chat / plan / agent). ACP provider mode is mapped
+  // server-side from this captured Open Clank choice.
+  initInteractionModeControl({
+    getMode: getChatMode,
+    setMode: (mode) => setChatMode(mode),
+  });
+  setChatMode(getChatMode(), { silent: true });
+  initCustomContextMenu();
+  // Shared command launchers and one shortcut router; applets mount local menus.
+  initWorkbenchMenu({
+    editor:() => copalModule.open('notes'),
+    files:() => filesModule.open(),
+    settings:() => settingsModule.open(),
+    appearance:() => settingsModule.open('appearance'),
+    chatSearch:() => searchChatModule.openSearch(),
+    help:(captured) => openHelp({ surface:captured.modal?.classList.contains('copal-notes-window') ? 'editor' : captured.modal?.classList.contains('files-window') ? 'files' : 'assistant' }),
+    docs:async (captured) => {
+      const presentation = captured.modal?.classList.contains('copal-wiki-window') ? 'wiki' : 'copal';
+      try {
+        const opened = await window.openClankHandbook?.({ presentation });
+        if (!opened) throw new Error('The handbook is not available yet. Retry opening Wiki documentation or the Copal handbook.');
+      } catch (error) {
+        uiModule.showError(error.message || 'Could not open the handbook.');
+      }
+    },
+  });
+
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -2247,9 +2370,10 @@ function initializeEventListeners() {
     const PLACEHOLDER_COMPACT_WIDTH = 400;
     const PICKER_HIDE_WIDTH = 220;
     const TOOLBAR_HIDE_WIDTH = 160;
-    const textarea = el('message');
-    const inputBottom = document.querySelector('.chat-input-bottom');
-    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    const textarea = el('message');
+	    const inputBottom = document.querySelector('.chat-input-bottom');
+	    const _isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+	    let _placeholderHintOn = false;
 
     function checkPickerOverflow() {
       // Skip responsive collapse on mobile — keyboard open/close causes flicker
@@ -2391,10 +2515,10 @@ function initializeEventListeners() {
 
   // ── Incognito mode toggle (on welcome screen) ──
   const incognitoBtn = el('incognito-btn');
-  const INCOGNITO_EYE_OPEN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-  const INCOGNITO_EYE_CLOSED = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>';
-  const SESSION_ICON_CHAT = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-  const SESSION_ICON_INCOGNITO = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  const INCOGNITO_EYE_OPEN = uiIcon("eye",18,{"role":"inherit"});
+  const INCOGNITO_EYE_CLOSED = uiIcon("eye-off",18,{"role":"inherit"});
+  const SESSION_ICON_CHAT = uiIcon("chat",12,{"role":"inherit"});
+  const SESSION_ICON_INCOGNITO = uiIcon("eye-off",12,{"role":"inherit"});
 
   function _syncSessionIncognitoIcon(active) {
     const activeSession = document.querySelector('.list-item.active-session .session-icon');
@@ -2420,7 +2544,7 @@ function initializeEventListeners() {
         incognitoBtn.innerHTML = INCOGNITO_EYE_CLOSED + '<span class="incognito-label">Temporary Agent</span>';
         if (welcomeName) {
           welcomeName.dataset.originalHtml = welcomeName.innerHTML;
-          welcomeName.innerHTML = '<svg class="welcome-boat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg>Temporary Agent';
+          welcomeName.innerHTML = uiIcon("eye-off",16,{"role":"inherit","className":"welcome-boat"}) + "Temporary Agent";
           // Restart the L→R clip-wipe reveal on the new label
           welcomeName.style.animation = 'none';
           welcomeName.offsetHeight;
@@ -2509,15 +2633,12 @@ function initializeEventListeners() {
     'tools-section':       '#tools-section',
     // Per-tool visibility — fine-grained control over which entries show
     // inside the Tools section in the sidebar.
-    'tool-calendar':       '#tool-calendar-btn',
     'tool-compare':        '#tool-compare-btn',
     'tool-cookbook':       '#tool-cookbook-btn',
     'tool-research':       '#tool-research-btn',
-    'tool-gallery':        '#tool-gallery-btn',
-    'tool-library':        '#tool-library-btn',
     'tool-memory':         '#tool-memory-btn',
-    'tool-notes':          '#tool-notes-btn',
     'tool-tasks':          '#tool-tasks-btn',
+    'tool-usage':          '#tool-usage-btn',
     'tool-theme':          '#tool-theme-btn',
     'user-bar':            '#user-bar-profile',
     'sidebar-settings-btn':'#user-bar-settings',
@@ -2533,10 +2654,11 @@ function initializeEventListeners() {
     'attach-btn':          '#overflow-attach-btn',
     'research-btn':        '#overflow-research-btn',
     'rail-new-chat':       '#rail-new-session',
+    'rail-usage':          '#rail-usage',
   };
 
   // Keys hidden by default on first run (no localStorage yet)
-  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
+  const UI_VIS_DEFAULT_OFF = new Set(['models-section', 'rag-toggle-btn', 'text-emojis', 'chat-fullwidth', 'wrap-diffs']);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);
@@ -2569,6 +2691,11 @@ function initializeEventListeners() {
     applyTextEmojis(state['text-emojis'] === true);
     // Hide thinking sections toggle (show-thinking: checked=show, unchecked=hide)
     document.body.classList.toggle('hide-thinking', state['show-thinking'] === false);
+    document.body.classList.toggle('hide-timestamps', state['show-timestamps'] === false);
+    document.body.classList.toggle('hide-tool-details', state['show-tool-details'] === false);
+    document.body.classList.toggle('hide-tool-output', state['show-tool-output'] === false);
+    document.body.classList.toggle('wrap-diffs', state['wrap-diffs'] === true);
+    document.body.classList.toggle('nowrap-diffs', state['wrap-diffs'] !== true);
     // Fullwidth chat toggle (chat-fullwidth: checked=fullwidth, unchecked=big-padding
     document.body.classList.toggle('fullwidth-chat', state['chat-fullwidth'] === true);
   }
@@ -2839,170 +2966,72 @@ function initializeEventListeners() {
     } catch (e) { console.error('Dialog drag init error:', e); }
   })();
 
-  // ── Modal minimize → dock ──
-  // Adds a "_" button next to every modal's close button. Clicking it hides
-  // the modal and adds an entry to a fixed bottom dock; clicking the dock
-  // entry restores the modal. Works for hand-rolled and dynamically-created
-  // modals via a MutationObserver on document.body.
+  // Unmanaged applets use the same registry and bottom row as built-ins.
+  // Register on first minimize so a tool's explicit controller keeps ownership.
   (function initModalMinimize() {
-    // custom-preset-modal (the Prompt window) is handled by the new
-    // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
-    // not also inject a `_`/chip for it.
     const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
-    const dockEntries = new Map(); // modal element -> dock entry element
-
-    let dock = document.getElementById('modal-dock');
-    if (!dock) {
-      dock = document.createElement('div');
-      dock.id = 'modal-dock';
-      document.body.appendChild(dock);
-    }
-
-    // Keep the dock clear of the sidebar (which can be collapsed, resized,
-    // hidden, or flipped to the right side).
-    function updateDockOffset() {
-      const sidebar = document.getElementById('sidebar');
-      const iconRail = document.getElementById('icon-rail');
-      let leftPx = 0;
-      let rightPx = 0;
-      const sidebarRight = sidebar && sidebar.classList.contains('right-side');
-      const sidebarVisible = sidebar &&
-        !sidebar.classList.contains('hidden') &&
-        sidebar.offsetWidth > 0;
-      const railVisible = iconRail && iconRail.offsetWidth > 0;
-      const sidebarW = sidebarVisible ? sidebar.offsetWidth : 0;
-      const railW = railVisible ? iconRail.offsetWidth : 0;
-      if (sidebarRight) {
-        rightPx = sidebarW + railW;
-      } else {
-        leftPx = sidebarW + railW;
-      }
-      dock.style.left = leftPx + 'px';
-      dock.style.right = rightPx + 'px';
-    }
-    updateDockOffset();
-    // Recompute when sidebar resizes, collapses, or moves sides
-    if (window.ResizeObserver) {
-      const ro = new ResizeObserver(updateDockOffset);
-      const sb = document.getElementById('sidebar');
-      const ir = document.getElementById('icon-rail');
-      if (sb) ro.observe(sb);
-      if (ir) ro.observe(ir);
-    }
-    window.addEventListener('resize', updateDockOffset);
-    // Side-flip / collapse toggles class names on body or sidebar
-    new MutationObserver(updateDockOffset).observe(document.body, {
-      attributes: true, attributeFilter: ['class'],
-    });
-    const sbEl = document.getElementById('sidebar');
-    if (sbEl) {
-      new MutationObserver(updateDockOffset).observe(sbEl, {
-        attributes: true, attributeFilter: ['class', 'style'],
-      });
-    }
-
-    function modalTitle(modal) {
-      const h = modal.querySelector('.modal-header h4, .modal-header h3, .modal-header h2');
-      if (h && h.textContent.trim()) return h.textContent.trim();
-      if (modal.id) return modal.id.replace(/-modal$|-overlay$|-popup$/, '').replace(/-/g, ' ');
-      return 'Window';
-    }
-
-    function removeDockEntry(modal) {
-      const entry = dockEntries.get(modal);
-      if (entry) {
-        entry.remove();
-        dockEntries.delete(modal);
-      }
-    }
-
-    function restoreModal(modal) {
-      modal.classList.remove('minimized');
-      modal.classList.remove('hidden');
-      removeDockEntry(modal);
-      // Bring to front (matches existing focus-on-click behavior)
-      modal.style.zIndex = '';
-    }
-
-    function minimizeModal(modal) {
-      if (modal.classList.contains('hidden')) return;
-      modal.classList.add('minimized');
-      if (dockEntries.has(modal)) return;
-
-      const entry = document.createElement('div');
-      entry.className = 'modal-dock-item';
-      entry.title = `Restore ${modalTitle(modal)}`;
-
-      const label = document.createElement('span');
-      label.className = 'modal-dock-label';
-      label.textContent = modalTitle(modal);
-
-      const closeX = document.createElement('button');
-      closeX.className = 'modal-dock-close';
-      closeX.textContent = '×';
-      closeX.title = 'Close';
-      closeX.addEventListener('click', (e) => {
-        e.stopPropagation();
-        modal.classList.remove('minimized');
-        modal.classList.add('hidden');
-        modal.style.display = '';
-        removeDockEntry(modal);
-      });
-
-      entry.appendChild(label);
-      entry.appendChild(closeX);
-      entry.addEventListener('click', () => restoreModal(modal));
-      dock.appendChild(entry);
-      dockEntries.set(modal, entry);
-    }
-
+    let anonymousId = 0;
     function injectMinimizeButton(modal) {
-      if (!modal || !modal.classList || !modal.classList.contains('modal')) return;
-      if (modal.id && SKIP_IDS.has(modal.id)) return;
-      // Modals managed by the new modalManager (Modals.register) get their own
-      // .modal-minimize-btn and chips via the .minimized-dock-chip system.
-      // Skip them entirely so we don't double-up minimize buttons or chips.
-      if (modal.id && /^email-reader-/.test(modal.id)) return;
-      if (modal.id && window.Modals && window.Modals.isRegistered && window.Modals.isRegistered(modal.id)) return;
+      if (!modal?.classList?.contains('modal')) return;
+      if (SKIP_IDS.has(modal.id) || /^email-reader-/.test(modal.id)) return;
+      if (modalManagerDock.isRegistered(modal.id)) return;
       const header = modal.querySelector('.modal-header');
-      if (!header) return;
-      if (header.querySelector('.minimize-btn, .modal-minimize-btn')) return;
+      if (!header || header.querySelector('.minimize-btn, .modal-minimize-btn')) return;
       const closeBtn = header.querySelector('.close-btn, .modal-close');
       if (!closeBtn) return;
-
+      if (!modal.id) {
+        do { anonymousId += 1; } while (document.getElementById(`applet-window-${anonymousId}`));
+        modal.id = `applet-window-${anonymousId}`;
+      }
       const minBtn = document.createElement('button');
       minBtn.className = 'minimize-btn';
       minBtn.type = 'button';
       minBtn.title = 'Minimize';
-      minBtn.textContent = '_';
-      minBtn.addEventListener('mousedown', (e) => e.stopPropagation()); // don't start drag
-      minBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        minimizeModal(modal);
+      minBtn.setAttribute('aria-label', 'Minimize');
+      minBtn.innerHTML = uiIcon('remove', 14);
+      minBtn.addEventListener('mousedown', (event) => event.stopPropagation());
+      minBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (!modalManagerDock.isRegistered(modal.id)) {
+          const title = header.querySelector('h4, h3, h2')?.textContent?.trim()
+            || modal.id.replace(/-modal$|-overlay$|-popup$/, '').replace(/-/g, ' ');
+          modalManagerDock.register(modal.id, {
+            label: title,
+            icon: 'document',
+            closeFn: () => {
+              // Delegate confirmation/veto and teardown to the original button.
+              // Keep the registry until that controller actually closes; an
+              // asynchronous confirmation must never be interpreted as consent.
+              if (modalManagerDock.isMinimized(modal.id)) modalManagerDock.restore(modal.id);
+              closeBtn.click();
+              return false;
+            },
+          });
+        }
+        modalManagerDock.minimize(modal.id);
       });
       closeBtn.parentElement.insertBefore(minBtn, closeBtn);
-
-      // Watch this modal's class so close-from-elsewhere clears the dock entry
       new MutationObserver(() => {
-        if (modal.classList.contains('hidden') && !modal.classList.contains('minimized')) {
-          removeDockEntry(modal);
+        if (!modalManagerDock.isMinimized(modal.id)
+            && (modal.classList.contains('hidden') || modal.style.display === 'none')) {
+          modalManagerDock.unregister(modal.id);
         }
-      }).observe(modal, { attributes: true, attributeFilter: ['class'] });
+      }).observe(modal, { attributes: true, attributeFilter: ['class', 'style'] });
     }
-
-    // Initial pass over existing modals
     document.querySelectorAll('.modal').forEach(injectMinimizeButton);
-
-    // Watch for dynamically-created modals
     new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        for (const n of m.addedNodes) {
-          if (n.nodeType !== 1) continue;
-          if (n.classList && n.classList.contains('modal')) {
-            injectMinimizeButton(n);
-          }
-          if (n.querySelectorAll) {
-            n.querySelectorAll('.modal').forEach(injectMinimizeButton);
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          injectMinimizeButton(node);
+          node.querySelectorAll?.('.modal').forEach(injectMinimizeButton);
+        }
+        for (const node of mutation.removedNodes) {
+          if (node.nodeType !== 1 || node.isConnected) continue;
+          const removed = node.matches?.('.modal') ? [node] : [];
+          removed.push(...(node.querySelectorAll?.('.modal') || []));
+          for (const modal of removed) {
+            if (modalManagerDock.isRegistered(modal.id)) modalManagerDock.unregister(modal.id);
           }
         }
       }
@@ -3057,7 +3086,7 @@ function initializeEventListeners() {
       ['.memory-tabs', '.memory-tab'],
       ['.admin-tabs', '.admin-tab'],
     ];
-    const _IGNORE = 'input, textarea, select, [contenteditable="true"], .preset-range, ' +
+    const _IGNORE = '.chat-input-bar, input, textarea, select, [contenteditable="true"], .preset-range, ' +
       '.note-cl-row, .minimized-dock-chip, canvas, .email-card-reader';
     let sx = 0, sy = 0, tracking = false;
 
@@ -3473,6 +3502,10 @@ function initializeEventListeners() {
 // INITIALIZATION ON PAGE LOAD
 // ============================================
 function startOdysseusApp() {
+  mountUiIcons(document);
+  // Usage entry ownership lives in usageEntry.js so optional app startup errors
+  // cannot create duplicate listeners or refresh owners.
+  tasksModule?.startNotificationPolling?.();
   if (window.__odysseusAppStarted) return;
   window.__odysseusAppStarted = true;
   const _bumpChatPriority = (ms = 10000) => {
@@ -3505,6 +3538,13 @@ function startOdysseusApp() {
   }
 
   // Initialize all event listeners
+  // Permission mode has its own lifecycle/error boundary and must not depend
+  // on the monolithic listener initializer below succeeding.
+  try {
+    initPermissionModeControl({ showToast: uiModule?.showToast });
+  } catch (e) {
+    console.error('Permission mode init error:', e);
+  }
   try { initializeEventListeners(); } catch(e) { console.error('Event init error:', e); }
 
   // Reveal the toolbar now that all toggle/overflow state is resolved
@@ -3553,11 +3593,9 @@ function startOdysseusApp() {
     'rail-compare':   'tool-compare-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
-    'rail-archive':   'tool-library-btn',
-    'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
     'rail-calendar':  'tool-calendar-btn',
-    'rail-notes':     'tool-notes-btn',
+    'rail-notes':     'tool-code-btn',
     'rail-memory':    'tool-memory-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
@@ -3596,18 +3634,9 @@ function startOdysseusApp() {
     });
   }
 
-  // Rail: settings button
+  // The compact rail opens the same Settings window as the full sidebar.
   const _railSettings = el('rail-settings');
-  if (_railSettings) {
-    _railSettings.addEventListener('click', () => {
-      const sidebar = document.getElementById('sidebar');
-      if (sidebar) sidebar.classList.remove('hidden');
-      syncRailSide();
-      // Scroll to bottom where settings typically are
-      const sidebarInner = document.querySelector('.sidebar-inner');
-      if (sidebarInner) sidebarInner.scrollTo({ top: sidebarInner.scrollHeight, behavior: 'smooth' });
-    });
-  }
+  if (_railSettings) _railSettings.addEventListener('click', () => settingsModule.open());
 
   // Rail: admin button
   const _railAdmin = el('rail-admin');
@@ -3660,11 +3689,22 @@ function startOdysseusApp() {
   function handleSubmit(e) {
     if (e) e.preventDefault();
     _bumpChatPriority(30000);
-    // Debounce: prevent double-submit while a request is being initiated
-    if (_submitting) return;
-    _submitting = true;
-    // Release after a short delay (stream start sets its own isStreaming guard)
-    setTimeout(() => { _submitting = false; }, 300);
+    // The debounce protects a fresh send from duplicate form events, but it
+    // must never swallow an immediate Stop click.  The send button enters its
+    // streaming state before the first response bytes arrive, so a user can
+    // legitimately click Stop during this 300ms window.  Let an empty
+    // streaming submit through to chat.js; its abort path is idempotent.
+    const _submitButton = document.querySelector('.send-btn');
+    const _submitInput = document.getElementById('message') || document.getElementById('message-input');
+    const _isImmediateStop = _submitButton?.dataset?.mode === 'streaming'
+      && !((_submitInput?.value || '').trim());
+    // Debounce: prevent double-submit while a request is being initiated.
+    if (_submitting && !_isImmediateStop) return;
+    if (!_isImmediateStop) {
+      _submitting = true;
+      // Release after a short delay (stream start sets its own isStreaming guard)
+      setTimeout(() => { _submitting = false; }, 300);
+    }
 
     // Compare mode: route submit to compare handler (same message to all panes)
     if (compareModule && compareModule.isActive()) {
@@ -3685,6 +3725,7 @@ function startOdysseusApp() {
       return;
     }
 
+    chatRenderer.hideWelcomeScreen();
     return originalSubmit.call(chatModule, e);
   }
 
@@ -3695,10 +3736,90 @@ function startOdysseusApp() {
   const messageInput = el('message');
   const modelPickerWrap = document.getElementById('model-picker-wrap');
 
-  const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
-  const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';
-  const _stopIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
-  const _newChatIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  function _readComposerPromptHistory() {
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return [];
+    return Array.from(chatBox.querySelectorAll('.msg-user'))
+      .reverse()
+      .map(msg => {
+        const body = msg.querySelector('.body');
+        return msg.dataset?.raw || (body ? body.textContent : '') || '';
+      })
+      .filter(Boolean);
+  }
+
+  if (messageInput && !messageInput._odysseusPromptRecallCapture) {
+    messageInput._odysseusPromptRecallCapture = true;
+    let recallHistory = [];
+    let recallIndex = -1;
+    let lastRecalled = '';
+    const norm = (v) => String(v || '').replace(/\r\n/g, '\n').trimEnd();
+    messageInput.addEventListener('input', () => {
+      if (norm(messageInput.value) === norm(lastRecalled)) return;
+      recallHistory = [];
+      recallIndex = -1;
+      lastRecalled = '';
+      try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
+    }, true);
+    messageInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
+      if (window._ghostAutocomplete?.isActive?.()) return;
+      const fresh = _readComposerPromptHistory();
+      const history = fresh.length ? fresh : recallHistory;
+      if (!history.length) return;
+      const current = norm(messageInput.value);
+      let currentIndex = current ? history.findIndex(item => norm(item) === current) : -1;
+      if (current && currentIndex < 0 && current === norm(lastRecalled)) currentIndex = recallIndex;
+      if (current && currentIndex < 0) {
+        const markedIndex = Number(messageInput.dataset.odysseusRecallIndex);
+        if (Number.isInteger(markedIndex) && markedIndex >= 0 && markedIndex < history.length) {
+          currentIndex = markedIndex;
+        }
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      if (e.key === 'ArrowDown') {
+        if (currentIndex < 0) return;
+        const nextIndex = currentIndex - 1;
+        if (nextIndex < 0) {
+          recallHistory = history;
+          recallIndex = -1;
+          lastRecalled = '';
+          try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
+          messageInput.value = '';
+          try { messageInput.selectionStart = messageInput.selectionEnd = 0; } catch {}
+          try { uiModule.autoResize(messageInput); } catch {}
+          return;
+        }
+        const recalled = history[nextIndex];
+        recallHistory = history;
+        recallIndex = nextIndex;
+        lastRecalled = recalled;
+        try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
+        messageInput.value = recalled;
+        try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
+        try { uiModule.autoResize(messageInput); } catch {}
+        return;
+      }
+      const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
+      const recalled = history[nextIndex];
+      if (!recalled) return;
+      recallHistory = history;
+      recallIndex = nextIndex;
+      lastRecalled = recalled;
+      try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
+      messageInput.value = recalled;
+      try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
+      try { uiModule.autoResize(messageInput); } catch {}
+    }, true);
+  }
+
+  const _sendIcon = uiIcon("up",16,{"role":"inherit"});
+  const _micIcon = uiIcon("microphone",16,{"role":"inherit"});
+  const _stopIcon = uiIcon("stop",16,{"role":"inherit"});
+  const _newChatIcon = uiIcon("add",16,{"role":"inherit"});
 
   // Expose icons globally so chat.js updateSubmitButton can use them
   window._odysseusBtnIcons = { send: _sendIcon, mic: _micIcon, stop: _stopIcon, newChat: _newChatIcon };
@@ -3904,13 +4025,18 @@ function startOdysseusApp() {
   // Toggle mic/send icon on input change + hide model picker after enough text
   if (messageInput) {
     const _debouncedUpdateIcon = uiModule.debounce(_updateSendBtnIcon, 50);
-    const _MODEL_PICKER_HIDE_CHARS = 10;
-    const _syncModelPickerAutohide = () => {
-      const hidePicker = (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
-      if (modelPickerWrap) {
-        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
-      }
-    };
+		    const _MODEL_PICKER_HIDE_CHARS = 23;
+		    const _syncModelPickerAutohide = () => {
+		      const compactMobile = _isMobileChatInput() && !!(messageInput.value || '').trim();
+		      const hidePicker = compactMobile || (messageInput.value || '').replace(/\s/g, '').length >= _MODEL_PICKER_HIDE_CHARS;
+		      if (modelPickerWrap) {
+		        modelPickerWrap.classList.toggle('model-picker-autohide', hidePicker);
+		      }
+	      const planStatus = el('plan-mode-status');
+	      if (planStatus) {
+	        planStatus.classList.toggle('plan-mode-status-autohide', hidePicker);
+	      }
+	    };
     window._syncModelPickerAutohide = _syncModelPickerAutohide;
     _syncModelPickerAutohide();
     messageInput.addEventListener('input', () => {
@@ -4096,11 +4222,21 @@ function startOdysseusApp() {
     });
 
     // Load sessions first (critical path) — remove loader when done
+    let sessionsLoaded = false;
     sessionModule.loadSessions()
+      .then((loaded) => { sessionsLoaded = loaded === true; })
       .catch(e => console.warn('loadSessions error:', e))
       .finally(() => {
         const loader = document.getElementById('app-loader');
-        if (loader) { loader.style.opacity = '0'; setTimeout(() => loader.remove(), 300); }
+        if (loader) {
+          loader.style.opacity = '0';
+          setTimeout(() => {
+            loader.remove();
+            if (sessionsLoaded) window.__openClankShellMounted?.(true);
+          }, 300);
+        } else if (sessionsLoaded) {
+          window.__openClankShellMounted?.(true);
+        }
         // Fire any URL route opener now that sessions + module wiring are
         // ready. Deferred from up top of init for exactly this reason.
         if (window._odysseusRouteOpener) {
@@ -4136,23 +4272,119 @@ function startOdysseusApp() {
 
   // Non-critical startup work must not compete with first paint, chat send, or
   // chat switching. Panels load their own data when opened; these are only warmups.
-  _syncWelcomeModelHint().catch(() => {});
   runNonCriticalStartup(() => {
     modelsModule.refreshModels(false).then(() => {
       try { sessionModule.updateModelPicker(); } catch (_) {}
-      _syncWelcomeModelHint().catch(() => {});
     }).catch(() => {});
   }, 3500);
   runNonCriticalStartup(() => modelsModule.refreshProviders(), 6500);
   runNonCriticalStartup(() => ragModule.loadPersonalDocs(), 9000);
-  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
-  
-  // Ensure proper initial state
-  voiceRecorderModule.init();
-  if (censorModule) censorModule.init();
+	  runNonCriticalStartup(() => memoryModule.loadMemories(), 12000);
 
-  // Auto-focus message input on load
-  const msgEl = document.getElementById('message');
+	  // Ensure proper initial state
+	  voiceRecorderModule.init();
+	  if (censorModule) censorModule.init();
+
+	  // ── Mobile pull-to-refresh for the active chat ──
+	  (function initMobileChatPullRefresh() {
+	    const historyEl = document.getElementById('chat-history');
+	    const container = document.getElementById('chat-container');
+	    if (!historyEl || !container || !('ontouchstart' in window || navigator.maxTouchPoints > 0)) return;
+
+	    const THRESHOLD = 72;
+	    const MAX_PULL = 104;
+	    let startY = 0;
+	    let pullY = 0;
+	    let tracking = false;
+	    let refreshing = false;
+	    let spinner = null;
+	    const indicator = document.createElement('div');
+	    indicator.className = 'chat-pull-refresh';
+	    indicator.setAttribute('aria-hidden', 'true');
+	    indicator.innerHTML = '<div class="chat-pull-refresh-spinner"></div>';
+	    container.prepend(indicator);
+	    const spinnerMount = indicator.querySelector('.chat-pull-refresh-spinner');
+	    try {
+	      spinner = spinnerModule.createWhirlpool(18);
+	      spinnerMount.replaceChildren(spinner.element);
+	    } catch (_) {}
+
+	    function setPull(px, active = false) {
+	      pullY = Math.max(0, Math.min(MAX_PULL, px));
+	      const pct = Math.min(1, pullY / THRESHOLD);
+	      indicator.style.setProperty('--pull-refresh-y', `${pullY}px`);
+	      indicator.style.setProperty('--pull-refresh-progress', `${pct}`);
+	      indicator.classList.toggle('is-visible', active || refreshing || pullY > 2);
+	      indicator.classList.toggle('is-ready', pct >= 1 && !refreshing);
+	      indicator.classList.toggle('is-refreshing', refreshing);
+	    }
+
+	    async function runRefresh() {
+	      if (refreshing) return;
+	      if (_isForegroundChatBusy()) {
+	        setPull(0, false);
+	        return;
+	      }
+	      refreshing = true;
+	      setPull(THRESHOLD, true);
+	      const safetyTimer = setTimeout(() => {
+	        refreshing = false;
+	        setPull(0, false);
+	      }, 8000);
+	      try {
+	        const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+	        if (sid && sessionModule.selectSession) {
+	          await sessionModule.selectSession(sid, { keepSidebar: true, showLoading: false, immediateLoading: true });
+	        } else if (sessionModule && sessionModule.loadSessions) {
+	          await sessionModule.loadSessions();
+	        }
+	      } catch (err) {
+	        console.warn('pull refresh failed:', err);
+	      } finally {
+	        clearTimeout(safetyTimer);
+	        refreshing = false;
+	        setPull(0, false);
+	      }
+	    }
+
+	    historyEl.addEventListener('touchstart', (e) => {
+	      if (refreshing || window.innerWidth > 768) return;
+	      if (document.querySelector('.modal:not(.hidden)')) return;
+	      if (historyEl.scrollTop > 0) return;
+	      if (e.target && e.target.closest && e.target.closest('.chat-input-bar, textarea, input, button, select, a')) return;
+	      tracking = true;
+	      startY = e.touches[0].clientY;
+	      setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchmove', (e) => {
+	      if (!tracking || refreshing) return;
+	      const dy = e.touches[0].clientY - startY;
+	      if (dy <= 0) {
+	        setPull(0, false);
+	        return;
+	      }
+	      if (historyEl.scrollTop <= 0) {
+	        e.preventDefault();
+	        setPull(dy * 0.62, true);
+	      }
+	    }, { passive: false });
+
+	    historyEl.addEventListener('touchend', () => {
+	      if (!tracking) return;
+	      tracking = false;
+	      if (pullY >= THRESHOLD) runRefresh();
+	      else setPull(0, false);
+	    }, { passive: true });
+
+	    historyEl.addEventListener('touchcancel', () => {
+	      tracking = false;
+	      if (!refreshing) setPull(0, false);
+	    }, { passive: true });
+	  })();
+
+	  // Auto-focus message input on load
+	  const msgEl = document.getElementById('message');
   if (msgEl) msgEl.focus();
   
   // Initialize mouse-based drag for sidebar sections
@@ -4270,14 +4502,6 @@ function startOdysseusApp() {
     }
   }
   
-
-
-  if (window.hljs) {
-    console.log('Highlighting all code blocks on page load');
-    document.querySelectorAll('pre code:not(.hljs)').forEach(block => {
-      window.hljs.highlightElement(block);
-    });
-  }
 }
 
 if (document.readyState === 'loading') {

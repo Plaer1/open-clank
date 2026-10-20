@@ -8,6 +8,8 @@ import { lazy } from "@/util/lazy"
 import { jsonRequest } from "./trace"
 
 const ReplyInput = z.object({
+  sessionID: z.string().min(1).describe("Session that owns the pending interactive command"),
+  callID: z.string().min(1).describe("Tool call that owns the pending interactive command"),
   output: z.string().describe("Captured output from the interactive command"),
   exitCode: z.number().describe("Exit code of the interactive command"),
 })
@@ -29,8 +31,16 @@ export const BashInteractiveRoutes = lazy(() =>
                   z.array(
                     z.object({
                       id: z.string(),
+                      sessionID: z.string(),
+                      callID: z.string(),
                       command: z.string(),
                       cwd: z.string(),
+                      workspace: z.string(),
+                      writableRoots: z.array(z.string()),
+                      shell: z.string(),
+                      network: z.enum(["enabled", "disabled"]),
+                      timeout: z.number(),
+                      env: z.record(z.string(), z.string()).optional(),
                       description: z.string(),
                     }),
                   ),
@@ -73,6 +83,8 @@ export const BashInteractiveRoutes = lazy(() =>
           const svc = yield* BashInteractive.Service
           yield* svc.reply({
             id: params.id,
+            sessionID: json.sessionID,
+            callID: json.callID,
             output: json.output,
             exitCode: json.exitCode,
           })

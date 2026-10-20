@@ -1,0 +1,852 @@
+{
+  "id": "batch-052",
+  "group": "server",
+  "surface": "server",
+  "entry_count": 49,
+  "character_count": 5790,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.running.3c49d9cc",
+      "source": "running",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/assistant_routes.py:449",
+        "routes/codex_routes.py:866",
+        "routes/cookbook_helpers.py:1135",
+        "routes/cookbook_helpers.py:1138",
+        "routes/cookbook_helpers.py:1141",
+        "routes/cookbook_helpers.py:1144",
+        "routes/cookbook_routes.py:3815",
+        "routes/cookbook_routes.py:3881",
+        "routes/research/research_routes.py:266",
+        "routes/research/research_routes.py:566",
+        "routes/skills_routes.py:1688",
+        "routes/skills_routes.py:1700",
+        "routes/skills_routes.py:2337",
+        "routes/skills_routes.py:2350",
+        "routes/skills_routes.py:2418",
+        "routes/skills_routes.py:2462",
+        "routes/skills_routes.py:2478",
+        "services/research/research_handler.py:104",
+        "services/research/research_handler.py:72",
+        "src/ai_interaction.py:1161",
+        "src/bg_jobs.py:302",
+        "src/builtin_actions.py:1715",
+        "src/builtin_actions.py:2834",
+        "src/research_handler.py:591",
+        "src/research_handler.py:704",
+        "src/tools/cookbook.py:1331",
+        "src/tools/cookbook.py:349",
+        "static/js/chat.js:1080",
+        "static/js/chat.js:2290",
+        "static/js/chat.js:4016",
+        "static/js/chat.js:4061",
+        "static/js/chat.js:4406",
+        "static/js/chat.js:4671",
+        "static/js/chat.js:4714",
+        "static/js/chat.js:5491",
+        "static/js/chat.js:556",
+        "static/js/chat.js:5611",
+        "static/js/cookbook-hwfit.js:1718",
+        "static/js/cookbookDownload.js:564",
+        "static/js/cookbookDownload.js:598",
+        "static/js/cookbookDownload.js:608",
+        "static/js/cookbookRunning.js:130",
+        "static/js/cookbookRunning.js:1490",
+        "static/js/cookbookRunning.js:1528",
+        "static/js/cookbookRunning.js:18",
+        "static/js/cookbookRunning.js:2060",
+        "static/js/cookbookRunning.js:2107",
+        "static/js/cookbookRunning.js:2261",
+        "static/js/cookbookRunning.js:2305",
+        "static/js/cookbookRunning.js:2368",
+        "static/js/cookbookRunning.js:2407",
+        "static/js/cookbookRunning.js:2413",
+        "static/js/cookbookRunning.js:2420",
+        "static/js/cookbookRunning.js:2425",
+        "static/js/cookbookRunning.js:2430",
+        "static/js/cookbookRunning.js:2439",
+        "static/js/cookbookRunning.js:2520",
+        "static/js/cookbookRunning.js:2532",
+        "static/js/cookbookRunning.js:2641",
+        "static/js/cookbookRunning.js:2721",
+        "static/js/cookbookRunning.js:2849",
+        "static/js/cookbookRunning.js:2850",
+        "static/js/cookbookRunning.js:2852",
+        "static/js/cookbookRunning.js:2901",
+        "static/js/cookbookRunning.js:2991",
+        "static/js/cookbookRunning.js:3159",
+        "static/js/cookbookRunning.js:3160",
+        "static/js/cookbookRunning.js:3162",
+        "static/js/cookbookRunning.js:3257",
+        "static/js/cookbookRunning.js:3260",
+        "static/js/cookbookRunning.js:3262",
+        "static/js/cookbookRunning.js:3391",
+        "static/js/cookbookRunning.js:3639",
+        "static/js/cookbookRunning.js:3641",
+        "static/js/cookbookRunning.js:3682",
+        "static/js/cookbookRunning.js:3755",
+        "static/js/cookbookRunning.js:3905",
+        "static/js/cookbookRunning.js:3906",
+        "static/js/cookbookRunning.js:3919",
+        "static/js/cookbookRunning.js:392",
+        "static/js/cookbookRunning.js:4036",
+        "static/js/cookbookRunning.js:4100",
+        "static/js/cookbookRunning.js:4101",
+        "static/js/cookbookRunning.js:4139",
+        "static/js/cookbookRunning.js:43",
+        "static/js/cookbookRunning.js:44",
+        "static/js/cookbookRunning.js:47",
+        "static/js/cookbookRunning.js:473",
+        "static/js/cookbookRunning.js:477",
+        "static/js/cookbookRunning.js:483",
+        "static/js/cookbookRunning.js:485",
+        "static/js/cookbookRunning.js:492",
+        "static/js/cookbookRunning.js:496",
+        "static/js/cookbookRunning.js:500",
+        "static/js/cookbookRunning.js:504",
+        "static/js/cookbookRunning.js:516",
+        "static/js/cookbookRunning.js:674",
+        "static/js/cookbookRunning.js:702",
+        "static/js/cookbookRunning.js:703",
+        "static/js/cookbookRunning.js:727",
+        "static/js/cookbookRunning.js:735",
+        "static/js/cookbookRunning.js:781",
+        "static/js/cookbookRunning.js:945",
+        "static/js/cookbookRunning.js:973",
+        "static/js/cookbookServe.js:1153",
+        "static/js/cookbookServe.js:3357",
+        "static/js/cookbookServe.js:82",
+        "static/js/cookbookServe.js:887",
+        "static/js/cookbookServe.js:899",
+        "static/js/galleryEditor.js:310",
+        "static/js/galleryEditor.js:534",
+        "static/js/galleryEditor.js:540",
+        "static/js/notes.js:1908",
+        "static/js/notes.js:4638",
+        "static/js/research/jobs.js:186",
+        "static/js/research/jobs.js:296",
+        "static/js/research/jobs.js:329",
+        "static/js/research/jobs.js:334",
+        "static/js/research/jobs.js:341",
+        "static/js/research/jobs.js:68",
+        "static/js/research/panel.js:110",
+        "static/js/research/panel.js:112",
+        "static/js/research/panel.js:707",
+        "static/js/research/panel.js:753",
+        "static/js/research/panel.js:937",
+        "static/js/research/panel.js:982",
+        "static/js/sessions.js:2614",
+        "static/js/skills.js:120",
+        "static/js/skills.js:1230",
+        "static/js/skills.js:1270",
+        "static/js/skills.js:1272",
+        "static/js/skills.js:1280",
+        "static/js/skills.js:1525",
+        "static/js/skills.js:1554",
+        "static/js/skills.js:1556",
+        "static/js/skills.js:1561",
+        "static/js/skills.js:1562",
+        "static/js/skills.js:1657",
+        "static/js/tasks.js:2024",
+        "static/js/tasks.js:2044",
+        "static/js/tasks.js:2297",
+        "static/js/tasks.js:2659",
+        "static/js/tasks.js:2674",
+        "static/js/tasks.js:2715",
+        "static/js/tasks.js:2716"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.p.27425fb8",
+      "source": "\\s*)(?P",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/copal_routes.py:233"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s.s.4f02b122",
+      "source": "\\s*([\\s\\S]*?)",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "src/tool_parsing.py:115"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.as.pdf",
+      "source": "Save as PDF",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "src/visual_report.py:266"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.file.contents.for.a.regular.expression.across.a.directory",
+      "source": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:147"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.search.huggingface.for.models.matching.a.query.returns.a.ranked",
+      "source": "Search HuggingFace for models matching a query. Returns a ranked list of repo IDs, sizes (when available), and download counts. Use this when the user wants to find a model to download.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:1003"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.search.keyword.s.to.find.in.past.conversations",
+      "source": "Search keyword(s) to find in past conversations",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.list.returns.rows.like.query.research",
+      "source": "\", \"search\": \"...\"}. `list` returns rows like `[query](#research-",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "src/agent_loop.py:677"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.query.e5e05303",
+      "source": "Search query",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:88"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.query.for.list",
+      "source": "Search query (for list)",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:881"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.query.for.search",
+      "source": "Search query (for search).",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.terms.e.g.qwen.8b.flux.llama.3.instruct",
+      "source": "Search terms (e.g. 'Qwen 8B', 'flux', 'llama-3 instruct')",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:1007"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.text.for.action.search",
+      "source": "Search text for action='search'",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.the.user.s.past.session.transcripts.by.keyword.use",
+      "source": "Search the user's past session transcripts by keyword. Use when the user asks about previous chats, past conversations, or when direct transcript evidence is better than persistent memory. Returns matching sessions with clickable links and nearby context.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:392"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.send",
+      "source": "send",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/openclank/tui_app.py:271",
+        "static/app.js:126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shown.once.this.grants.chat.access.to.your.odysseus.revoke.b9fe41bf",
+      "source": "Shown once. This grants chat access to your Odysseus; revoke it in Settings &rarr; API tokens (id ). The device must be on the same network, and the server must bind to your LAN.",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "companion/routes.py:248"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.sign.in.with.google",
+      "source": "Sign in with Google",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/mcp_routes.py:637"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.a.deep.research.task.on.a.topic.returns.a",
+      "source": "Start a deep research task on a topic. Returns a task ID for tracking.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:1122"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.and.control.durable.workspace.contained.shell.sessions.scoped.to",
+      "source": "Start and control durable, workspace-contained shell sessions scoped to this owner/chat/workspace. Use list, poll, tail, write, wait, or terminate with a session id; tail is cursor-based and bounded.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:1353"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.start.iso.datetime.or.yyyy.mm.dd.if.all.day",
+      "source": "Start ISO datetime, or YYYY-MM-DD if all_day",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:674"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stop.a.running.model.server",
+      "source": "Stop a running model server.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_schemas.py:952"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.swap.for.another.image",
+      "source": "Swap for another image",
+      "placeholders": [],
+      "kind": "server-html-attribute",
+      "status": "live",
+      "locations": [
+        "src/visual_report.py:189"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.token.717e4408",
+      "source": "Token:",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "companion/routes.py:246"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tool",
+      "source": "tool",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/tool_parsing.py:1120",
+        "static/js/chat.js:4597",
+        "static/js/chat.js:4602",
+        "static/js/group.js:932"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown",
+      "source": "unknown",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/assistant_routes.py:447",
+        "routes/model_routes.py:1405",
+        "routes/model_routes.py:1429",
+        "routes/model_routes.py:1437",
+        "routes/model_routes.py:1595",
+        "routes/model_routes.py:3992",
+        "routes/model_routes.py:4092",
+        "routes/skills_routes.py:492",
+        "routes/skills_routes.py:493",
+        "src/reminder_endpoints.py:254",
+        "src/reminder_endpoints.py:261",
+        "src/reminder_endpoints.py:262",
+        "src/reminder_endpoints.py:264",
+        "src/reminder_endpoints.py:280",
+        "static/js/admin.js:1022",
+        "static/js/admin.js:1791",
+        "static/js/admin.js:1795",
+        "static/js/admin.js:567",
+        "static/js/admin.js:612",
+        "static/js/admin.js:704",
+        "static/js/admin.js:730",
+        "static/js/calendar.js:270",
+        "static/js/calendar.js:299",
+        "static/js/calendar.js:355",
+        "static/js/chat.js:2389",
+        "static/js/chatRenderer.js:2432",
+        "static/js/chatRenderer.js:2517",
+        "static/js/chatRenderer.js:2573",
+        "static/js/cookbook-diagnosis.js:1071",
+        "static/js/cookbook-diagnosis.js:883",
+        "static/js/cookbook-diagnosis.js:884",
+        "static/js/cookbook-diagnosis.js:885",
+        "static/js/cookbook-diagnosis.js:886",
+        "static/js/cookbookRunning.js:2025",
+        "static/js/cookbookRunning.js:315",
+        "static/js/cookbookRunning.js:316",
+        "static/js/cookbookRunning.js:317",
+        "static/js/cookbookRunning.js:318",
+        "static/js/cookbookServe.js:2837",
+        "static/js/cookbookServe.js:2946",
+        "static/js/copal.js:416",
+        "static/js/gallery.js:1787",
+        "static/js/galleryEditor.js:3312",
+        "static/js/galleryEditor.js:3708",
+        "static/js/galleryEditor.js:4103",
+        "static/js/memory.js:1992",
+        "static/js/memory.js:2023",
+        "static/js/memory.js:2216",
+        "static/js/memory.js:2238",
+        "static/js/memory.js:2256",
+        "static/js/memory.js:2479",
+        "static/js/memory.js:3305",
+        "static/js/memory.js:340",
+        "static/js/memory.js:3503",
+        "static/js/memory.js:353",
+        "static/js/memory.js:50",
+        "static/js/settings.js:5658",
+        "static/js/settings.js:5679",
+        "static/js/settings.js:5702",
+        "static/js/settings.js:6606",
+        "static/js/settings.js:6716",
+        "static/js/settings.js:6762",
+        "static/js/settings.js:6783",
+        "static/js/settings.js:6811",
+        "static/js/settings.js:6916",
+        "static/js/settings.js:7020",
+        "static/js/skills.js:1398",
+        "static/js/skills.js:1399",
+        "static/js/skills.js:243",
+        "static/js/skills.js:784",
+        "static/js/util/memoryExport.js:26",
+        "static/js/util/memoryTrust.js:81"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.list.add.directory.remove.directory",
+      "source": "Unknown action '{action}'. Use: list, add_directory, remove_directory",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/ai_interaction.py:616"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.list.add.edit.delete.search.resolve",
+      "source": "Unknown action '{action}'. Use: list, add, edit, delete, search, resolve",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/ai_interaction.py:517"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.list.add.update.or.delete",
+      "source": "Unknown action '{action}'. Use list, add, update, or delete.",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tools/contacts.py:159"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.list.switch.rename.archive.unarchive.delete",
+      "source": "Unknown action '{action}'. Use: list, switch, rename, archive, unarchive, delete, important, unimportant, truncate, fork",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/session_tools.py:504"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.action.value.use.toggle.switch.model.set.theme.highlight",
+      "source": "Unknown action '{action}'. Use: toggle, switch_model, set_theme, highlight, clear_highlight, get_toggles",
+      "placeholders": [
+        "action"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/ai_interaction.py:937"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.ai.interaction.tool.value",
+      "source": "Unknown AI interaction tool: {tool}",
+      "placeholders": [
+        "tool"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/ai_interaction.py:1245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.device.authorization",
+      "source": "Unknown device authorization",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/tui_routes.py:216"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.error.af6321ca",
+      "source": "unknown error",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/deep_research.py:342",
+        "static/js/copal/notesFeature.js:1962",
+        "static/js/settings.js:7156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.hexes.stage.stage.r",
+      "source": "unknown Hexes stage {stage!r}",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/hex_contract.py:191"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.model.value",
+      "source": "Unknown model: {model_name}",
+      "placeholders": [
+        "model_name"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/embedding_routes.py:151",
+        "routes/embedding_routes.py:186",
+        "routes/embedding_routes.py:213"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.or.expired.device.code",
+      "source": "Unknown or expired device code",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/tui_routes.py:186",
+        "routes/tui_routes.py:201"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.or.expired.login.session",
+      "source": "Unknown or expired login session",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/device_flow.py:164"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.package.value",
+      "source": "Unknown package: {pip_name}",
+      "placeholders": [
+        "pip_name"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/shell_routes.py:1799"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.panel.value.valid.documents.gallery.email.sessions.notes.memorie",
+      "source": "Unknown panel '{panel}'. Valid: documents, gallery, email, sessions, notes, memories, skills, settings, cookbook.",
+      "placeholders": [
+        "panel"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/ai_interaction.py:870"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.provider",
+      "source": "Unknown provider",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "routes/search_routes.py:100",
+        "static/js/modelLabels.js:3"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.token.profile",
+      "source": "Unknown token profile",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/api_token_routes.py:46"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.token.scope.value",
+      "source": "Unknown token scope: {scope}",
+      "placeholders": [
+        "scope"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/api_token_routes.py:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.tool.value",
+      "source": "Unknown tool: {tool}",
+      "placeholders": [
+        "tool"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tool_execution.py:1356"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.rate.limit.exceeded.please.try.again.later",
+      "source": "Upload rate limit exceeded. Please try again later.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/upload_handler.py:1512"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value",
+      "source": "value",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/tool_parsing.py:160",
+        "static/js/copal/notesFeature.js:2382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.529947f9",
+      "source": "{i}.",
+      "placeholders": [
+        "i"
+      ],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "src/visual_report.py:1846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.code",
+      "source": "{redirect_uri}?code=...",
+      "placeholders": [
+        "redirect_uri"
+      ],
+      "kind": "server-html-attribute",
+      "status": "live",
+      "locations": [
+        "routes/mcp_routes.py:641"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.warning.383fd7bf",
+      "source": "warning",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "src/research_handler.py:697",
+        "static/app.js:2808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.does",
+      "source": "', 'what does",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "src/agent_loop.py:664"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

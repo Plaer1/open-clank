@@ -19,12 +19,17 @@ export const DEFAULT_KIND_TRUST = {
 
 export function trustPrefs(prefs) {
   const safe = prefs && typeof prefs === 'object' ? prefs : {};
-  const master = Boolean(safe.memory_trust_auto);
+  // Persisted preferences are a typed contract.  Boolean("false") is true,
+  // so malformed values must fail closed instead of silently changing the
+  // injection policy.
+  const master = typeof safe.memory_trust_auto === 'boolean'
+    ? safe.memory_trust_auto
+    : false;
   const kinds = { ...DEFAULT_KIND_TRUST };
   const raw = safe.memory_trust_auto_kinds;
   if (raw && typeof raw === 'object') {
     for (const [kind, value] of Object.entries(raw)) {
-      if (kind in kinds) kinds[kind] = Boolean(value);
+      if (kind in kinds) kinds[kind] = typeof value === 'boolean' ? value : false;
     }
   }
   return { master, kinds };
@@ -36,7 +41,7 @@ export function trustPrefs(prefs) {
 export function isTrusted(record, prefs) {
   if (!record || typeof record !== 'object') return false;
   if (String(record.source_type || '') === 'human') return true;
-  if (record.pinned) return true;
+  if (record.pinned === true) return true;
   const kind = String(record.kind || '');
   if (!TRUSTABLE_KINDS.includes(kind)) return false;
   const { master, kinds } = trustPrefs(prefs);
@@ -94,13 +99,40 @@ export function memoryChips(record, prefs) {
   if (record.exempt_from_decay) chips.push({ label: 'no-decay', cls: 'exempt', title: 'Exempt from decay' });
   if (record.exempt_from_dedup) chips.push({ label: 'no-dedup', cls: 'exempt', title: 'Exempt from dedup' });
 
-  for (const [key, short] of [['trust_score', 'T'], ['confidence_score', 'C'], ['importance_score', 'I']]) {
+  // Trust is the one user-facing epistemic measure. A durable owner
+  // assignment is authoritative; legacy trust_score is intentionally not
+  // promoted into an assignment and is shown only as a compatibility signal
+  // when no assignment is available. Producer confidence is technical
+  // quality, not “how much I trust this information”, so it is labeled
+  // quality rather than surfaced as a second epistemic score.
+  const assignment = record.trust && typeof record.trust === 'object'
+    ? record.trust
+    : null;
+  const assignedValue = assignment && assignment.state === 'assigned'
+    ? assignment.value
+    : null;
+  if (assignedValue !== null && Number.isFinite(Number(assignedValue))) {
+    const bucket = scoreBucket(assignedValue);
+    chips.push({
+      label: `trust:${bucket}`,
+      cls: 'trust-assignment',
+      title: `Owner Trust assignment: ${Number(assignedValue).toFixed(3)}${assignment.actor_id ? ` by ${assignment.actor_id}` : ''}${assignment.reason_code ? ` (${assignment.reason_code})` : ''}`,
+    });
+  } else {
+    chips.push({
+      label: 'trust:unreviewed',
+      cls: 'trust-assignment',
+      title: 'No attributable owner Trust assignment; producer signals cannot set Trust',
+    });
+  }
+
+  for (const [key, label] of [['confidence_score', 'quality'], ['importance_score', 'importance']]) {
     const bucket = scoreBucket(record[key]);
     if (bucket !== null) {
       chips.push({
-        label: `${short}:${bucket}`,
+        label: `${label}:${bucket}`,
         cls: `score score-${bucket}`,
-        title: `${key.replace('_', ' ')}: ${Number(record[key]).toFixed(3)}`,
+        title: `${label === 'quality' ? 'technical producer quality (legacy confidence_score)' : 'importance score'}: ${Number(record[key]).toFixed(3)}`,
       });
     }
   }

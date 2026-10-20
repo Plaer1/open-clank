@@ -1,0 +1,1 @@
+The decision follows constraints and observed evidence, and unresolved platform/license questions are not presented as settled.

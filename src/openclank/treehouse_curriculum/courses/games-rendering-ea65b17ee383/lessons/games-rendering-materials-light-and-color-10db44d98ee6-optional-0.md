@@ -1,0 +1,1 @@
+The silhouette points to geometry, shine to material/lighting, and roughness is treated as numerical data with the correct import interpretation.

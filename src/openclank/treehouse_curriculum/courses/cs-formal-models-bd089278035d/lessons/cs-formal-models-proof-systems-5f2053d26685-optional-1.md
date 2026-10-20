@@ -1,0 +1,1 @@
+Truth in one model is weaker than validity in every relevant model.

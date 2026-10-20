@@ -1,0 +1,1 @@
+A candidate matching two results is not evidence of original names or whole-program equivalence.

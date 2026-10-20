@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
 import { Effect, Stream, ManagedRuntime, Layer } from "effect"
-import { LLM } from "../../src/session/llm"
+import { LLM, stripManagedProjectionOptions } from "../../src/session/llm"
 import { ActorRegistry } from "../../src/actor/registry"
 import { Session as SessionNs } from "../../src/session"
 import { Instance } from "../../src/project/instance"
@@ -134,6 +134,17 @@ function tmpConfig(providerID: string, baseURL: string) {
 }
 
 describe("session.llm system prompt — memory-instructions guard", () => {
+  test("managed projection metadata never enters provider request options", () => {
+    expect(
+      stripManagedProjectionOptions({
+        temperature: 0.2,
+        _openclankConnectionID: "conn-1",
+        _openclankModelRouteID: "route-1",
+        nested: { keep: true },
+      }),
+    ).toEqual({ temperature: 0.2, nested: { keep: true } })
+  })
+
   test("main agent (no agentID) — '# Memory system' IS appended", async () => {
     const server = queueState.server!
     const providerID = "alibaba"

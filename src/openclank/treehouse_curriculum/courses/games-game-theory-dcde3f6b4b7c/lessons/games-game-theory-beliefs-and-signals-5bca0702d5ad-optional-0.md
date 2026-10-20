@@ -1,0 +1,1 @@
+P(signal)=3/8; P(Strong|signal)=1/2. Before: Challenge=1/2 >0. After: Challenge=−1 <0, so Retreat. Signal changes belief, not certainty; a zero-probability signal cannot be conditioned on by division.

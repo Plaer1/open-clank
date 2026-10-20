@@ -1,0 +1,1 @@
+Offsets3–4 fit little-endian coins5/261; offset5 fits room2/3. Coins256 predicts00 01. Other bytes/checksum remain unknown; reject malformed input under an explicit assumption. B favors loaded-config H1 over fixed-speed H2. Flattened PNG/known transform survive; original layers/missing animation/comments/permission are not recovered.

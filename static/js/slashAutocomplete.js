@@ -2,132 +2,19 @@
 // Lightweight popup that surfaces the existing /command registry as users
 // type. Reads COMMANDS from slashCommands.js — no command logic lives here.
 
-import { COMMANDS, LEGACY_ALIASES, loadMimoControlState } from './slashCommands.js';
+import { loadCommandCatalog } from './slashCommands.js';
 
 const POPUP_ID = 'slash-autocomplete';
 const MAX_VISIBLE = 14;
-
-// Flatten the registry into a searchable list of leaf entries. Each entry is
-// either a top-level command or a "cmd sub" pair (so subcommands get their
-// own row when relevant — /toggle web, /chats new, etc).
-// Commands intentionally excluded from the autocomplete popup (pure easter
-// eggs with no productivity value, or internal machinery).
 const EXCLUDED = new Set(['flip','roll','8ball','fortune','odyssey','ascii']);
 
-// Important legacy aliases to promote to their own rows in the popup. These
-// are the short forms people will actually type (/new, /clear, /web, etc.)
-// rather than the full /chats new, /toggle web equivalents.
-const PROMOTED_ALIASES = new Set([
-  'new','clear','rename','fork','export','archive','favorite','unfavorite',
-  'web','bash','research','doc',
-  'memories','forget',
-]);
-
-function _flatten() {
-  const out = [];
-  const seen = new Set();
-
-  // 1. Top-level commands and their subcommands from COMMANDS
-  for (const [name, def] of Object.entries(COMMANDS)) {
-    if (EXCLUDED.has(name)) continue;
-    if (def.hidden) continue;
-    if (def.handler) {
-      seen.add(`/${name}`);
-      out.push({
-        token: `/${name}`,
-        aliases: (def.alias || []).map(a => `/${a}`),
-        category: def.category || '',
-        help: def.help || '',
-        usage: def.usage || '',
-      });
-    }
-    if (def.subs) {
-      for (const [sub, sdef] of Object.entries(def.subs)) {
-        if (sub.startsWith('_')) continue;
-        if (sdef.hidden) continue;
-        const tok = `/${name} ${sub}`;
-        seen.add(tok);
-        out.push({
-          token: tok,
-          aliases: (sdef.alias || []).map(a => `/${name} ${a}`),
-          category: def.category || '',
-          help: sdef.help || '',
-          usage: sdef.usage || '',
-        });
-      }
-    }
-  }
-
-  // 2. Promoted legacy aliases (/new, /clear, /web …) as convenient short rows
-  if (LEGACY_ALIASES) {
-    for (const [alias, { parent, sub }] of Object.entries(LEGACY_ALIASES)) {
-      if (!PROMOTED_ALIASES.has(alias)) continue;
-      const tok = `/${alias}`;
-      if (seen.has(tok)) continue;
-      const parentDef = COMMANDS[parent];
-      const subDef = parentDef?.subs?.[sub];
-      if (!subDef) continue;
-      seen.add(tok);
-      out.push({
-        token: tok,
-        aliases: [],
-        category: parentDef.category || '',
-        help: subDef.help || '',
-        usage: tok,
-      });
-    }
-  }
-
-  return out;
-}
-
-async function _loadSkillEntries() {
-  try {
-    const res = await fetch('/api/skills/slash-catalog', { credentials: 'same-origin' });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (Array.isArray(data.skills) ? data.skills : []).map(s => ({
-      token: s.token || `/${s.name}`,
-      aliases: [],
-      category: s.category || 'Skills',
-      help: s.help || 'Run skill',
-      usage: s.usage || `${s.token || `/${s.name}`} <request>`,
-    })).filter(e => e.token && e.token.startsWith('/'));
-  } catch {
-    return [];
-  }
-}
-
-async function _loadMimoEntries(force = false) {
-  const state = await loadMimoControlState(force);
-  if (!state.available) return [];
+function _catalogEntries(catalog) {
   const entries = [];
-  for (const mode of state.modes?.availableModes || []) {
-    entries.push({
-      token: `/${mode.id}`,
-      aliases: [],
-      category: 'MiMo modes',
-      help: mode.description || `Switch MiMo to ${mode.name || mode.id}`,
-      usage: `/${mode.id} [prompt]`,
-    });
-  }
-  for (const command of state.commands || []) {
-    const help = command.description || 'Run MiMo command';
-    entries.push({
-      token: `/mimo:${command.name}`,
-      aliases: [],
-      category: 'MiMo commands',
-      help,
-      usage: `/mimo:${command.name} [arguments]`,
-    });
-    entries.push({
-      token: `/${command.name}`,
-      aliases: [],
-      category: 'MiMo commands',
-      help,
-      usage: `/${command.name} [arguments]`,
-      mimoBare: true,
-    });
+  for (const entry of catalog.entries) {
+    if (entry.hidden || EXCLUDED.has(entry.name)) continue;
+    entries.push(entry);
+    // An alias row is only inserted when it resolves to exactly this identity.
+    for (const token of entry.aliases) if (catalog.winners.get(token.toLowerCase()) === entry) entries.push({ ...entry, token, aliases: [], usage: `${token} ${entry.arguments}`.trim() });
   }
   return entries;
 }
@@ -145,7 +32,7 @@ function _scoreMatch(entry, query) {
     if (al.startsWith(q)) return 400;
   }
   if (t.includes(q)) return 100;
-  if (entry.help.toLowerCase().includes(q.slice(1))) return 25;  // help text
+  if ([entry.help, ...(entry.searchTerms || [])].some(value => String(value).toLowerCase().includes(q.slice(1)))) return 25;  // help text
   return 0;
 }
 
@@ -190,9 +77,9 @@ function _position(popup, textarea) {
   }
 }
 
-function _render(popup, items, selectedIdx, query) {
+function _render(popup, items, selectedIdx, query, notice = '') {
   if (!items.length) {
-    popup.innerHTML = `<div class="slash-ac-empty">No commands match <code>${_esc(query)}</code></div>`;
+    popup.innerHTML = `<div class="slash-ac-empty" role="status">${notice ? _esc(notice) : 'No commands match <code>' + _esc(query) + '</code>'}</div>`;
     return;
   }
   // Group by category for the headers
@@ -206,12 +93,13 @@ function _render(popup, items, selectedIdx, query) {
     }
     const sel = i === selectedIdx ? ' slash-ac-row-sel' : '';
     const usage = it.usage && it.usage !== it.token ? ` <span class="slash-ac-usage">${_esc(it.usage)}</span>` : '';
-    html += `<div class="slash-ac-row${sel}" role="option" data-idx="${i}" data-token="${_esc(it.token)}">`
+    html += `<div class="slash-ac-row${sel}" role="option" aria-selected="${i === selectedIdx}" data-idx="${i}" data-token="${_esc(it.token)}">`
          +    `<span class="slash-ac-token">${_esc(it.token)}</span>`
-         +    `<span class="slash-ac-help">${_esc(it.help)}</span>`
+         +    `<span class="slash-ac-help">${_esc(it.help)} · ${_esc(it.origin || '')} · ${_esc(it.scope || '')}${it.availability !== 'available' ? ' · ' + _esc(it.availability || 'unavailable') + ': ' + _esc(it.reason || '') : ''}</span>`
          +    usage
          + `</div>`;
   }
+  html += `<div class="slash-ac-empty" role="status">${notice ? _esc(notice) + ' · ' : ''}Use /commands for the complete filtered catalog.</div>`;
   popup.innerHTML = html;
   // Scroll selected into view
   const selEl = popup.querySelector('.slash-ac-row-sel');
@@ -226,10 +114,9 @@ export function initSlashAutocomplete(textarea) {
   if (!textarea || textarea._slashAcWired) return;
   textarea._slashAcWired = true;
 
-  const baseEntries = _flatten();
-  let skillEntries = [];
-  let mimoEntries = [];
-  let all = baseEntries.slice();
+  let all = [];
+  let catalogRevision = 0;
+  let catalogNotice = 'Loading command catalog';
   let popup = null;
   let visible = false;
   let items = [];
@@ -239,12 +126,15 @@ export function initSlashAutocomplete(textarea) {
     if (!visible) return;
     visible = false;
     if (popup) popup.style.display = 'none';
+    textarea.setAttribute('aria-expanded', 'false');
   };
 
   const show = () => {
     if (!popup) popup = _ensurePopup(textarea);
     visible = true;
     popup.style.display = 'block';
+    textarea.setAttribute('aria-controls', POPUP_ID);
+    textarea.setAttribute('aria-expanded', 'true');
     _position(popup, textarea);
   };
 
@@ -267,40 +157,33 @@ export function initSlashAutocomplete(textarea) {
       .slice(0, MAX_VISIBLE)
       .map(x => x.e);
     }
-    if (!items.length && query.length > 1) { hide(); return; }
+    if (!items.length && query.length > 1) { selectedIdx = 0; show(); _render(popup, [], 0, query, catalogNotice); return; }
     if (!items.length) {
       // Just "/" with no matches — fall back to showing everything up to MAX_VISIBLE
       items = all.slice(0, MAX_VISIBLE);
     }
     selectedIdx = 0;
     show();
-    _render(popup, items, selectedIdx, query);
+    _render(popup, items, selectedIdx, query, catalogNotice);
   };
 
-  const rebuildCatalog = () => {
-    const seen = new Set();
-    const merged = [];
-    for (const entry of [...baseEntries, ...skillEntries, ...mimoEntries]) {
-      if (seen.has(entry.token)) continue;
-      seen.add(entry.token);
-      merged.push(entry);
+  const refreshCatalog = async () => {
+    const revision = ++catalogRevision;
+    let catalog;
+    try { catalog = await loadCommandCatalog({ fresh: true }); }
+    catch (error) {
+      if (revision !== catalogRevision) return;
+      catalogNotice = 'Command catalog unavailable: ' + error.message + '. Focus the composer to retry.';
+      if (textarea.value.startsWith('/')) refresh();
+      return;
     }
-    all = merged;
-    if (visible) refresh();
+    if (revision !== catalogRevision) return;
+    catalogNotice = (catalog.errors || []).join(' · ');
+    all = _catalogEntries(catalog);
+    if (textarea.value.startsWith('/')) refresh();
   };
-
-  _loadSkillEntries().then(entries => {
-    skillEntries = entries;
-    rebuildCatalog();
-  });
-  const refreshMimoEntries = force => _loadMimoEntries(force).then(entries => {
-    const localTokens = new Set([...baseEntries, ...skillEntries].map(entry => entry.token));
-    mimoEntries = entries.filter(entry => !entry.mimoBare || !localTokens.has(entry.token));
-    rebuildCatalog();
-  });
-  refreshMimoEntries(false);
-  document.addEventListener('odysseus:session-selected', () => refreshMimoEntries(false));
-  document.addEventListener('odysseus:mimo-state-changed', () => refreshMimoEntries(false));
+  refreshCatalog();
+  for (const event of ['odysseus:session-selected', 'odysseus:mimo-state-changed', 'odysseus:skills-changed', 'odysseus:skill-trust-changed', 'odysseus:workspace-changed', 'odysseus:provider-changed', 'odysseus:mcp-changed', 'odysseus:command-catalog-changed', 'openclank:languagechange']) document.addEventListener(event, refreshCatalog);
 
   const insert = (token) => {
     textarea.value = token + ' ';
@@ -312,7 +195,7 @@ export function initSlashAutocomplete(textarea) {
   };
 
   textarea.addEventListener('input', refresh);
-  textarea.addEventListener('focus', () => { if (textarea.value.startsWith('/')) refresh(); });
+  textarea.addEventListener('focus', () => { if (textarea.value.startsWith('/')) { refresh(); refreshCatalog(); } });
   textarea.addEventListener('blur', () => { setTimeout(hide, 120); });  // delay so click works
 
   textarea.addEventListener('keydown', (e) => {
@@ -320,11 +203,11 @@ export function initSlashAutocomplete(textarea) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       selectedIdx = (selectedIdx + 1) % items.length;
-      _render(popup, items, selectedIdx, textarea.value);
+      _render(popup, items, selectedIdx, textarea.value, catalogNotice);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       selectedIdx = (selectedIdx - 1 + items.length) % items.length;
-      _render(popup, items, selectedIdx, textarea.value);
+      _render(popup, items, selectedIdx, textarea.value, catalogNotice);
     } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
       // Tab always inserts. Enter inserts only when the user hasn't already
       // typed a full command + args — i.e. the popup is still in completion

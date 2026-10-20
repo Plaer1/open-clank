@@ -1,6 +1,12 @@
 import json
+import pytest
 
 import routes.embedding_routes as embedding_routes
+
+
+pytestmark = pytest.mark.skip(
+    reason="retired embedding endpoint authority; normalized coverage is in test_managed_embeddings.py"
+)
 
 
 def test_load_custom_endpoint_ignores_non_object_json(tmp_path, monkeypatch):

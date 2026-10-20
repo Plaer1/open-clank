@@ -9,8 +9,9 @@ import type { SessionID } from "../session/schema"
 // a relative path lines up with an Edit on the absolute one.
 function canon(sessionID: SessionID, p: string): string {
   const abs = path.isAbsolute(p) ? p : path.resolve(SessionCwd.get(sessionID), p)
-  if (process.platform === "win32") return AppFileSystem.normalizePath(abs).toLowerCase()
-  return abs
+  const canonical = AppFileSystem.resolve(abs)
+  if (process.platform === "win32") return AppFileSystem.normalizePath(canonical).toLowerCase()
+  return canonical
 }
 
 /**
@@ -23,7 +24,7 @@ function canon(sessionID: SessionID, p: string): string {
  * tool result it can act on (call Read, then retry) rather than as a hard
  * system fault.
  */
-export function assertFileRead(ctx: Tool.Context, targetPath: string, toolId: string): void {
+export function assertFileRead(ctx: Tool.Context, targetPath: string, toolId: string): string | undefined {
   const target = canon(ctx.sessionID, targetPath)
 
   for (const msg of ctx.messages) {
@@ -34,11 +35,17 @@ export function assertFileRead(ctx: Tool.Context, targetPath: string, toolId: st
       const input = part.state.input as { file_path?: unknown } | undefined
       const fp = input?.file_path
       if (typeof fp !== "string") continue
-      if (canon(ctx.sessionID, fp) === target) return
+      if (canon(ctx.sessionID, fp) !== target) continue
+      const fingerprint = part.state.metadata?.fingerprint
+      if (typeof fingerprint === "string") return fingerprint
+      // Sessions created before fingerprinted reads shipped still contain a
+      // valid completed Read. Let the writer take a fresh snapshot and use its
+      // commit-time CAS; new reads always take the stronger branch above.
+      return undefined
     }
   }
 
   throw new RecoverableError(
-    `${toolId}: ${targetPath} has not been read in this conversation. Call the read tool on this file first, then retry.`,
+    `${toolId}: ${targetPath} has not been read with a current fingerprint. Call the read tool on this file, then retry.`,
   )
 }

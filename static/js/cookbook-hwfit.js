@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK HWFIT SUB-MODULE
 // "What Fits?" hardware model fitting UI
@@ -40,7 +41,13 @@ import { openCookbookDependencies } from './cookbook-diagnosis.js';
 // Map a serve-backend code (vllm / sglang / llamacpp / mlx) → the package name
 // the Dependencies API reports. Used to look up "is this backend installed
 // on the target server" before firing a launch.
-const _BACKEND_PKG = { vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp', mlx: 'mlx_lm' };
+const _BACKEND_PKG = { vllm: 'vllm', sglang: 'sglang', llamacpp: 'llama_cpp', mlx: 'mlx_lm', mlx_image: 'mflux', diffusers: 'diffusers' };
+function _dependencyPkgForModel(runBackend, modelName = '') {
+  const nm = String(modelName || '').toLowerCase();
+  if (runBackend === 'mlx_image' && nm.includes('boogu')) return 'boogu_image_mlx';
+  if (runBackend === 'diffusers' && nm.includes('krea')) return 'krea_diffusers';
+  return _BACKEND_PKG[runBackend];
+}
 
 function _normalizeCookbookModelDir(dir) {
   const d = String(dir || '').replaceAll('\u2715', '').replaceAll('\u2716', '').trim();
@@ -95,7 +102,7 @@ function _wireServerColorPicker(entry) {
 // the target server. Returns true if it's good to go, false if we should
 // block and route the user into Dependencies.
 async function _ensureBackendInstalled(runBackend, host, port, envPath, modelName) {
-  const pkgName = _BACKEND_PKG[runBackend];
+  const pkgName = _dependencyPkgForModel(runBackend, modelName);
   if (!pkgName) return true; // unknown backend — don't block
   try {
     const params = new URLSearchParams();
@@ -542,9 +549,31 @@ function _hwfitShowError(list, host, detail) {
 // needed. Ollama rows are merged into the main list (see _ensureOllamaLib +
 // _ollamaToHwfitRows below) so the filter handles all engines uniformly.
 function _applyEngineFilter(models) {
+  let out = Array.isArray(models) ? models : [];
+  const useCase = document.getElementById('hwfit-usecase')?.value || '';
+  const srv = _serverByVal(_envState.remoteServerKey || _envState.remoteHost);
+  const platform = String(srv?.platform || _envState.platform || _hwfitCache?.system?.platform || '').toLowerCase();
+  const backend = String(_hwfitCache?.system?.backend || '').toLowerCase();
+  const gpuName = String(_hwfitCache?.system?.gpu_name || '').toLowerCase();
+  const isAppleTarget = !!(useCase === 'image_gen' && (
+    platform === 'darwin'
+    || platform === 'macos'
+    || platform.includes('mac')
+    || backend === 'metal'
+    || backend === 'mps'
+    || backend === 'apple'
+    || gpuName.includes('apple')
+    || _hwfitCache?.system?.unified_memory
+  ));
+	  if (isAppleTarget) {
+	    out = out.filter(m => {
+	      const text = `${m?.name || ''} ${m?.id || ''} ${m?.provider || ''}`.toLowerCase();
+	      return text.includes('mlx-community/') || text.includes('mlx-community') || m?.mlx_only || m?.apple_ok;
+	    });
+	  }
   const want = document.getElementById('hwfit-engine')?.value || '';
-  if (!want || !Array.isArray(models)) return models || [];
-  return models.filter(m => {
+  if (!want) return out;
+  return out.filter(m => {
     try { return _detectBackend(m).backend === want; } catch { return true; }
   });
 }
@@ -794,7 +823,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
       if (v !== '') params.set(k, v);
     });
     if (hasManualOrDismissed) params.set('_hw_override_ts', String(Date.now()));
-    // Image models use a separate registry/endpoint
+    // Image models use a separate registry/endpoint.
     const isImageMode = useCase === 'image_gen';
     if ((fresh || (_paintedFromCache && !search)) && !isImageMode) {
       params.set('refresh_catalog', '1'); // update HF-backed dynamic catalogs in the background
@@ -840,7 +869,7 @@ export async function _hwfitFetch(fresh = false, opts = {}) {
         }
       }
     }
-    // Normalize image model fields to match LLM renderer expectations
+    // Normalize image model fields to match LLM renderer expectations.
     if (isImageMode && data.models) {
       data.models = data.models.map(m => ({
         ...m,
@@ -1002,7 +1031,7 @@ function _renderHwVisibilityWarning(sys) {
   box.querySelector('[data-hw-action="copy"]')?.addEventListener('click', () => {
     // Keep diagnostics copy/paste friendly for GitHub issues and Docker support.
     const text = [
-      'Odysseus Cookbook hardware diagnostics',
+      'Open Clank Cookbook hardware diagnostics',
       `probe_scope=${sys?.probe_scope || ''}`,
       `containerized=${sys?.containerized === true}`,
       `backend=${sys?.backend || ''}`,
@@ -1263,9 +1292,46 @@ export const _hwfitColumns = [
   { key: null,    label: 'Mode',   cls: 'hwfit-c-mode' },
 ];
 
+function _sortHwfitRows(models) {
+  const rows = Array.isArray(models) ? [...models] : [];
+  const sortSel = document.getElementById('hwfit-sort');
+  const sortKey = sortSel?.value || 'newest';
+  const asc = sortSel?.dataset.reverse === '1';
+  if (sortKey === 'fit') {
+    const fitRank = { perfect: 4, good: 3, marginal: 2, too_tight: 1, no_fit: 0 };
+    rows.sort((a, b) => {
+      const ar = fitRank[a.fit_level] ?? -1;
+      const br = fitRank[b.fit_level] ?? -1;
+      if (ar !== br) return asc ? ar - br : br - ar;
+      const as = Number(a.score) || 0;
+      const bs = Number(b.score) || 0;
+      return asc ? as - bs : bs - as;
+    });
+    return rows;
+  }
+  if (sortKey === 'newest') {
+    rows.sort((a, b) => {
+      const ad = String(a.release_date || '');
+      const bd = String(b.release_date || '');
+      if (ad === bd) return 0;
+      if (!ad) return 1;
+      if (!bd) return -1;
+      return asc ? (ad < bd ? -1 : 1) : (ad < bd ? 1 : -1);
+    });
+    return rows;
+  }
+  const field = { score: 'score', vram: 'required_gb', speed: 'speed_tps', params: 'params_b', context: 'context' }[sortKey] || 'score';
+  rows.sort((a, b) => {
+    const av = Number(a[field]) || 0;
+    const bv = Number(b[field]) || 0;
+    return asc ? av - bv : bv - av;
+  });
+  return rows;
+}
+
 export function _hwfitRenderList(el, models) {
   if (!el) return;
-  models = models || [];
+  models = _sortHwfitRows(models);
   if (!models.length) {
     // Disambiguate WHY the list is empty so capable servers don't read as "too weak":
     // active filters vs. a likely under-reported probe vs. genuinely low hardware.
@@ -1570,7 +1636,9 @@ export function _expandModelRow(row, modelData) {
   html += `</div>`;
   html += `<div class="hwfit-panel-actions">`;
   html += `<button class="cookbook-btn hwfit-dl-btn">Download</button>`;
-  if (!modelData.is_image_gen) {
+  if (modelData.is_image_gen) {
+    html += `<button class="cookbook-btn cookbook-run-btn hwfit-quickrun-btn" title="Download + run as an image endpoint">Run Image</button>`;
+  } else {
     html += `<button class="cookbook-btn cookbook-run-btn hwfit-quickrun-btn" title="Download + launch with smart defaults">Run</button>`;
     html += `<button class="cookbook-btn hwfit-serve-expand-btn" title="Configure & serve">Configure</button>`;
   }
@@ -1653,30 +1721,34 @@ export function _expandModelRow(row, modelData) {
         const _clashing = _allServes.filter(t => _taskPort(t) === _qrPort);
         if (_clashing.length) {
           const _names = _clashing.map(t => t.payload?.repo_id || t.repo || t.name || '?').filter(Boolean);
-          const _ok = await window.styledConfirm?.(
-            `${_clashing.length} model${_clashing.length === 1 ? '' : 's'} on port ${_qrPort} (${_names.join(', ')}). Stop it and launch this one?`,
-            { confirmText: 'Stop & launch', cancelText: 'Cancel' }
+          const _choice = await window.styledConfirm?.(
+            `${_clashing.length} model${_clashing.length === 1 ? '' : 's'} on port ${_qrPort} (${_names.join(', ')}). Stop it first, or launch anyway?`,
+            { title: `Port ${_qrPort} in use`, confirmText: 'Stop & launch', alternateText: 'Launch anyway', cancelText: 'Cancel' }
           );
-          if (!_ok) return;
-          quickRunBtn.disabled = true;
-          quickRunBtn.textContent = 'Stopping…';
-          for (const t of _clashing) {
-            try {
-              const _taskEl = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
-              const _stopBtn = _taskEl?.querySelector('.cookbook-task-action-stop');
-              if (_stopBtn) {
-                _stopBtn.click();
-              } else {
-                await fetch('/api/shell/exec', {
-                  method: 'POST',
-                  credentials: 'same-origin',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ command: _tmuxGracefulKill(t) }),
-                });
+          if (!_choice) return;
+          if (_choice === 'alternate') {
+            uiModule.showToast('Launching anyway. If the port is already occupied, the new serve may fail.', 6000);
+          } else {
+            quickRunBtn.disabled = true;
+            quickRunBtn.textContent = 'Stopping…';
+            for (const t of _clashing) {
+              try {
+                const _taskEl = document.querySelector(`.cookbook-task[data-task-id="${t.sessionId}"]`);
+                const _stopBtn = _taskEl?.querySelector('.cookbook-task-action-stop');
+                if (_stopBtn) {
+                  _stopBtn.click();
+                } else {
+                  await fetch('/api/shell/exec', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: _tmuxGracefulKill(t) }),
+                  });
+                }
+              } catch (_killErr) { /* best-effort */ }
               }
-            } catch (_killErr) { /* best-effort */ }
+            await new Promise(r => setTimeout(r, 2500));
           }
-          await new Promise(r => setTimeout(r, 2500));
         }
       } catch (_e) { /* best-effort */ }
 
@@ -1808,9 +1880,12 @@ export function _expandModelRow(row, modelData) {
         cmd += ` --context-length ${maxCtx}`;
         cmd += ` --mem-fraction-static ${gpuUtil}`;
         cmd += ' --trust-remote-code';
+      } else if (runBackend === 'mlx_image') {
+        const bindHost = host ? '0.0.0.0' : '127.0.0.1';
+        cmd = `python3 scripts/mlx_image_server.py --model ${_shellQuote(modelData.name)} --host ${bindHost} --port ${port} --steps 20`;
       } else if (runBackend === 'mlx') {
         const bindHost = host ? '0.0.0.0' : '127.0.0.1';
-        cmd = `python3 -m mlx_lm.server --model ${_shellQuote(modelData.name)} --host ${bindHost} --port ${port}`;
+        cmd = `python3 -m mlx_lm.server --model ${_shellQuote(modelData.name)} --host ${bindHost} --port ${port} --max-tokens ${maxCtx}`;
       } else if (runBackend === 'llamacpp') {
         const dir = `"$HOME/.cache/huggingface/hub/models--${modelData.name.replace(/\//g, '--')}/snapshots"`;
         const ggufPath = `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
@@ -1852,7 +1927,7 @@ export function _expandModelRow(row, modelData) {
       );
       if (!_ok) {
         quickRunBtn.disabled = false;
-        quickRunBtn.textContent = 'Run';
+        quickRunBtn.textContent = modelData.is_image_gen ? 'Run Image' : 'Run';
         return;
       }
 
@@ -1889,7 +1964,7 @@ export function _expandModelRow(row, modelData) {
         uiModule.showError('Launch failed: ' + e.message);
       }
       quickRunBtn.disabled = false;
-      quickRunBtn.textContent = 'Run';
+      quickRunBtn.textContent = modelData.is_image_gen ? 'Run Image' : 'Run';
     });
   }
 
@@ -1925,7 +2000,7 @@ export function _expandModelRow(row, modelData) {
 }
 
 const _HWFIT_ENGINE_GLYPHS = {
-  '': '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="8" cy="6" r="2" fill="currentColor" stroke="none"></circle><circle cx="16" cy="12" r="2" fill="currentColor" stroke="none"></circle><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"></circle></svg>',
+  '': uiIcon('sliders', 14),
   vllm: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4l7 16 7-16"></path><path d="M14 4l4 9 3-9"></path></svg>',
   sglang: '<span aria-hidden="true" style="display:block;width:14px;height:14px;background:currentColor;-webkit-mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;mask:url(/static/icons/sglang-mark.png) center/contain no-repeat;"></span>',
   mlx: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 18V6l4 7 4-7v12"></path><path d="M16 6v12"></path><path d="M20 6v12"></path></svg>',
@@ -1936,6 +2011,89 @@ const _HWFIT_ENGINE_GLYPHS = {
 
 function _hwfitEngineGlyph(value) {
   return _HWFIT_ENGINE_GLYPHS[value] || _HWFIT_ENGINE_GLYPHS[''];
+}
+
+const _HWFIT_USECASE_GLYPHS = {
+  general: uiIcon("chat", 14),
+  multimodal: uiIcon("eye", 14),
+  image_gen: uiIcon("image", 14),
+};
+
+function _hwfitUsecaseGlyph(value) {
+  return _HWFIT_USECASE_GLYPHS[value] || _HWFIT_USECASE_GLYPHS.general;
+}
+
+function _bindHwfitUsecasePicker(usecase) {
+  const wrap = usecase?.closest('.hwfit-usecase-wrap');
+  const btn = wrap?.querySelector('[data-hwfit-usecase-btn]');
+  const menu = wrap?.querySelector('[data-hwfit-usecase-menu]');
+  const icon = wrap?.querySelector('[data-hwfit-usecase-icon]');
+  const label = wrap?.querySelector('[data-hwfit-usecase-label]');
+  if (!usecase || !wrap || !btn || !menu) return;
+  usecase.querySelectorAll('option[value="video_gen"]').forEach((opt) => opt.remove());
+  menu.querySelectorAll('[data-hwfit-usecase-value="video_gen"], .hwfit-usecase-item').forEach((item) => {
+    if (item.dataset.hwfitUsecaseValue === 'video_gen' || item.textContent?.trim() === 'Video') item.remove();
+  });
+  if (usecase.value === 'video_gen') {
+    usecase.value = 'general';
+    usecase.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (wrap.dataset.usecasePickerBound) return;
+  wrap.dataset.usecasePickerBound = '1';
+
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const currentLabel = () => {
+    const opt = Array.from(usecase.options).find((o) => o.value === usecase.value);
+    return opt?.textContent || 'Standard';
+  };
+  const syncButton = () => {
+    if (label) label.textContent = currentLabel();
+    if (icon) icon.innerHTML = _hwfitUsecaseGlyph(usecase.value);
+    menu.querySelectorAll('[data-hwfit-usecase-value]').forEach((item) => {
+      const active = item.dataset.hwfitUsecaseValue === usecase.value;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+  };
+  const renderMenu = () => {
+    menu.innerHTML = Array.from(usecase.options).filter((opt) => opt.value !== 'video_gen').map((opt) => (
+      `<button type="button" role="option" class="hwfit-usecase-item" data-hwfit-usecase-value="${opt.value}">`
+      + `<span class="hwfit-usecase-item-icon" aria-hidden="true">${_hwfitUsecaseGlyph(opt.value)}</span>`
+      + `<span class="hwfit-usecase-item-label">${opt.textContent}</span>`
+      + '</button>'
+    )).join('');
+    menu.querySelectorAll('[data-hwfit-usecase-value]').forEach((item) => {
+      item.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const next = item.dataset.hwfitUsecaseValue || 'general';
+        if (usecase.value !== next) {
+          usecase.value = next;
+          usecase.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        syncButton();
+        setOpen(false);
+      });
+    });
+    syncButton();
+  };
+
+  btn.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setOpen(menu.hidden);
+  });
+  usecase.addEventListener('change', syncButton);
+  document.addEventListener('click', (ev) => {
+    if (!wrap.contains(ev.target)) setOpen(false);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') setOpen(false);
+  });
+  renderMenu();
 }
 
 function _bindHwfitEnginePicker(engine) {
@@ -2011,6 +2169,7 @@ export function _hwfitInit() {
   const search = document.getElementById('hwfit-search');
   const remote = document.getElementById('hwfit-host');
   _syncCtxControl();
+  if (uc) _bindHwfitUsecasePicker(uc);
   if (uc) uc.addEventListener('change', () => _hwfitFetch());
   if (sort) sort.addEventListener('change', () => _hwfitFetch());
   if (qpref) qpref.addEventListener('change', () => _hwfitFetch());
@@ -2410,7 +2569,7 @@ export function _hwfitInit() {
         const saveBtn = entry.querySelector('.cookbook-server-save-btn.saved');
         if (saveBtn) {
           saveBtn.classList.remove('saved');
-          saveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+          saveBtn.innerHTML = uiIcon("save", 11, {"style":"margin-right:4px;flex-shrink:0;"}) + "Save";
         }
       });
     });
@@ -2450,7 +2609,7 @@ export function _hwfitInit() {
           }));
         } catch (_) {}
         saveBtn.classList.add('saved');
-        saveBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="margin-right:4px;flex-shrink:0;"><polyline points="20 6 9 17 4 12"/></svg>Saved';
+        saveBtn.innerHTML = uiIcon("check", 11, {"style":"margin-right:4px;flex-shrink:0;","role":"inherit"}) + "Saved";
         uiModule.showToast('Server saved');
       });
     }

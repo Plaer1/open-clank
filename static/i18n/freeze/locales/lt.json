@@ -1,0 +1,19 @@
+{
+  "id": "lt",
+  "name": "Lietuvių",
+  "dir": "ltr",
+  "catalog": "en",
+  "html_lang": "en",
+  "kind": "english-fallback",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": true,
+  "counts": {
+    "keys": 9622,
+    "translated": 0,
+    "english_fallback": 9622
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

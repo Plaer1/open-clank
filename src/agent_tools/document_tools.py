@@ -8,9 +8,9 @@ from src.upload_handler import reserve_upload_references
 logger = logging.getLogger(__name__)
 
 
-def _missing_document_upload(owner: Optional[str], content: Any) -> Optional[str]:
+def _missing_document_upload(owner: Optional[str], content: Any, db=None) -> Optional[str]:
     """Reserve explicit upload URLs before an agent persists document text."""
-    return reserve_upload_references(get_upload_handler(), owner, content)
+    return reserve_upload_references(get_upload_handler(), owner, content, db=db)
 
 # ---------------------------------------------------------------------------
 # Active document state
@@ -390,7 +390,7 @@ class CreateDocumentTool:
                 return {"error": "Cannot create document in another user's session"}
             _owner = _sess.owner if _sess else None
 
-            missing_id = _missing_document_upload(_owner, content)
+            missing_id = _missing_document_upload(_owner, content, db)
             if missing_id:
                 return {
                     "error": f"Referenced upload is no longer available: {missing_id}",
@@ -468,7 +468,7 @@ class UpdateDocumentTool:
             if is_email_doc:
                 doc.language = "email"
 
-            missing_id = _missing_document_upload(owner, new_content)
+            missing_id = _missing_document_upload(owner, new_content, db)
             if missing_id:
                 return {
                     "error": f"Referenced upload is no longer available: {missing_id}",
@@ -552,7 +552,7 @@ class EditDocumentTool:
                     applied = 1
                     skipped = max(0, len(edits) - 1)
                     doc.language = "email"
-                    missing_id = _missing_document_upload(owner, updated_content)
+                    missing_id = _missing_document_upload(owner, updated_content, db)
                     if missing_id:
                         return {
                             "error": f"Referenced upload is no longer available: {missing_id}",
@@ -610,7 +610,7 @@ class EditDocumentTool:
             if applied == 0:
                 return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})"}
 
-            missing_id = _missing_document_upload(owner, updated_content)
+            missing_id = _missing_document_upload(owner, updated_content, db)
             if missing_id:
                 return {
                     "error": f"Referenced upload is no longer available: {missing_id}",
@@ -703,7 +703,7 @@ class SuggestDocumentTool:
 # ---------------------------------------------------------------------------
 class ManageDocumentTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
-        """Manage documents: list, read/view/open, delete, tidy.
+        """Manage documents: list, read/view/open, and delete selected documents.
 
         Output format mirrors `manage_session`: list rows include a
         clickable `[Title](#document-<id>)` anchor + relative timestamps
@@ -820,11 +820,6 @@ class ManageDocumentTool:
                 if _active_document_id == doc.id:
                     set_active_document(None)
                 return {"response": f"Deleted document '{title}'", "exit_code": 0}
-
-            elif action == "tidy":
-                from src.document_actions import run_document_tidy
-                result = await run_document_tidy(owner or "")
-                return {"response": result, "exit_code": 0}
 
             else:
                 return {"error": f"Unknown action: {action}", "exit_code": 1}

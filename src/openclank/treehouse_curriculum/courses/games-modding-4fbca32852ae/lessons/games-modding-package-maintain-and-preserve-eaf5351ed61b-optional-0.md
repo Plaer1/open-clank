@@ -1,0 +1,1 @@
+The record can reproduce the intended change and return the toy baseline; it excludes unrelated base content and documents any unresolved permission.

@@ -79,6 +79,23 @@ def test_allow_web_search_reads_from_body_as_fallback():
     )
 
 
+def test_browser_form_followups_include_approval_and_send_phrases():
+    """Short approval replies after a form/browser turn must keep browser tools available."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert "approved" in source
+    assert "proceed" in source
+    assert "send(?:\\s+it)?" in source
+    assert "submit(?:\\s+it)?" in source
+
+
+def test_agent_loop_expands_browser_mcp_tools_from_connected_server():
+    """Browser intent must not depend on stale hardcoded Playwright tool names."""
+    source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
+    assert "def _expand_browser_mcp_tools" in source
+    assert "server_id\") == \"builtin_browser\"" in source
+    assert "_relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)" in source
+
+
 def test_disabled_tools_respects_missing_vs_explicit_toggles():
     """Bash still defers to privileges, but web is an explicit per-turn opt-in.
     """
@@ -100,6 +117,27 @@ def test_disabled_tools_respects_missing_vs_explicit_toggles():
     assert "_forced_tools = set(WEB_TOOL_NAMES)" in source, (
         "web tools should only be forced visible from the explicit web setting"
     )
+
+
+def test_chat_mode_is_a_read_only_lane_not_an_error():
+    """Chat mode is a first-class read-only lane (QOL-pass slice 3): the route
+    accepts chat/plan/agent, rejects unknown modes, and chat applies the same
+    fail-closed read-only tool gate as plan mode. Shell authority stays under
+    the normal privilege gate for agent mode."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    assert 'if requested_mode not in ("", "agent", "chat", "plan"):' in source
+    assert "chat_mode_disabled_tools" in source
+    assert "Chat mode was removed" not in source
+    assert "if not _privs.get(\"can_use_bash\", True):" in source
+
+
+def test_active_copal_pointer_is_injected_for_classic_and_acp_agents():
+    """Copal context must not be hidden behind the ACP-only branch."""
+    source = _CHAT_ROUTES.read_text(encoding="utf-8")
+    messages_line = source.index("messages = list(_ensure_current_request_is_latest_user")
+    pointer_line = source.index('"active Copal resource pointer"', messages_line)
+    transport_line = source.index('if model_target.transport == "acp":', messages_line)
+    assert pointer_line < transport_line
 
 
 # ── Functional tests of the disabled-tools logic ───────────────

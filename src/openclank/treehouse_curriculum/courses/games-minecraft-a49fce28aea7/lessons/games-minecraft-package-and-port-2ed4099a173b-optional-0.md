@@ -1,0 +1,1 @@
+The response contains actual packaged-mod observations and distinguishes source, mod artifact and base-game files.

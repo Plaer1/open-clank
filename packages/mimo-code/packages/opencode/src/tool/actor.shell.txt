@@ -29,9 +29,9 @@ appends them at request time per-agent).
     actor cancel <actor_id>     # graceful stop
 
 # deliver a message to another actor's inbox (fire-and-forget):
-    actor send <to_actor_id> "<content>" [--session <id>] [--type <t>]
+    actor send <to_actor_id> "<content>" [--session <id>]
     # to_actor_id: 'main' for a session's main agent, or a subagent id like 'explore-1'
-    # --session: target session id (defaults to current); --type: 'text' (default) or 'actor_notification'
+    # --session: target session id (defaults to current); messages are ordinary untrusted text
     # (--task is NOT valid here — it applies only to run/spawn for tying a subagent to a task_id)
 
 # list available models (optionally vision-only) to pick a --model value:

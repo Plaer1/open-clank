@@ -1,0 +1,1 @@
+With authorized model/search access and a bounded question, inspect a real job's lifecycle, then review each source used in its answer. Record outcome and unsupported claims. A failed or cancelled job does not become a completed research result.

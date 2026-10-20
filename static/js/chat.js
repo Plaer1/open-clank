@@ -1,3 +1,6 @@
+import { uiIcon } from './uiIcons.js';
+import { restoreValidatedComposerDraft } from './composerDraftRestore.js';
+import { appendCodeEvidenceCAS } from './codeEvidenceComposer.js';
 // static/js/chat.js
 
 /**
@@ -16,17 +19,29 @@ import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
 import fileHandlerModule from './fileHandler.js';
 import searchModule from './search.js';
-import documentModule from './document.js';
-import * as emailInbox from './emailInbox.js';
+import documentModule from './document.js?v=20260722emailfastindex1';
+import * as emailInbox from './emailInbox.js?v=20260722emailfastindex1';
 import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
-import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composerArrowUpRecall.js';
+import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
+import {
+  applyModelMetricsState,
+  applyModelRouteEventState,
+  inheritModelRouteState,
+} from './chatModelProvenance.js';
+import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
+import { createLiveThinkingThrottle } from './liveThinkingThrottle.js';
+import {
+  claimAssistantContext,
+  commitAssistantContext,
+  restoreAssistantContext,
+} from './contextualHelp.js';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
-  const RESEARCH_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
+  const RESEARCH_SVG = uiIcon("search", 16);
 
   let API_BASE = '';
   let currentAbort = null;
@@ -43,6 +58,246 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  let _contextHeaderSeq = 0;
+  let _contextHeaderData = null;
+  let _contextHeaderBound = false;
+
+  function _fmtContextNumber(n) {
+    const v = Number(n || 0);
+    return v ? v.toLocaleString() : '?';
+  }
+
+  function _contextColorClass(pct) {
+    const n = Number(pct || 0);
+    if (n >= 85) return 'danger';
+    if (n >= 70) return 'warn';
+    return '';
+  }
+
+  function _contextRingColor(pct) {
+    const n = Number(pct || 0);
+    if (n >= 85) return 'var(--red, #e06c75)';
+    if (n >= 70) return '#ff9900';
+    return 'var(--green, #98c379)';
+  }
+
+  function _contextRingMarkup(pct, { includeLabel = true, labelId = '' } = {}) {
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    const r = 6;
+    const stroke = 1.5;
+    const circ = 2 * Math.PI * r;
+    const fill = circ * (value / 100);
+    const label = value.toFixed(value >= 10 ? 0 : 1);
+    const idAttr = labelId ? ` id="${labelId}"` : '';
+    return `<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+        <circle cx="7" cy="7" r="${r}" fill="none" stroke="var(--border, #333)" stroke-width="${stroke}" opacity="0.3"/>
+        <circle cx="7" cy="7" r="${r}" fill="none" stroke="var(--ctx-stroke)" stroke-width="${stroke}"
+          stroke-dasharray="${fill} ${circ - fill}" stroke-dashoffset="${circ * 0.25}"
+          stroke-linecap="round" transform="rotate(-90 7 7)"/>
+      </svg>${includeLabel ? `<span class="ctx-ring-pct"${idAttr}>${label}%</span>` : ''}`;
+  }
+
+  function _renderContextHeaderRing(pill, pct) {
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    pill.style.setProperty('--ctx-color', _contextRingColor(value));
+    pill.innerHTML = _contextRingMarkup(value, { includeLabel: true, labelId: 'chat-context-pill-label' });
+  }
+
+  function _renderCompactMenuContextIcon(pct) {
+    const icon = document.querySelector('#export-compact-btn .dropdown-icon');
+    if (!icon) return;
+    const value = Math.max(0, Math.min(100, Number(pct || 0)));
+    const row = document.getElementById('export-compact-btn');
+    const color = _contextRingColor(value);
+    if (row) row.style.setProperty('--ctx-color', color);
+    icon.style.setProperty('--ctx-color', color);
+    icon.innerHTML = _contextRingMarkup(value, { includeLabel: false });
+  }
+
+  function _liveSessionModule() {
+    return (window.sessionModule && window.sessionModule.getCurrentSessionId)
+      ? window.sessionModule
+      : sessionModule;
+  }
+
+  function _closeContextHeaderPopup() {
+    document.querySelectorAll('.chat-context-popup').forEach(el => el.remove());
+    const pill = document.getElementById('chat-context-pill');
+    if (pill) pill.classList.remove('open');
+  }
+
+  function _positionContextHeaderPopup(popup, pill) {
+    const rect = pill.getBoundingClientRect();
+    popup.style.top = `${Math.round(rect.bottom + 8)}px`;
+    popup.style.left = `${Math.round(rect.left + (rect.width / 2) - 119)}px`;
+    document.body.appendChild(popup);
+    const pRect = popup.getBoundingClientRect();
+    if (pRect.left < 8) popup.style.left = '8px';
+    if (pRect.right > window.innerWidth - 8) popup.style.left = `${Math.max(8, window.innerWidth - pRect.width - 8)}px`;
+    if (pRect.bottom > window.innerHeight - 8) popup.style.top = `${Math.max(8, rect.top - pRect.height - 8)}px`;
+  }
+
+  function _showContextHeaderPopup() {
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill || pill.hidden || !_contextHeaderData) return;
+    const wasOpen = pill.classList.contains('open');
+    _closeContextHeaderPopup();
+    if (wasOpen) return;
+
+    const d = _contextHeaderData;
+    const pct = Number(d.context_percent || 0);
+    const colorClass = _contextColorClass(pct);
+    const modelShort = String(d.model || 'Unknown').split('/').pop();
+    const popup = document.createElement('div');
+    popup.className = `chat-context-popup ${colorClass}`.trim();
+
+    const title = document.createElement('div');
+    title.className = 'chat-context-popup-title';
+    title.textContent = 'Chat Context';
+    popup.appendChild(title);
+
+    const bar = document.createElement('div');
+    bar.className = 'chat-context-popup-bar';
+    const fill = document.createElement('div');
+    fill.className = 'chat-context-popup-fill';
+    fill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    bar.appendChild(fill);
+    popup.appendChild(bar);
+
+    const rows = [
+      ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
+      ['Usage', `${pct}%`],
+      ['Window model', modelShort],
+      ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
+      ['Auto compact', `${Number(d.auto_compact_threshold || 85)}%`],
+    ];
+    rows.forEach(([label, value]) => {
+      const row = document.createElement('div');
+      row.className = 'chat-context-popup-row';
+      const a = document.createElement('span');
+      a.textContent = label;
+      const b = document.createElement('span');
+      b.textContent = value;
+      row.appendChild(a);
+      row.appendChild(b);
+      popup.appendChild(row);
+    });
+
+    if (d.can_compact) {
+      const compactBtn = document.createElement('button');
+      compactBtn.type = 'button';
+      compactBtn.className = 'chat-context-compact-btn';
+      compactBtn.textContent = 'Compact';
+      compactBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        compactBtn.disabled = true;
+        compactBtn.replaceChildren();
+        try {
+          const wp = spinnerModule.createWhirlpool(13);
+          wp.element.style.margin = '0 5px 0 0';
+          compactBtn.appendChild(wp.element);
+        } catch (_) {}
+        compactBtn.appendChild(document.createTextNode('Compacting'));
+        const ok = await compactCurrentChatContext();
+        if (!ok) {
+          compactBtn.disabled = false;
+          compactBtn.textContent = 'Compact failed';
+        }
+      });
+      popup.appendChild(compactBtn);
+    }
+
+    pill.classList.add('open');
+    _positionContextHeaderPopup(popup, pill);
+    setTimeout(() => {
+      const close = (ev) => {
+        if (popup.contains(ev.target) || pill.contains(ev.target)) return;
+        document.removeEventListener('pointerdown', close, true);
+        _closeContextHeaderPopup();
+      };
+      document.addEventListener('pointerdown', close, true);
+    }, 0);
+  }
+
+  function _bindContextHeaderPill() {
+    if (_contextHeaderBound) return;
+    _contextHeaderBound = true;
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill) return;
+    pill.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      _showContextHeaderPopup();
+    });
+  }
+
+  export async function compactCurrentChatContext() {
+    const sm = _liveSessionModule();
+    const sid = sm && sm.getCurrentSessionId && sm.getCurrentSessionId();
+    if (!sid) {
+      uiModule.showToast('Open a chat first');
+      return false;
+    }
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid)}/compact`, { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      uiModule.showToast('Context compacted');
+      _closeContextHeaderPopup();
+      if (sm && sm.selectSession) await sm.selectSession(sid, { keepSidebar: true, showLoading: false });
+      refreshChatContextHeader('compact');
+      return true;
+    } catch (err) {
+      uiModule.showError(`Compact failed: ${err.message || err}`);
+      return false;
+    }
+  }
+  try { window.compactCurrentChatContext = compactCurrentChatContext; } catch (_) {}
+
+  export async function refreshChatContextHeader(reason = '') {
+    _bindContextHeaderPill();
+    const pill = document.getElementById('chat-context-pill');
+    if (!pill) return;
+    const sm = _liveSessionModule();
+    const sid = sm && sm.getCurrentSessionId && sm.getCurrentSessionId();
+    const seq = ++_contextHeaderSeq;
+    if (!sid) {
+      _contextHeaderData = null;
+      pill.hidden = true;
+      _closeContextHeaderPopup();
+      return;
+    }
+    pill.hidden = false;
+    pill.classList.add('loading');
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid)}/context`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      if (seq !== _contextHeaderSeq) return;
+      const latestSm = _liveSessionModule();
+      if (!latestSm.getCurrentSessionId || latestSm.getCurrentSessionId() !== sid) return;
+      _contextHeaderData = data;
+      const pct = Number(data.context_percent || 0);
+      _renderContextHeaderRing(pill, pct);
+      _renderCompactMenuContextIcon(pct);
+      pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${String(data.model || '').split('/').pop()}`;
+      pill.classList.remove('warn', 'danger');
+      const colorClass = _contextColorClass(pct);
+      if (colorClass) pill.classList.add(colorClass);
+      pill.classList.remove('loading');
+      if (pill.classList.contains('open')) {
+        _closeContextHeaderPopup();
+        _showContextHeaderPopup();
+      }
+    } catch (err) {
+      if (seq !== _contextHeaderSeq) return;
+      _contextHeaderData = null;
+      pill.hidden = true;
+      pill.classList.remove('loading', 'warn', 'danger');
+      _closeContextHeaderPopup();
+      console.warn('context header refresh failed:', reason, err);
+    }
+  }
+  try { window.refreshChatContextHeader = refreshChatContextHeader; } catch (_) {}
 
   function _setForegroundChatBusy(active) {
     try {
@@ -95,6 +350,38 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
     };
   }
+
+  function _hashSessionCandidate() {
+    try {
+      const hashId = String(window.location.hash || '').replace(/^#/, '').trim();
+      if (!hashId) return '';
+      if (/^(document|note|image|email|event|task|skill|research)-/.test(hashId) || /^open=notes&note=/.test(hashId)) return '';
+      return hashId;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function _adoptOpenedSessionBeforeAutoCreate() {
+    if (!sessionModule || !sessionModule.getCurrentSessionId || sessionModule.getCurrentSessionId()) return true;
+    const activeRowId = document.querySelector('.list-item.active-session[data-session-id], .session-item.active[data-session-id]')?.dataset?.sessionId || '';
+    const hashId = _hashSessionCandidate();
+    const lastSelectedId = String(window.__odysseusLastSelectedSessionId || '').trim();
+    const targetId = activeRowId || hashId || lastSelectedId;
+    if (!targetId) return false;
+    try {
+      window.__odysseusComposerUserEdited = true;
+      if (sessionModule.selectSession) {
+        await sessionModule.selectSession(targetId, { keepSidebar: true, showLoading: false });
+      } else if (sessionModule.setCurrentSessionId) {
+        sessionModule.setCurrentSessionId(targetId);
+      }
+      return !!(sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── Auto-recovery: when a turn's stream silently dies (connection drop) or
   // goes quiet while the connection is alive, re-engage the model with a
   // completion handshake instead of leaving it hung. Capped so it can't loop.
@@ -134,6 +421,29 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       roleEl.removeAttribute('title');
     }
     if (tsSpan) roleEl.appendChild(tsSpan);
+  }
+
+  function _bestKnownStreamModel(routeSnapshot) {
+    try {
+      const current = sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '';
+      if (current) return current;
+    } catch (_) {}
+    try {
+      const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+      if (pending && pending.modelId) return pending.modelId;
+    } catch (_) {}
+    try {
+      const lastPicked = window.__odysseusLastPickedRoute || null;
+      if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
+        return lastPicked.model;
+      }
+    } catch (_) {}
+    if (routeSnapshot && routeSnapshot.model) return routeSnapshot.model;
+    try {
+      const dc = window.__odysseusDefaultChat || JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+      if (dc && dc.model) return dc.model;
+    } catch (_) {}
+    return '';
   }
   // Per-session research tracking (supports concurrent research across sessions)
   const _researchingStreamIds = new Set();
@@ -273,8 +583,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   let currentSpinner = null; // Track current spinner for stop cleanup
 
   // Background streaming support
-  const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics }
-  const _resumingStreams = new Set();   // sessionId -> a resumeStream() reader is live (re-attach lock)
+  const _backgroundStreams = new Map(); // sessionId -> { status, accumulated, sourcesHtml, abortCtrl, query, metrics, runId }
+  const _activeStreams = new Map();     // sessionId -> { abortCtrl, holder, query, startedAt, runId }
+  const _resumingStreams = new Map();   // sessionId -> detached run ID while a resumeStream() reader is live
   let _streamSessionId = null; // Session ID for the currently active reader loop
   let _lastReaderActivity = 0; // Timestamp of last reader.read() success — used to detect frozen streams
   let _webLockRelease = null;  // Function to release the Web Lock held during streaming
@@ -345,8 +656,53 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   /** Check if an SSE reader is still actively connected for a session. */
   function hasActiveStream(sessionId) {
-    return _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
+    return _activeStreams.has(sessionId) || _streamSessionId === sessionId || _backgroundStreams.has(sessionId) ||
            _resumingStreams.has(sessionId);
+  }
+
+  function _getForegroundStreamState() {
+    try {
+      const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+      return sid ? (_activeStreams.get(sid) || null) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // A detached run can be replaced before a delayed Stop or timeout fires.
+  // Send the identity received with the stream when present, so an old browser
+  // controller cannot cancel the session's newer run. Old servers and direct
+  // compare streams do not issue an identity, and retain the unheaded stop
+  // compatibility lane.
+  function _stopDetachedRun(sessionId) {
+    if (!sessionId) return;
+    const active = _activeStreams.get(sessionId);
+    const background = _backgroundStreams.get(sessionId);
+    const runId = (active && active.runId) || (background && background.runId) ||
+      _resumingStreams.get(sessionId) || '';
+    const headers = runId ? { 'X-Agent-Run-ID': runId } : undefined;
+    fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+    }).catch(() => {});
+  }
+
+  function _syncForegroundStreamGlobals() {
+    const active = _getForegroundStreamState();
+    isStreaming = !!active;
+    currentAbort = active ? active.abortCtrl : null;
+    currentHolder = active ? active.holder : null;
+    _setForegroundChatBusy(!!active || !!_sendInFlight);
+    return active;
+  }
+
+  function _touchStreamActivity(sessionId) {
+    const now = Date.now();
+    _lastReaderActivity = now;
+    const active = sessionId ? _activeStreams.get(sessionId) : null;
+    if (active) active.lastActivity = now;
+    return now;
   }
 
   // Sources box builder and toggleSources are now in chatRenderer.js
@@ -360,58 +716,43 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   var getModelCost = chatRenderer.getModelCost;
   var getImageCost = chatRenderer.getImageCost;
 
+  function _appendGeneratedImageBubble(data) {
+    const imageUrl = data?.image_url || data?.url || '';
+    if (!imageUrl) return false;
+    const chatBox = document.getElementById('chat-history');
+    if (!chatBox) return false;
+    const imageKey = String(data.image_id || imageUrl);
+    const exists = Array.from(chatBox.querySelectorAll('.generated-image-wrap')).some(el => (
+      el.dataset.imageKey === imageKey ||
+      el.dataset.imageUrl === imageUrl ||
+      el.querySelector('img.generated-image')?.getAttribute('src') === imageUrl
+    ));
+    if (exists) return false;
+    const bubble = _buildImageBubble(
+      imageUrl,
+      data.image_prompt,
+      data.image_model,
+      data.image_size,
+      data.image_quality,
+      data.image_id
+    );
+    bubble.dataset.imageKey = imageKey;
+    bubble.dataset.imageUrl = imageUrl;
+    chatBox.appendChild(bubble);
+    uiModule.scrollHistory();
+    window.dispatchEvent(new CustomEvent('imps-refresh'));
+    return true;
+  }
+
   // stripToolBlocks and roleTimestamp now in chatRenderer.js
   var stripToolBlocks = chatRenderer.stripToolBlocks;
-
-  function _normalizeEndpointForCompare(url) {
-    if (!url) return '';
-    try {
-      const u = new URL(String(url), window.location.origin);
-      let path = u.pathname.replace(/\/+$/, '');
-      const suffixes = [
-        '/v1/chat/completions', '/chat/completions',
-        '/v1/completions', '/completions',
-        '/v1/messages', '/messages',
-        '/v1/models', '/models',
-      ];
-      for (const suffix of suffixes) {
-        if (path.toLowerCase().endsWith(suffix)) {
-          path = path.slice(0, -suffix.length).replace(/\/+$/, '');
-          break;
-        }
-      }
-      return (u.origin + path).toLowerCase();
-    } catch (_) {
-      return String(url).trim().replace(/\/+$/, '').toLowerCase();
-    }
-  }
-
-  async function _probeCurrentEndpointStatus(endpointUrl, signal) {
-    const target = _normalizeEndpointForCompare(endpointUrl);
-    if (!target) return null;
-    const modelsRes = await fetch(`${API_BASE}/api/models`, { credentials: 'same-origin', signal });
-    if (!modelsRes.ok) return null;
-    const modelsData = await modelsRes.json().catch(() => ({}));
-    const item = (modelsData.items || []).find(ep =>
-      _normalizeEndpointForCompare(ep.url || ep.endpoint_url || ep.base_url) === target
-    );
-    if (!item || !item.endpoint_id) return null;
-
-    const probesRes = await fetch(`${API_BASE}/api/model-endpoints/probe-local`, {
-      credentials: 'same-origin',
-      signal,
-    });
-    if (!probesRes.ok) return null;
-    const probes = await probesRes.json().catch(() => ({}));
-    return probes[item.endpoint_id] || null;
-  }
 
   /**
    * Initialize with dependencies
    */
   export function init(apiBase) {
     API_BASE = apiBase;
-    initSlashCommands({ apiBase, isStreaming: () => isStreaming });
+    initSlashCommands({ apiBase, isStreaming: () => !!_getForegroundStreamState() });
     // Initialize email inbox
     emailInbox.init(documentModule);
     document.addEventListener('odysseus:interactive-resolved', (event) => {
@@ -426,9 +767,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (ta && mod.initSlashAutocomplete) mod.initSlashAutocomplete(ta);
     }).catch(() => {});
 
-    // ArrowUp on empty composer recalls last user message (like many chat apps).
+    // ArrowUp on the composer recalls previous user prompts from this chat.
     const _wireArrowUpRecall = (composer) =>
-      wireArrowUpRecall(composer, () => getLastUserMessageFromChatHistory(), {
+      wireArrowUpRecall(composer, () => getUserMessagesFromChatHistory(), {
         autoResize: uiModule?.autoResize,
       });
 
@@ -463,7 +804,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       void submitBtn.offsetWidth;
       // Arrow launches up, then stop icon lands in
       submitBtn.classList.add('anim-launch');
-      const _stopSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+      const _stopSvg = uiIcon("stop", 14);
       // Wait for the launch keyframe to finish (0.3s) before swapping the
       // arrow out for the stop icon — otherwise the swap happens mid-flight
       // and the user sees nothing fly out.
@@ -497,7 +838,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         setTimeout(window._updateSendBtnIcon, 50);
       } else {
         var icons = window._odysseusBtnIcons;
-        submitBtn.innerHTML = icons ? icons.send : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+        submitBtn.innerHTML = icons ? icons.send : uiIcon("up", 16);
         submitBtn.title = 'Send message';
         submitBtn.classList.remove('mic-mode', 'newchat-mode');
       }
@@ -510,12 +851,80 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
   // API key pattern for the guard in handleChatSubmit
   const API_KEY_RE = /^(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|AIza[a-zA-Z0-9_\-]{30,}|xai-[a-zA-Z0-9]{20,})$/;
-
   const _queuedAgentRequests = [];
   let _queuedDrainTimer = null;
   let _queuedPromoteTimer = null;
   let _queuedRequestSeq = 0;
   let _queuedBubbleHost = null;
+
+  function _extractPlanText(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return '';
+    const stripped = raw
+      .replace(/<think[\s\S]*?<\/think>/gi, '')
+      .replace(/<thought[\s\S]*?<\/thought>/gi, '')
+      .trim();
+    const lines = stripped.split('\n');
+    const firstChecklist = lines.findIndex(line => /^\s*(?:[-*]|\d+\.)\s+\[[ x-]\]\s+/i.test(line));
+    if (firstChecklist >= 0) return lines.slice(firstChecklist).join('\n').trim();
+    const firstPlanHeading = lines.findIndex(line => /^\s{0,3}#{1,4}\s+.*plan/i.test(line) || /^\s*(?:plan|proposed plan)\s*:?$/i.test(line));
+    if (firstPlanHeading >= 0) return lines.slice(firstPlanHeading).join('\n').trim();
+    return stripped;
+  }
+
+	  function _attachPlanActions(target, plan) {
+	    if (!target || !String(plan || '').trim() || target.querySelector('.plan-inline-actions')) return;
+	    const actions = document.createElement('div');
+	    actions.className = 'plan-inline-actions';
+	    actions.innerHTML = `
+	      <button type="button" class="plan-inline-execute">
+	        ${uiIcon("play", 12)}
+	        Execute
+	      </button>
+	      <button type="button" class="plan-inline-clear">Clear</button>`;
+	    actions.querySelector('.plan-inline-execute')?.addEventListener('click', async () => {
+	      const sid = sessionModule.getCurrentSessionId();
+	      const current = sid ? _readSessionState('plan', sid) : null;
+	      if (!sid || !current || !current.revision || !current.digest) {
+	        uiModule.showError('This plan has not been persisted yet. Wait for the plan state to sync, then try Execute again.');
+	        return;
+	      }
+	      const button = actions.querySelector('.plan-inline-execute');
+	      if (button) button.disabled = true;
+	      try {
+	        const response = await fetch(`${API_BASE}/session/${encodeURIComponent(sid)}/plan/approve`, {
+	          method: 'POST',
+	          credentials: 'same-origin',
+	          headers: { 'Content-Type': 'application/json' },
+	          body: JSON.stringify({ revision: Number(current.revision), digest: String(current.digest) }),
+	        });
+	        const payload = await response.json().catch(() => ({}));
+	        if (!response.ok || !payload.plan_state) throw new Error(payload.detail || 'Plan approval was rejected');
+	        _setStoredPlan(payload.plan_state, sid);
+	        if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);
+	        if (window.__odysseusSetChatMode) window.__odysseusSetChatMode('agent');
+	        _setComposerAndSend('Execute the approved plan.');
+	      } catch (error) {
+	        uiModule.showError(error?.message || 'Plan approval failed; the plan was not executed.');
+	      } finally {
+	        if (button) button.disabled = false;
+	      }
+	    });
+	    actions.querySelector('.plan-inline-clear')?.addEventListener('click', () => {
+	      const sid = sessionModule.getCurrentSessionId();
+	      if (!sid) return;
+	      fetch(`${API_BASE}/session/${encodeURIComponent(sid)}/plan/clear`, {
+	        method: 'POST', credentials: 'same-origin',
+
+	      }).then(async response => {
+	        const payload = await response.json().catch(() => ({}));
+	        if (!response.ok) throw new Error(payload.detail || 'Plan clear failed');
+	        _setStoredPlan(payload.plan_state || { status: 'cleared' }, sid);
+	        actions.remove();
+	      }).catch(error => uiModule.showError(error?.message || 'Plan clear failed'));
+	    });
+	    (target.querySelector('.body') || target).appendChild(actions);
+	  }
 
   function _escapeQueueText(s) {
     return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -543,7 +952,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     wrap.className = 'msg msg-user msg-user-queued';
     wrap.dataset.queueId = item.id;
     wrap.title = 'Queued - click to send now and stop the current response';
-    wrap.innerHTML = `<div class="role">You <span class="queued-pill"><svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
+    wrap.innerHTML = `<div class="role">You <span class="queued-pill">${uiIcon("play", 8)}Queued</span></div><div class="body">${_escapeQueueText(item.message)}</div>`;
     wrap.addEventListener('click', (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('button, a, textarea, input')) return;
       _promoteQueuedRequest(item.id);
@@ -748,11 +1157,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         );
         
         // Highlight code blocks
-        if (window.hljs) {
-          currentHolder.querySelectorAll('pre code').forEach((block) => {
-            window.hljs.highlightElement(block);
-          });
-        }
+        if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(currentHolder);
         
         // Add the stopped indicator with continue button
         const stoppedIndicator = document.createElement('div');
@@ -819,7 +1224,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (submitBtn) submitBtn.classList.add('send-pending');
     const _releaseSendFlag = () => {
       _sendInFlight = false;
-      _setForegroundChatBusy(isStreaming);
+      _syncForegroundStreamGlobals();
       if (_earlyMessageInput) _earlyMessageInput.disabled = false;
       if (submitBtn) submitBtn.classList.remove('send-pending');
     };
@@ -856,15 +1261,62 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
     // --- Slash commands: execute directly without AI (no session needed) ---
     if (isCommand(msg.trim())) {
+      const slashSessionId = sessionModule.getCurrentSessionId();
       const handled = await handleSlashCommand(msg.trim());
+      const commandInputStillCurrent = slashSessionId === sessionModule.getCurrentSessionId() && el('message').value === msg;
       if (handled) {
-        el('message').value = '';
-        if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
-        if (uiModule.autoResize) uiModule.autoResize(el('message'));
+        if (commandInputStillCurrent) {
+          el('message').value = '';
+          if (window._syncModelPickerAutohide) window._syncModelPickerAutohide();
+          if (uiModule.autoResize) uiModule.autoResize(el('message'));
+        }
+        _releaseSendFlag();
+        return;
+      }
+      if (!commandInputStillCurrent) {
+        uiModule.showToast('Chat or draft changed; the command was not sent.', 2400);
         _releaseSendFlag();
         return;
       }
     }
+
+    const incognitoChkForSend = el('incognito-toggle');
+    const isIncognitoForSend = !!(incognitoChkForSend && incognitoChkForSend.checked);
+
+    if (!isIncognitoForSend) {
+      await _adoptOpenedSessionBeforeAutoCreate();
+    }
+
+    const selectedRouteForSend = (() => {
+      try {
+        const lastPicked = window.__odysseusLastPickedRoute || null;
+        if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
+          return {
+            model: lastPicked.model || '',
+            endpoint_url: lastPicked.endpoint_url || '',
+            endpoint_id: lastPicked.endpoint_id || '',
+            source: 'last-picked',
+          };
+        }
+        const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
+        if (pending && pending.modelId) {
+          return {
+            model: pending.modelId || '',
+            endpoint_url: pending.url || '',
+            endpoint_id: pending.endpointId || '',
+            source: pending.source || '',
+          };
+        }
+        return {
+          model: sessionModule.getCurrentModel ? (sessionModule.getCurrentModel() || '') : '',
+          endpoint_url: sessionModule.getCurrentEndpointUrl ? (sessionModule.getCurrentEndpointUrl() || '') : '',
+          endpoint_id: '',
+          source: '',
+        };
+      } catch (_) {
+        return { model: '', endpoint_url: '', endpoint_id: '', source: '' };
+      }
+    })();
 
     // Materialize pending session (deferred from model click) on first message
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
@@ -890,21 +1342,31 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       // Auto-create a session using default chat config. Always fetch fresh
       // so that a recent Settings change takes effect without a page reload.
       try {
-        let dc = null;
+        let dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
+        if (!dc || !dc.endpoint_url || !dc.model) {
+          try {
+            dc = JSON.parse(localStorage.getItem('odysseus-default-chat-cache') || 'null');
+          } catch (_) {}
+        }
         try {
-          _sendPerf.mark('default_chat_fetch_begin');
-          const dcRes = await fetch('/api/default-chat');
-          dc = await dcRes.json();
-          _sendPerf.mark('default_chat_fetch_done');
-          if (dc && dc.endpoint_url && dc.model) {
-            try { window.__odysseusDefaultChat = dc; } catch (_) {}
+          if (!dc || !dc.endpoint_url || !dc.model) {
+            _sendPerf.mark('default_chat_fetch_begin');
+            const dcRes = await fetch('/api/default-chat');
+            dc = await dcRes.json();
+            _sendPerf.mark('default_chat_fetch_done');
+            if (dc && dc.endpoint_url && dc.model) {
+              try {
+                window.__odysseusDefaultChat = dc;
+                localStorage.setItem('odysseus-default-chat-cache', JSON.stringify(dc));
+              } catch (_) {}
+            }
           }
         } catch (_) {
           dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
         }
         if (dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
+          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
@@ -953,11 +1415,18 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (submitBtn) submitBtn.classList.remove('send-pending');
     _sendInFlight = false;
 
+    try {
+      const pendingSwitch = window.__odysseusModelSwitchPromise;
+      if (pendingSwitch && typeof pendingSwitch.then === 'function') {
+        await pendingSwitch;
+      }
+    } catch (_) {}
+
     // Capture session ID for background stream detection
     const streamSessionId = sessionModule.getCurrentSessionId();
     _streamSessionId = streamSessionId;
     const streamQuery = msg;
-    _lastReaderActivity = Date.now();
+    _touchStreamActivity(streamSessionId);
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
@@ -982,6 +1451,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     let _renderStream = () => {};
     let _cancelThinkingTimer = () => {};
     let _removeThinkingSpinner = () => {};
+    let abortCtrl = null;
+    const _isAgent = true;
+    let streamingTTS = false;
     let timeoutId = null;
     let responseTimeoutCleared = false;
     let clearResponseTimeout = () => {};
@@ -998,7 +1470,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         [120000, 'Still working - no tokens yet from the model'],
       ];
       firstTokenWaitTimers = steps.map(([ms, text]) => setTimeout(() => {
-        if (!accumulated && spinner && spinner.element && !(currentAbort && currentAbort.signal.aborted)) {
+        if (!accumulated && spinner && spinner.element && !(abortCtrl && abortCtrl.signal.aborted)) {
           spinner.updateMessage(text);
         }
       }, ms));
@@ -1242,7 +1714,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const fd = new FormData();
       fd.append('message', _finalMsgWithInject);
       fd.append('session', streamSessionId);
+      if (selectedRouteForSend.model) fd.append('selected_model', selectedRouteForSend.model);
+      if (selectedRouteForSend.endpoint_url) fd.append('selected_endpoint_url', selectedRouteForSend.endpoint_url);
+      if (selectedRouteForSend.endpoint_id) fd.append('selected_endpoint_id', selectedRouteForSend.endpoint_id);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
+      // The contextual-help claim is held only through final preflight and
+      // transport. Its release boundary below covers provider flushes and
+      // every other step that can fail before response headers arrive.
+      let helpClaim = null;
+      let helpContext = null;
+      let res;
       // Auto-save & send active doc ID so the backend sees latest content
       if (documentModule && activeDocIdForSend) {
         try {
@@ -1270,152 +1751,230 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           if (emCtx.account) fd.append('active_email_account', String(emCtx.account));
         }
       } catch (_e) { /* best-effort */ }
-      const isAgentMode = true;
+      const chatMode = (Storage.loadToggleState && Storage.loadToggleState().chat_mode) || 'agent';
       const incognitoChk = el('incognito-toggle');
       const isIncognito = !!(incognitoChk && incognitoChk.checked);
-      fd.append('mode', 'agent');
+      fd.append('mode', chatMode);
       fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
       if (el('research-toggle').checked) {
         fd.append('use_research', 'true');
       }
       fd.append('allow_bash', el('bash-toggle').checked ? 'true' : 'false');
-      const ragChk = el('rag-toggle');
-      if (ragChk && !ragChk.checked) {
-        fd.append('use_rag', 'false');
-      }
-      if (isIncognito) {
-        fd.append('incognito', 'true');
-      }
-      const _ws = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE, '')) || '';
-      if (_ws) {
-        fd.append('workspace', _ws);
-      }
-      if (presetsModule.getSelectedPreset()) {
-        fd.append('preset_id', presetsModule.getSelectedPreset());
-      }
-
-
-      const abortCtrl = new AbortController();
-      abortCtrl._reason = '';
-      currentAbort = abortCtrl;
-
-      const _isAgent = true;
-
-      // Timeout: 6 min for research and agent mode, 3 min otherwise
-      const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
-      timeoutId = setTimeout(() => {
-        if (!abortCtrl.signal.aborted) {
-          timedOut = true;
-          abortCtrl._reason = 'timeout';
-          try {
-            if (streamSessionId) {
-              fetch(`/api/chat/stop/${encodeURIComponent(streamSessionId)}`, {
-                method: 'POST',
-                credentials: 'same-origin',
-              }).catch(() => {});
-            }
-          } catch (_) {}
-          abortCtrl.abort();
-        }
-      }, timeoutMs);
-      clearResponseTimeout = () => {
-        if (responseTimeoutCleared) return;
-        responseTimeoutCleared = true;
-        clearTimeout(timeoutId);
-      };
-      
-      const box = el('chat-history');
-      holder = document.createElement('div');
-      holder.className = 'msg msg-ai streaming';
-
-      // Track holder globally so stop button can access it
-      currentHolder = holder;
-      holder._researchQuery = msg; // Store query for notification text
-      
-      const modelName = sessionModule.getCurrentModel() || null;
-
-      let loadingText = 'Initializing...';
-
-      if (el('web-toggle').checked && !_isAgent) {
-        const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
-        loadingText = `Searching via ${_searchLabel}...<br>
-                       <span style="font-size: 0.9em; opacity: 0.8;">
-                       Query: "${msg.substring(0, 50)}${msg.length > 50 ? '...' : ''}"<br>
-                       Fetching top results...</span>`;
-      } else if (el('research-toggle').checked) {
-        loadingText = 'Deep research mode active...';
-      } else {
-        loadingText = 'Processing request...';
-      }
-
-      var roleLabel = _modelRouteLabel(modelName, modelName);
-      var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
-      if (_charNameInit) roleLabel = _charNameInit;
-      const roleTs = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-      holder.innerHTML = `<div class="role">${uiModule.esc(roleLabel)} <span class="role-timestamp">${roleTs}</span></div><div class="body"></div>`;
-      holder._requestedModel = modelName;
-      holder._actualModel = modelName;
-      _applyModelColor(holder.querySelector('.role'), modelName);
-      holder.style.position = 'relative';
-      
-      // Create spinner
-      spinner = spinnerModule.create('Initializing', 'right', 'wave');
-      currentSpinner = spinner;
-      const bodyDiv = holder.querySelector('.body');
-      bodyDiv.appendChild(spinner.createElement());
-      spinner.start();
-      
-      // Update spinner message based on mode
-      if (el('web-toggle').checked && !_isAgent) {
-        spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
-        setTimeout(() => spinner.updateMessage('Processing results'), 1500);
-      } else if (el('research-toggle').checked) {
-        spinner.updateMessage('Researching');
-        setTimeout(() => spinner.updateMessage('Analyzing sources'), 1500);
-      } else {
-        spinner.updateMessage('Processing request');
-        scheduleFirstTokenWaitMessages();
-      }
-      
+      // Reserve the visible help attachment before the final Copal flush. The
+      // complete pre-acceptance sequence is inside one release boundary, so a
+      // flush, FormData, DOM, or transport failure cannot strand a claim.
+      // These values also serve HTTP-error cleanup and the SSE loop after the
+      // pre-acceptance boundary, so keep them in the complete send scope.
+      const modelName = _bestKnownStreamModel(selectedRouteForSend) || null;
       const researchBtn = el('research-toggle-btn');
-      if (el('research-toggle').checked && researchBtn) {
-        researchBtn.disabled = true;
-        researchBtn.classList.remove('active');
-      }
-      box.appendChild(holder);
-      uiModule.scrollHistory();
-
       const enableResearchBtn = () => {
         if (!researchBtn) return;
         researchBtn.disabled = false;
         researchBtn.classList.toggle('active', el('research-toggle').checked);
       };
+      helpClaim = claimAssistantContext();
+      helpContext = helpClaim?.context || null;
+      try {
+        // Copal contributes a bounded pointer. Flush committed Notes drafts
+        // before sending so the server can rehydrate the authoritative Redb
+        // resource; no body/owner/path crosses this boundary.
+        try {
+          const flushCopal = window.__odysseusFlushActiveCopalResource;
+          if (typeof flushCopal === 'function') await flushCopal();
+          const getCopal = window.__odysseusGetActiveCopalContext;
+          const copalContext = typeof getCopal === 'function' ? getCopal() : null;
+          if (copalContext && typeof copalContext === 'object') {
+            // The shared getter also carries account scope for contextual Help.
+            // Chat accepts only the four resource identifiers; owner scope is
+            // derived from the authenticated session on the server.
+            fd.append('active_copal_context', JSON.stringify({
+              workspace: copalContext.workspace,
+              view: copalContext.view ?? null,
+              resourceKind: copalContext.resourceKind ?? null,
+              resourceId: copalContext.resourceId ?? null,
+            }));
+          }
+        } catch (error) {
+          console.warn('Copal active-resource flush failed', error);
+          throw error;
+        }
+        const ragChk = el('rag-toggle');
+        if (ragChk && !ragChk.checked) {
+          fd.append('use_rag', 'false');
+        }
+        if (isIncognito) {
+          fd.append('incognito', 'true');
+        }
+        const _workspaceId = (Storage.KEYS && Storage.get(Storage.KEYS.WORKSPACE_ID, '')) || '';
+        // Always assert the stable per-chat binding, including explicit empty.
+        // Raw paths remain a server-only compatibility lane for old clients.
+        fd.append('workspace_id', _workspaceId);
+        if (presetsModule.getSelectedPreset()) {
+          fd.append('preset_id', presetsModule.getSelectedPreset());
+        }
 
-      if (el('research-toggle').checked && researchBtn) {
+
+        abortCtrl = new AbortController();
+        abortCtrl._reason = '';
+        currentAbort = abortCtrl;
+
+        // Timeout: 6 min for research and agent mode, 3 min otherwise
+        const timeoutMs = el('research-toggle').checked || _isAgent ? RESEARCH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS;
+        timeoutId = setTimeout(() => {
+          if (!abortCtrl.signal.aborted) {
+            timedOut = true;
+            abortCtrl._reason = 'timeout';
+            try {
+              if (streamSessionId) _stopDetachedRun(streamSessionId);
+            } catch (_) {}
+            abortCtrl.abort();
+          }
+        }, timeoutMs);
+        clearResponseTimeout = () => {
+          if (responseTimeoutCleared) return;
+          responseTimeoutCleared = true;
+          clearTimeout(timeoutId);
+        };
+      
+        const box = el('chat-history');
+        holder = document.createElement('div');
+        holder.className = 'msg msg-ai streaming';
+
+        // Track holder globally so stop button can access it
+        currentHolder = holder;
+        _activeStreams.set(streamSessionId, {
+          abortCtrl,
+          holder,
+          query: streamQuery,
+          startedAt: Date.now(),
+          lastActivity: Date.now(),
+          runId: '',
+        });
+        _syncForegroundStreamGlobals();
+        holder._researchQuery = msg; // Store query for notification text
+      
+
+        let loadingText = 'Initializing...';
+
+        if (el('web-toggle').checked && !_isAgent) {
+        const _searchLabel = searchModule ? searchModule.getProviderLabel() : 'web';
+        loadingText = `Searching via ${_searchLabel}...<br>
+                       <span style="font-size: 0.9em; opacity: 0.8;">
+                       Query: "${msg.substring(0, 50)}${msg.length > 50 ? '...' : ''}"<br>
+                       Fetching top results...</span>`;
+        } else if (el('research-toggle').checked) {
+        loadingText = 'Deep research mode active...';
+        } else {
+        loadingText = 'Processing request...';
+        }
+
+        var roleLabel = _modelRouteLabel(modelName, modelName);
+        var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
+        if (_charNameInit) roleLabel = _charNameInit;
+        const roleTs = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        holder.innerHTML = `<div class="role">${uiModule.esc(roleLabel)} <span class="role-timestamp">${roleTs}</span></div><div class="body"></div>`;
+        holder._requestedModel = modelName;
+        holder._actualModel = modelName;
+        _applyModelColor(holder.querySelector('.role'), modelName);
+        holder.style.position = 'relative';
+      
+        // Create spinner
+        spinner = spinnerModule.create('Initializing', 'right', 'wave');
+        currentSpinner = spinner;
+        const bodyDiv = holder.querySelector('.body');
+        bodyDiv.appendChild(spinner.createElement());
+        spinner.start();
+      
+        // Update spinner message based on mode
+        if (el('web-toggle').checked && !_isAgent) {
+        spinner.updateMessage('Searching web with ' + (searchModule ? searchModule.getProviderLabel() : 'SearXNG'));
+        setTimeout(() => spinner.updateMessage('Processing results'), 1500);
+        } else if (el('research-toggle').checked) {
+        spinner.updateMessage('Researching');
+        setTimeout(() => spinner.updateMessage('Analyzing sources'), 1500);
+        } else {
+        spinner.updateMessage('Processing request');
+        scheduleFirstTokenWaitMessages();
+        }
+      
+        if (el('research-toggle').checked && researchBtn) {
+        researchBtn.disabled = true;
+        researchBtn.classList.remove('active');
+        }
+        box.appendChild(holder);
+        uiModule.scrollHistory();
+
+
+        if (el('research-toggle').checked && researchBtn) {
         researchBtn.style.display = 'none';
         // Uncheck research toggle so follow-up messages don't trigger another research
         el('research-toggle').checked = false;
-      }
+        }
 
-      // User's current UTC offset in minutes (east of UTC). Threaded into
+        // User's current UTC offset in minutes (east of UTC). Threaded into
       // the agent so natural-language times like "today at 9pm" are
       // interpreted in YOUR timezone, not the server's.
-      const _tzOffsetMin = -new Date().getTimezoneOffset();
-      const _tzName = (() => {
+        const _tzOffsetMin = -new Date().getTimezoneOffset();
+        const _tzName = (() => {
         try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; }
         catch { return ''; }
-      })();
-      _sendPerf.mark('chat_stream_post_begin');
-      const res = await fetch(`${API_BASE}/api/chat_stream`, {
-        method: 'POST',
-        body: fd,
-        headers: { 'X-Tz-Offset': String(_tzOffsetMin), 'X-Tz-Name': _tzName },
-        signal: abortCtrl.signal
-      });
+        })();
+        try {
+        if (helpContext) fd.append('active_help_context', JSON.stringify({
+          workspace: helpContext.workspace,
+          surface: helpContext.surface,
+          view: helpContext.view,
+          resourceKind: helpContext.resourceKind,
+          resourceId: helpContext.resourceId,
+          resourceRef: helpContext.resourceRef,
+          pinnedResourceId: helpContext.pinnedResourceId,
+          pinnedResourceRef: helpContext.pinnedResourceRef,
+          pinned: helpContext.pinned === true,
+          selection: helpContext.selection,
+          baseId: helpContext.baseId,
+          baseQuery: helpContext.baseQuery,
+          taskId: helpContext.taskId,
+          taskQuery: helpContext.taskQuery,
+          courseId: helpContext.courseId,
+          lessonId: helpContext.lessonId,
+          lessonTitle: helpContext.lessonTitle,
+        }));
+        _sendPerf.mark('chat_stream_post_begin');
+        res = await fetch(`${API_BASE}/api/chat_stream`, {
+          method: 'POST',
+          body: fd,
+          headers: { 'X-Tz-Offset': String(_tzOffsetMin), 'X-Tz-Name': _tzName },
+          signal: abortCtrl.signal
+        });
+      } catch (error) {
+        // No response headers means the request was never accepted by the
+        // chat route. Keep the visible context chip so the user can retry.
+        restoreAssistantContext(helpClaim);
+        throw error;
+      }
+      } catch (error) {
+        // Any failure after claiming but before response headers releases the
+        // reservation. A user who removed the chip or staged a newer context
+        // remains authoritative because restore checks the claim token.
+        restoreAssistantContext(helpClaim);
+        throw error;
+      }
+      if (res.ok) commitAssistantContext(helpClaim);
+      const runId = res.headers.get('X-Agent-Run-ID') || '';
+      if (runId) {
+        const active = _activeStreams.get(streamSessionId);
+        if (active) active.runId = runId;
+        const background = _backgroundStreams.get(streamSessionId);
+        if (background) background.runId = runId;
+      }
       _sendPerf.mark('chat_stream_headers');
       _sendPerf.report('headers_received');
       
       if (!res.ok) {
+        // HTTP validation/auth/model failures happen before a turn exists.
+        // Restore the one-shot attachment and leave the chip available for a
+        // corrected retry; successful headers commit it exactly once.
+        restoreAssistantContext(helpClaim);
         clearResponseTimeout();
         if (res.status === 404) {
           // Session was deleted (e.g. by AI) — reload and go to welcome
@@ -1450,7 +2009,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let isThinking = false;
       let thinkingStartTime = null;
       // Streaming TTS: synthesize sentence-by-sentence during streaming
-      const streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
+      streamingTTS = !!(window.aiTTSManager && window.aiTTSManager.autoPlay && window.aiTTSManager.available);
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
@@ -1470,6 +2029,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       let _sourcesData = null;        // Raw sources data for rebuilding
       let _sourcesType = '';          // 'web' or 'research'
       let _findingsData = null;      // Raw findings data for collapsible box
+      const _generatedImagesForTurn = [];
+      function _rememberGeneratedImage(data) {
+        const imageUrl = data?.image_url || data?.url || '';
+        if (!imageUrl) return;
+        const imageKey = String(data.image_id || imageUrl);
+        if (_generatedImagesForTurn.some(x => String(x.image_id || x.image_url || x.url) === imageKey || x.image_url === imageUrl || x.url === imageUrl)) return;
+        _generatedImagesForTurn.push({ ...data, image_url: imageUrl, url: imageUrl });
+      }
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
       function _metricsTargetForTurn() {
         const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
@@ -1505,8 +2072,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const newRole = document.createElement('div');
         newRole.className = 'role';
         const metaS = sessionModule.getSessions().find(s => s.id === streamSessionId);
-        const requested = holder?._requestedModel || metaS?.model || modelName;
-        const actual = holder?._actualModel || requested;
+        inheritModelRouteState(holder, roundHolder, newWrap, metaS?.model || modelName);
+        const requested = newWrap._requestedModel;
+        const actual = newWrap._actualModel;
         newRole.textContent = _modelRouteLabel(requested, actual) || '';
         _applyModelColor(newRole, actual);
         newWrap.appendChild(newRole);
@@ -1531,7 +2099,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Tool-aware thinking spinner
       let _lastToolName = '';
-      const _searchIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+      const _searchIcon = uiIcon("search", 14, {"style":"vertical-align:-2px;margin-right:4px"});
       const _toolLabels = {
         'web_search': 'Searching',
         'bash': 'Running',
@@ -1593,16 +2161,27 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       // Auto-show thinking spinner after text stops streaming
       let _textPauseTimer = null;
+      const _thinkingSpinnerThrottle = createLiveThinkingThrottle(() => {
+        _textPauseTimer = null;
+        if (!document.querySelector('.agent-thinking-dots') && isStreaming) {
+          _showThinkingSpinner(_thinkingLabel());
+        }
+      }, {
+        delay: 400,
+        schedule(callback, ms) {
+          _textPauseTimer = setTimeout(callback, ms);
+          return _textPauseTimer;
+        },
+        cancel(timer) {
+          clearTimeout(timer);
+          if (_textPauseTimer === timer) _textPauseTimer = null;
+        },
+      });
       function _scheduleThinkingSpinner() {
-        if (_textPauseTimer) clearTimeout(_textPauseTimer);
-        _textPauseTimer = setTimeout(() => {
-          if (!document.querySelector('.agent-thinking-dots') && isStreaming) {
-            _showThinkingSpinner(_thinkingLabel());
-          }
-        }, 400);
+        _thinkingSpinnerThrottle.update(null);
       }
       _cancelThinkingTimer = () => {
-        if (_textPauseTimer) { clearTimeout(_textPauseTimer); _textPauseTimer = null; }
+        _thinkingSpinnerThrottle.cancel();
       };
 
       // Document streaming state (text-fence detection)
@@ -1688,7 +2267,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             const r = liveReply._streamRenderer ||
               (liveReply._streamRenderer = createStreamRenderer(liveReply, {
                 render: (t) => markdownModule.mdToHtml(markdownModule.squashOutsideCode(t)),
-                hljs: window.hljs,
               }));
             r.update(replyTrimmed);
           }
@@ -1729,7 +2307,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const renderer = contentEl._streamRenderer ||
           (contentEl._streamRenderer = createStreamRenderer(contentEl, {
             render: (t) => markdownModule.processWithThinking(markdownModule.squashOutsideCode(t)),
-            hljs: window.hljs,
           }));
         renderer.update(dt);
         uiModule.scrollHistory();
@@ -1737,6 +2314,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       let _nextIsError = false;
       let _streamSawDone = false;
+      let _streamTerminalError = null;
       let _firstVisibleOutputSeen = false;
       const markFirstVisibleOutput = () => {
         if (_firstVisibleOutputSeen) return;
@@ -1744,9 +2322,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         clearFirstTokenWaitTimers();
       };
 
+      // The terminal SSE frame is authoritative. Detached subscribers can
+      // keep the HTTP body open briefly after [DONE], so do not wait for EOF.
+      streamReadLoop:
       while (true) {
         const { done, value } = await reader.read();
-        _lastReaderActivity = Date.now();
+        _touchStreamActivity(streamSessionId);
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -1776,9 +2357,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 accumulated: accumulated,
                 sourcesHtml: _sourcesHtml,
                 findingsData: null,
-                abortCtrl: currentAbort,
+                abortCtrl,
                 query: streamQuery,
                 metrics: null,
+                runId: (_activeStreams.get(streamSessionId) || {}).runId || '',
               });
               if (sessionModule && sessionModule.markStreaming) {
                 sessionModule.markStreaming(streamSessionId);
@@ -1812,7 +2394,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
                 // Don't do foreground final render — the checkBackgroundStream poll
                 // will detect 'completed' and reload history cleanly
-                break;
+                try { await reader.cancel(); } catch (_) {}
+                break streamReadLoop;
               }
               // Force-close thinking if still open (model never output boundary)
               if (isThinking) {
@@ -1855,14 +2438,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
               }
               // Normal foreground completion — metrics will be displayed in the final render block below
-              break;
+              try { await reader.cancel(); } catch (_) {}
+              break streamReadLoop;
             }
             try {
               const json = JSON.parse(data);
               // Handle SSE error events (e.g. HTTP 404 from provider)
               if (_nextIsError || json.status >= 400) {
                 _nextIsError = false;
-                const rawError = typeof json.error === 'string' ? json.error : json.error?.message;
+                const terminalStreamError = createTerminalStreamError(json);
+                const rawError = terminalStreamError.message;
                 const actionText = {
                   repair_credentials: 'Repair the endpoint credentials in Settings → Added Models.',
                 };
@@ -1871,15 +2456,21 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   : [];
                 const errMsg = [json.text || rawError || `Error ${json.status || 'unknown'}`, ...actions]
                   .join(' ');
+                _streamTerminalError = createTerminalStreamError(json, errMsg);
                 console.error('Stream error:', errMsg);
                 if (spinner && spinner.element) spinner.destroy();
-                typewriterInto(roundHolder.querySelector('.body'), errMsg);
-                break;
+                try { await reader.cancel(); } catch (_) {}
+                break streamReadLoop;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
+              }
+              if (json.type === 'generated_image') {
+                _rememberGeneratedImage(json);
+                if (!_isBg) _appendGeneratedImageBubble(json);
+                continue;
               }
               if (json.type === 'agent_prep') {
                 if (!_isBg) {
@@ -1907,8 +2498,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _delta = '</think>' + _delta; _thinkOpen = false;
 	                }
 	                const wasEmpty = !accumulated;
-	                accumulated += _delta;
-	                currentAccumulated = accumulated; // Update global tracker
+		                accumulated += _delta;
+		                if (!_isBg) currentAccumulated = accumulated; // Foreground stop-state text
 	                // First token arrived — switch stop button from processing to streaming
 	                if (wasEmpty && submitBtn && !_isBg) {
 	                  submitBtn.dataset.phase = 'receiving';
@@ -2298,17 +2889,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   _sourcesHtml = _buildSourcesBox(json.data, 'web');
                 }
               } else if (json.type === 'workspace_rejected') {
-                // Server refused to bind the posted workspace (deleted folder,
-                // file path, sensitive dir, filesystem root). Clear the stored
-                // value so the pill stops claiming a confinement that is not in
-                // effect, and tell the user.
-                const _wsPath = (json.data && json.data.path) || '';
-                import('./workspace.js').then((m) => {
-                  const ws = m.default || m;
-                  if (ws && ws.setWorkspace) ws.setWorkspace('');
-                });
+                // The server has already invalidated this chat's binding. Keep
+                // the local session projection in sync, but never PATCH it back
+                // (which would create a rejection loop). A background chat must
+                // also never clear the Workspace currently painted for another
+                // foreground chat.
+                sessionModule.setSessionWorkspaceId?.(streamSessionId, '');
+                if (sessionModule.getCurrentSessionId?.() === streamSessionId) {
+                  import('./workspace.js').then(async (m) => {
+                    const ws = m.default || m;
+                    if (ws && ws.setWorkspace) {
+                      await ws.setWorkspace('', '', { persist: false });
+                    }
+                  }).catch(() => {});
+                }
                 uiModule.showToast(
-                  `Workspace ${_wsPath || '(unknown)'} is no longer usable; running without confinement`,
+                  'This chat’s Workspace is no longer usable; running without confinement',
                   6000
                 );
                 continue;
@@ -2329,8 +2925,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (!_isBg && holder) {
                   const roleEl = holder.querySelector('.role');
                   if (roleEl) {
-                    holder._requestedModel = json.requested_model || json.model || holder._requestedModel;
-                    holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
+                    applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
                     if (json.suffix) holder._roleSuffix = json.suffix;
                     // Prepend character name if sent by server or set locally
                     var _charName = json.character_name || (presetsModule.getCharacterName ? presetsModule.getCharacterName() : '');
@@ -2349,8 +2944,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   var _selM = _shortModel(json.selected_model || '');
                   var _ansM = _shortModel(json.answered_by || '');
                   uiModule.showToast('⚠ ' + _selM + ' failed — answered by ' + _ansM, 6000);
-                  if (holder) {
-                    var _rEl = holder.querySelector('.role');
+                  var _fallbackHolder = applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
+                  if (_fallbackHolder) {
+                    var _rEl = _fallbackHolder.querySelector('.role');
                     if (_rEl) {
                       var _tsS = _rEl.querySelector('.role-timestamp');
                       _rEl.textContent = _ansM + ' (fallback) ';
@@ -2358,12 +2954,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                         (json.reason ? ': ' + json.reason : '') + ' — answered by ' + (json.answered_by || '');
                       _applyModelColor(_rEl, json.answered_by);
                       if (_tsS) _rEl.appendChild(_tsS);
-                      holder._requestedModel = json.selected_model || holder._requestedModel || modelName;
-                      const _hasResolvedActual = holder._actualModel && !_sameModelName(holder._actualModel, holder._requestedModel);
-                      holder._actualModel = _hasResolvedActual ? holder._actualModel : (json.answered_by || holder._actualModel || holder._requestedModel);
-                      _setRoleModelLabel(_rEl, holder._requestedModel, holder._actualModel, {
-                        suffix: holder._roleSuffix,
-                        characterName: holder._characterName,
+                      _setRoleModelLabel(_rEl, _fallbackHolder._requestedModel, _fallbackHolder._actualModel, {
+                        suffix: _fallbackHolder._roleSuffix,
+                        characterName: _fallbackHolder._characterName,
                         reason: json.reason,
                       });
                     }
@@ -2391,7 +2984,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   contBtn.className = 'continue-btn';
                   contBtn.title = 'Continue the task';
                   contBtn.textContent = 'Continue ▸';
-                  const _holder = currentHolder;
+                  const _holder = holder;
                   contBtn.addEventListener('click', () => {
                     note.remove();
                     _hideUserBubble = true;
@@ -2408,12 +3001,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   try { note.scrollIntoView({ block: 'end', behavior: 'smooth' }); } catch (_) { uiModule.scrollHistory && uiModule.scrollHistory(); }
                 }
               } else if (json.type === 'model_actual') {
-                if (!_isBg && holder) {
-                  holder._requestedModel = json.requested_model || holder._requestedModel || modelName;
-                  holder._actualModel = json.model || holder._actualModel || holder._requestedModel;
-                  _setRoleModelLabel(holder.querySelector('.role'), holder._requestedModel, holder._actualModel, {
-                    suffix: holder._roleSuffix,
-                    characterName: holder._characterName,
+                if (!_isBg) {
+                  var _modelHolder = applyModelRouteEventState(json, holder, roundHolder, modelName, _sameModelName);
+                  if (_modelHolder) _setRoleModelLabel(_modelHolder.querySelector('.role'), _modelHolder._requestedModel, _modelHolder._actualModel, {
+                    suffix: _modelHolder._roleSuffix,
+                    characterName: _modelHolder._characterName,
                   });
                 }
               } else if (json.type === 'attachments') {
@@ -2502,8 +3094,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'metrics') {
                 metrics = json.data;
                 if (!_isBg && holder && metrics) {
-                  holder._requestedModel = metrics.requested_model || holder._requestedModel || modelName;
-                  holder._actualModel = metrics.model || holder._actualModel || holder._requestedModel;
+                  applyModelMetricsState(metrics, holder, roundHolder, modelName);
                 }
                 if (_isBg) {
                   var bgM = _backgroundStreams.get(streamSessionId);
@@ -2513,13 +3104,14 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 if (metrics) {
                   const metricsTarget = _metricsTargetForTurn();
                   if (metricsTarget) displayMetrics(metricsTarget, metrics);
+                  refreshChatContextHeader('metrics');
                 }
 
               } else if (json.type === 'message_saved') {
                 // Wire the persisted DB id onto the just-streamed bubble so it
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
-                if (currentHolder && json.id) currentHolder.dataset.dbId = json.id;
+                if (holder && json.id) holder.dataset.dbId = json.id;
 
               } else if (json.type === 'actor_accounting' || json.type === 'actor_accounting_failure') {
                 if (_isBg) continue;
@@ -2556,7 +3148,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     var _contentEl3 = _ensureStreamLayout(_body3);
                     _contentEl3.style.minHeight = '';  // clear streaming inflate
                     _contentEl3.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(dt));
-                    if (window.hljs) roundHolder.querySelectorAll('pre code').forEach((b) => window.hljs.highlightElement(b));
+                    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(roundHolder);
                   } else {
                     roundHolder.style.display = 'none';
                   }
@@ -2730,11 +3322,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 }
                 // --- Render generated images inline ---
                 if (json.image_url) {
-                  const chatBox = document.getElementById('chat-history');
-                  chatBox.appendChild(_buildImageBubble(json.image_url, json.image_prompt, json.image_model, json.image_size, json.image_quality, json.image_id));
-                  uiModule.scrollHistory();
-                  // Notify gallery to refresh if open
-                  window.dispatchEvent(new CustomEvent('gallery-refresh'));
+                  _rememberGeneratedImage(json);
+                  _appendGeneratedImageBubble(json);
                 }
                 // --- Render browser screenshots in tool output ---
                 if (json.screenshot && outNode) {
@@ -2868,6 +3457,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 _removeThinkingSpinner();
                 chatRenderer.renderPermissionCard(json.data || {}, streamSessionId);
 
+              } else if (json.type === 'sudo_password_request') {
+                // Second prompt of an approved destructive command: the exact
+                // command was already cleared; this only collects the password.
+                const sudoData = Object.assign({}, json.data || {}, { sudo_password: true });
+                _storeSessionState('permission', streamSessionId, sudoData);
+                if (_isBg) continue;
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                chatRenderer.renderPermissionCard(sudoData, streamSessionId);
+
               } else if (json.type === 'plan_update') {
                 // Agent wrote back to the plan (ticked a step / revised). Update
                 // the stored plan + live-refresh the docked plan window.
@@ -2877,7 +3476,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               } else if (json.type === 'protocol_error' || json.type === 'config_error') {
                 if (!_isBg) {
                   const detail = json.data || json;
-                  uiModule.showError(detail.message || detail.error || 'MiMo protocol error');
+                  uiModule.showError(detail.message || detail.error || 'Open Clank agent protocol error');
                 }
 
               } else if (json.type === 'retry_notice') {
@@ -3022,6 +3621,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
       }
 
+      if (_streamTerminalError) {
+        throw _streamTerminalError;
+      }
       if (!_streamSawDone) {
         throw new Error('Stream closed before completion');
       }
@@ -3040,15 +3642,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       const _isBgFinal = (sessionModule.getCurrentSessionId() !== streamSessionId) || _backgroundStreams.has(streamSessionId);
       if (!_isBgFinal) {
         finalMeta = sessionModule.getSessions().find(s => s.id === sessionModule.getCurrentSessionId());
-        const _finalActualModel = metrics?.model || holder._actualModel || finalMeta?.model;
-        const _finalRequestedModel = metrics?.requested_model || holder._requestedModel || finalMeta?.model || _finalActualModel;
+        const _finalModelHolder = applyModelMetricsState(metrics, holder, roundHolder, finalMeta?.model) || roundHolder || holder;
+        const _finalActualModel = _finalModelHolder?._actualModel || finalMeta?.model;
+        const _finalRequestedModel = _finalModelHolder?._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set
         var _charNameFinal = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
-        const roleEl = holder.querySelector('.role');
+        const roleEl = _finalModelHolder?.querySelector('.role');
         if (roleEl) {
           _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {
-            suffix: holder._roleSuffix,
-            characterName: _charNameFinal || holder._characterName,
+            suffix: _finalModelHolder._roleSuffix,
+            characterName: _charNameFinal || _finalModelHolder._characterName,
           });
         }
         holder.dataset.raw = accumulated;
@@ -3177,11 +3780,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         }
 
 
-        if (window.hljs) {
-          roundHolder.querySelectorAll('pre code').forEach((block) => {
-            window.hljs.highlightElement(block);
-          });
-        }
+        if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(roundHolder);
         if (markdownModule.renderMermaid) markdownModule.renderMermaid(roundHolder);
 
         uiModule.scrollHistory();
@@ -3214,21 +3813,46 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (!footerTarget.querySelector('.msg-footer')) {
           footerTarget.appendChild(createMsgFooter(footerTarget));
         }
+        if (_generatedImagesForTurn.length && !_isBgFinal) {
+          _generatedImagesForTurn.forEach(imgData => _appendGeneratedImageBubble(imgData));
+        }
         // Add "View Report" link for completed research
         if (_researchingStreamIds.has(streamSessionId)) {
           _appendViewReportLink(footerTarget, streamSessionId);
         }
-        // Also store raw on the footer target so copy/TTS work
-        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
-        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
-          addAITTSButton(footerTarget, accumulated);
-        }
+	        // Also store raw on the footer target so copy/TTS work. Execute is
+	        // attached only when the server has persisted a matching plan state;
+	        // streamed text alone is never an approval capability.
+	        if (footerTarget !== holder) footerTarget.dataset.raw = accumulated;
+	        try {
+	          const _endToggles = Storage.loadToggleState();
+          if (_endToggles.plan_mode && accumulated && streamSessionId) {
+            // Draft text is persisted for this session, but remains explicitly
+            // unapproved until the user completes the revision/digest CAS.
+            fetch(`${API_BASE}/session/${encodeURIComponent(streamSessionId)}/plan/draft`, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ plan: accumulated }),
+            }).then(async response => {
+              const payload = await response.json().catch(() => ({}));
+              if (!response.ok || !payload.plan_state) throw new Error(payload.detail || 'Plan draft sync failed');
+              _setStoredPlan(payload.plan_state, streamSessionId);
+              if (sessionModule.getCurrentSessionId() === streamSessionId) _attachPlanActions(footerTarget, accumulated);
+            }).catch(error => {
+              console.warn('Plan draft sync failed', error);
+            });
+          }
+	        } catch (_) {}
+	        if (addAITTSButton && accumulated && window.aiTTSManager?._provider !== 'disabled' && window.aiTTSManager?.available) {
+	          addAITTSButton(footerTarget, accumulated);
+	        }
         // TTS auto-play: streaming mode flushes remaining text, non-streaming enqueues full message
         if (accumulated && window.aiTTSManager && window.aiTTSManager.autoPlay) {
           const ttsBtn = holder.querySelector('.ai-tts-button');
           if (ttsBtn) {
-            var ICON_PLAY_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 3 20 12 6 21 6 3"/></svg>';
-            var ICON_STOP_TTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+            var ICON_PLAY_TTS = uiIcon("play", 14);
+            var ICON_STOP_TTS = uiIcon("stop", 14);
             const resetFn = () => {
               ttsBtn.innerHTML = ICON_PLAY_TTS;
               ttsBtn.classList.remove('playing', 'loading');
@@ -3279,9 +3903,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             const oldFooter = prevEl.querySelector('.msg-footer');
             if (oldFooter) oldFooter.remove();
             prevEl.appendChild(createMsgFooter(prevEl));
-            if (window.hljs) {
-              prevEl.querySelectorAll('pre code').forEach(block => window.hljs.highlightElement(block));
-            }
+            if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(prevEl);
 
             // Persist merge to server
             const sid = sessionModule.getCurrentSessionId();
@@ -3326,8 +3948,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // Stop streaming TTS on any error/abort
         if (streamingTTS && window.aiTTSManager) window.aiTTSManager.stop();
 
-        if (currentAbort && currentAbort.signal.aborted) {
-          const abortReason = currentAbort._reason || '';
+        if (abortCtrl && abortCtrl.signal.aborted) {
+          const abortReason = abortCtrl._reason || '';
           // Timeout-triggered aborts should remain visible instead of disappearing.
           if (timedOut || abortReason === 'timeout') {
             const timeoutMsg = _isAgent
@@ -3344,7 +3966,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${timeoutMsg}]</span>`;
               holder.querySelector('.body').appendChild(timeoutNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3360,7 +3982,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${offlineMsg}]</span>`;
               holder.querySelector('.body').appendChild(offlineNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3376,7 +3998,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 `<span style="color: var(--color-error);">[${recoveryMsg}]</span>`;
               holder.querySelector('.body').appendChild(recoveryNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3391,7 +4013,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               staleNote.innerHTML = `<span style="opacity:0.7;">[${staleMsg}]</span>`;
               holder.querySelector('.body').appendChild(staleNote);
             }
-            currentAbort = null;
+            if (currentAbort === abortCtrl) currentAbort = null;
             return;
           }
 
@@ -3403,17 +4025,13 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
 
           // But just in case the stop button didn't render it, render it here
-          if (holder && accumulated && !currentHolder) {
+          if (holder && accumulated && !currentHolder && !holder.querySelector('.stopped-indicator')) {
             holder.dataset.raw = accumulated;
             holder.querySelector('.body').innerHTML = markdownModule.processWithThinking(
               markdownModule.squashOutsideCode(accumulated)
             );
 
-            if (window.hljs) {
-              holder.querySelectorAll('pre code').forEach((block) => {
-                window.hljs.highlightElement(block);
-              });
-            }
+            if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(holder);
 
             const stoppedIndicator = document.createElement('div');
             stoppedIndicator.className = 'stopped-indicator';
@@ -3451,7 +4069,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           }
 
           // Now clear the abort controller
-          currentAbort = null;
+          if (currentAbort === abortCtrl) currentAbort = null;
         } else {
           console.error(err);
           // Stream died with a tool node still spinning. Its per-node tickers
@@ -3470,12 +4088,20 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
           // cap. Only auto-recover from connection-class failures; deterministic
           // errors (unsupported tools, 4xx/5xx, parse failures) surface right away
           // instead of burning the nudge budget on a guaranteed-to-fail retry.
-          if (!(_isRecoverableStreamErr(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
-            const errorHolder = document.querySelector('.msg-ai:last-of-type .body');
+          if (!(isRecoverableStreamError(err) && _tryAutoRecover(holder, accumulated, streamSessionId))) {
+            // Early failures (for example a Copal flush error) happen before
+            // the response holder exists. Never paint them into an older
+            // assistant turn or silently lose them because a global selector
+            // found no body; create a response bubble owned by this send.
+            let errorHolder = holder?.querySelector('.body') || null;
+            if (!errorHolder) {
+              const errorBubble = addMessage('assistant', '', finalMeta?.model || '');
+              errorHolder = errorBubble?.querySelector('.body') || null;
+            }
             if (errorHolder) {
-              let errMsg = `Error: ${err.message}`;
+              let errMsg = `Error: ${err?.message || String(err)}`;
               // Agent is the product lane; unsupported models must be replaced.
-              if (err.message && (err.message.includes('tool') || err.message.includes('auto'))) {
+              if (err?.message && (err.message.includes('tool') || err.message.includes('auto'))) {
                 errMsg += '\n\nChoose an Agent-ready model in the model picker.';
               }
               typewriterInto(errorHolder, errMsg);
@@ -3487,6 +4113,9 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       clearResponseTimeout();
       clearProcessingProbe();
       clearFirstTokenWaitTimers();
+      _activeStreams.delete(streamSessionId);
+      if (_streamSessionId === streamSessionId) _streamSessionId = null;
+      _syncForegroundStreamGlobals();
       // Streaming done — let screen readers announce the settled response.
       const _chatLogDone = document.getElementById('chat-history');
       if (_chatLogDone) _chatLogDone.setAttribute('aria-busy', 'false');
@@ -3576,7 +4205,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             if (_box && sessionModule.getCurrentSessionId() === _timeoutSessionId) {
               var _timeoutMsg = document.createElement('div');
               _timeoutMsg.className = 'msg msg-ai';
-              _timeoutMsg.innerHTML = '<div class="role">Odysseus</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
+              _timeoutMsg.innerHTML = '<div class="role">Open Clank</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
               _box.appendChild(_timeoutMsg);
               uiModule.scrollHistory();
             }
@@ -3613,16 +4242,19 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // the server run — otherwise closing the tab would kill the background task,
   // defeating the whole point. Only the Stop button cancels the server run.
   export function abortCurrentRequest(stopServer = false) {
-    if (currentAbort) {
-      currentAbort.abort();
+    const active = _getForegroundStreamState();
+    const abortCtrl = active ? active.abortCtrl : currentAbort;
+    if (abortCtrl) {
+      abortCtrl.abort();
       // Don't set to null here - let catch block handle it
     }
     if (stopServer) {
       try {
-        const _sid = _streamSessionId
+        const _sid = (sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId())
+          || _streamSessionId
           || (window.sessionModule && window.sessionModule.getCurrentSessionId && window.sessionModule.getCurrentSessionId());
         if (_sid) {
-          fetch(`/api/chat/stop/${encodeURIComponent(_sid)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+          _stopDetachedRun(_sid);
         }
       } catch (_) {}
     }
@@ -3633,18 +4265,6 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // preserve the partial, then re-submit a completion handshake by reusing the
   // existing continue/resume path. Returns false at the cap so the caller can
   // surface the failure instead of nudging forever.
-  // Only auto-recover from connection-class failures (the genuine "silently
-  // died" case). Deterministic errors — unsupported tools, HTTP 4xx/5xx, JSON
-  // parse failures — will fail identically on retry, so surfacing them
-  // immediately is both more honest and avoids wasting the nudge budget.
-  function _isRecoverableStreamErr(err) {
-    if (!err) return false;
-    if (err.name === 'TypeError') return true;   // fetch/reader network failure
-    const m = (err.message || '').toLowerCase();
-    if (/\btool\b|unsupported|json|parse|\b4\d\d\b|\b5\d\d\b/.test(m)) return false;
-    return /network|fetch|connection|reset|closed|aborted|stream|tim(?:e|ed)\s?out|econn|eof/.test(m);
-  }
-
   function _tryAutoRecover(holder, accumulated, sessionId) {
     if (_autoNudges >= _AUTO_NUDGE_CAP) return false;
     _autoNudges++;
@@ -3720,9 +4340,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (uiModule.scrollHistory) uiModule.scrollHistory();
   }
   async function _probeStaleLocalStream() {
-    if (!isStreaming || _staleStreamProbeInFlight) return;
-    if (Date.now() - _lastReaderActivity < STALE_LOCAL_STREAM_MS) return;
-    const sid = _streamSessionId || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    const active = _getForegroundStreamState();
+    if (!active || _staleStreamProbeInFlight) return;
+    if (Date.now() - (active.lastActivity || _lastReaderActivity) < STALE_LOCAL_STREAM_MS) return;
+    const sid = sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
     if (!sid) return;
     if (_backgroundStreams.has(sid) || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid)) return;
     _staleStreamProbeInFlight = true;
@@ -3731,16 +4352,16 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         credentials: 'same-origin',
         cache: 'no-store',
       });
-      if (!isStreaming || _backgroundStreams.has(sid)) return;
+      if (!_getForegroundStreamState() || _backgroundStreams.has(sid)) return;
       if (res.status !== 404) return;
 
       console.warn('[stream-watchdog] Local stream was stale and server has no active stream. Unlocking composer.');
-      if (currentAbort && !currentAbort.signal.aborted) {
-        currentAbort._reason = 'stale-local';
-        currentAbort.abort();
+      if (active.abortCtrl && !active.abortCtrl.signal.aborted) {
+        active.abortCtrl._reason = 'stale-local';
+        active.abortCtrl.abort();
       }
-      isStreaming = false;
-      _setForegroundChatBusy(false);
+      _activeStreams.delete(sid);
+      _syncForegroundStreamGlobals();
       _sendInFlight = false;
       if (_webLockRelease) {
         _webLockRelease();
@@ -3775,6 +4396,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    *  Called from both abort paths when no tokens had streamed yet. */
   function _renderCancelledBubble(holder) {
     if (!holder) return;
+    // The Stop click path and the aborted fetch catch can both reach this
+    // helper. Make the DOM marker and persistence write idempotent so one
+    // user action cannot create duplicate cancelled assistant rows.
+    if (holder.dataset.cancelledByUser === 'true') return;
+    holder.dataset.cancelledByUser = 'true';
     holder.dataset.raw = '';
     const body = holder.querySelector('.body');
     if (body) {
@@ -3825,7 +4451,8 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
    * Called when user switches sessions mid-stream.
    */
   export function detachCurrentStream(sessionId) {
-    if (!isStreaming || !currentAbort) {
+    const active = sessionId ? _activeStreams.get(sessionId) : _getForegroundStreamState();
+    if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
       return;
@@ -3836,20 +4463,21 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       accumulated: currentAccumulated,
       sourcesHtml: '',
       findingsData: null,
-      abortCtrl: currentAbort,
-      query: currentHolder ? (currentHolder._researchQuery || '') : '',
+      abortCtrl: active.abortCtrl,
+      query: active.query || (active.holder ? (active.holder._researchQuery || '') : ''),
       metrics: null,
+      runId: active.runId || '',
     });
     // Mark session with pulsing dot in sidebar
     if (sessionModule && sessionModule.markStreaming) {
       sessionModule.markStreaming(sessionId);
     }
     // Clear local state WITHOUT aborting the fetch
-    currentAbort = null;
-    isStreaming = false;
-    _setForegroundChatBusy(false);
-    currentHolder = null;
+    if (currentAbort === active.abortCtrl) currentAbort = null;
+    if (currentHolder === active.holder) currentHolder = null;
+    if (_streamSessionId === sessionId) _streamSessionId = null;
     currentAccumulated = '';
+    _syncForegroundStreamGlobals();
     // Reset submit button so the new chat is ready to send
     const submitBtn = document.querySelector('.send-btn');
     if (submitBtn) updateSubmitButton('idle', submitBtn);
@@ -3873,21 +4501,34 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (!sessionId) return false;
     if (hasActiveStream(sessionId)) return false;
 
+    // Claim the session before the first await.  Refresh/session-switch hooks
+    // can call resumeStream concurrently; checking then fetching before taking
+    // this lock lets both callers attach and render the same detached run.
+    _resumingStreams.set(sessionId, '');
+
     let res;
     try {
       res = await fetch(`${API_BASE}/api/chat/resume/${sessionId}`);
     } catch (e) {
+      _resumingStreams.delete(sessionId);
       return false;
     }
-    if (!res.ok || !res.body) return false;
+    if (!res.ok || !res.body) {
+      _resumingStreams.delete(sessionId);
+      return false;
+    }
+    _resumingStreams.set(sessionId, res.headers.get('X-Agent-Run-ID') || '');
 
     const box = document.getElementById('chat-history');
-    if (!box) return false;
+    if (!box) {
+      _resumingStreams.delete(sessionId);
+      try { await res.body.cancel(); } catch (_) {}
+      return false;
+    }
 
-    // Block duplicate re-attach attempts while this reader is live. A dedicated
-    // set (not _backgroundStreams) so checkBackgroundStream doesn't mistake this
-    // for a same-tab POST stream and spawn its own spinner+poll on re-entry.
-    _resumingStreams.add(sessionId);
+    // A dedicated set (not _backgroundStreams) so checkBackgroundStream
+    // doesn't mistake this for a same-tab POST stream and spawn its own
+    // spinner+poll on re-entry.
 
     const holder = document.createElement('div');
     holder.className = 'msg msg-ai';
@@ -3977,6 +4618,22 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
             metricsData = json.data || metricsData;
           } else if (json.type === 'actor_accounting' || json.type === 'actor_accounting_failure') {
             chatRenderer.renderActorAccounting(holder, json.data || {});
+          } else if (json.type === 'ask_user') {
+            const question = json.data || {};
+            if (question.request_id && Array.isArray(question.questions)) {
+              _storeSessionState('question', sessionId, question);
+            }
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderAskUserCard(json.data || {});
+          } else if (json.type === 'permission_request') {
+            _storeSessionState('permission', sessionId, json.data || {});
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderPermissionCard(json.data || {}, sessionId);
+          } else if (json.type === 'sudo_password_request') {
+            const sudoData = Object.assign({}, json.data || {}, { sudo_password: true });
+            _storeSessionState('permission', sessionId, sudoData);
+            try { spinner.destroy(); } catch (_) {}
+            chatRenderer.renderPermissionCard(sudoData, sessionId);
           } else if (json.type === 'tool_start' || json.type === 'tool_output' ||
                      json.type === 'tool_progress') {
             rich = true;
@@ -4186,7 +4843,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const origHTML = btn.innerHTML;
         const isCompact = !!btn.closest('pre.pre-compact');
         if (!isCompact) {
-          btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+          btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         }
         btn.classList.add('copied');
         btn.dataset.state = 'copied';
@@ -4227,7 +4884,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         const runBtn = pre.querySelector('.run-code');
         if (runBtn) runBtn.setAttribute('data-code', newCode);
         // Swap icon back to pencil
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+        btn.innerHTML = uiIcon("edit", 14);
         btn.title = 'Edit';
         btn.classList.remove('active');
       } else {
@@ -4245,7 +4902,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         // scroll triggered by clicking Edit".
         try { codeEl.focus({ preventScroll: true }); } catch (_) { codeEl.focus(); }
         // Swap icon to checkmark
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         btn.title = 'Done editing';
         btn.classList.add('active');
       }
@@ -4286,10 +4943,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     // Tab suspension recovery: when user tabs back in, check if stream froze
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (!isStreaming) return;
+      const active = _getForegroundStreamState();
+      if (!active) return;
 
       // Stream claims to be running — check if reader is actually alive
-      const staleSince = Date.now() - _lastReaderActivity;
+      const staleSince = Date.now() - (active.lastActivity || _lastReaderActivity);
       if (staleSince < 20000) return; // Active recently, probably fine
 
       // Reader hasn't produced data in 5+ seconds after tab resume.
@@ -4298,18 +4956,23 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
 
       setTimeout(() => {
         // Re-check — maybe the reader woke up during the grace period
-        if (!isStreaming) return;
-        const stillStale = Date.now() - _lastReaderActivity;
+        const stillActive = _getForegroundStreamState();
+        if (!stillActive) return;
+        const stillStale = Date.now() - (stillActive.lastActivity || _lastReaderActivity);
         if (stillStale < 5000) return; // Came back to life
 
         console.warn('[tab-recovery] Stream confirmed dead. Aborting and reloading session.');
 
         // Abort the frozen stream, but preserve the visible bubble.
-        if (currentAbort) {
-          currentAbort._reason = 'recovery';
-          currentAbort.abort();
+        if (stillActive.abortCtrl) {
+          stillActive.abortCtrl._reason = 'recovery';
+          stillActive.abortCtrl.abort();
         }
-        isStreaming = false;
+        try {
+          const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+          if (sid) _activeStreams.delete(sid);
+        } catch (_) {}
+        _syncForegroundStreamGlobals();
 
         // Release Web Lock
         if (_webLockRelease) {
@@ -4662,6 +5325,54 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
   // File-ids carried over from the original user message during a regen, so
   // photos / OCR overrides survive into the new send. Consumed once.
   let _pendingRegenAttachments = null;
+  let _restoredAttachmentOwner = null;
+  let _restoredAttachmentArray = null;
+  let _composerDraftVersion = 0;
+  let _composerSessionEpoch = 0;
+  let _composerSessionId = sessionModule.getCurrentSessionId();
+  document.addEventListener('input', (event) => {
+    if (event.target?.id === 'message') _composerDraftVersion++;
+  });
+  document.addEventListener('odysseus:session-selected', () => {
+    const sid = sessionModule.getCurrentSessionId();
+    if (sid !== _composerSessionId) {
+      _composerSessionEpoch++;
+      _composerSessionId = sid;
+      if (_restoredAttachmentOwner !== sid && _pendingRegenAttachments === _restoredAttachmentArray) _pendingRegenAttachments = null;
+      _restoredAttachmentOwner = null;
+      _restoredAttachmentArray = null;
+    }
+  });
+  function captureComposerDraftState() {
+    return { sid: sessionModule.getCurrentSessionId(), epoch: _composerSessionEpoch, version: _composerDraftVersion,
+      text: document.getElementById('message')?.value ?? '', attachments: _pendingRegenAttachments,
+      pending: [...fileHandlerModule.getPendingRaw()] };
+  }
+  let _codeEvidenceAuthEpoch = 0;
+  document.addEventListener('openclank:auth-context-changed', () => { _codeEvidenceAuthEpoch++; });
+  function captureCodeEvidenceDraft() {
+    const draft=captureComposerDraftState();
+    const session=sessionModule.getSessions().find(row=>row.id===draft.sid);
+    return {...draft,owner:session?.owner||'',authEpoch:_codeEvidenceAuthEpoch};
+  }
+  function appendCodeEvidence(evidence, {expected,isCurrent,ask=false}={}) {
+    if(!document.getElementById('message'))return {ok:false,message:'Chat composer unavailable.'};
+    return appendCodeEvidenceCAS(evidence,{expected,isCurrent,ask,read:captureCodeEvidenceDraft,
+      commit:text=>{const input=document.getElementById('message');input.value=text;input.dispatchEvent(new Event('input',{bubbles:true}));},
+      submit:()=>{document.querySelector('.send-btn')?.click();}});
+  }
+  function restoreComposerDraft(receipt, { sid, expected } = {}) {
+    if (!document.getElementById('message')) return { restored: false, reason: 'composer-unavailable' };
+    return restoreValidatedComposerDraft(receipt, { sid, expected, read: captureComposerDraftState, commit: ({ text, attachmentIds }) => {
+      const input = document.getElementById('message');
+      input.value = text;
+      fileHandlerModule.clearPending();
+      _pendingRegenAttachments = attachmentIds;
+      _restoredAttachmentOwner = sid;
+      _restoredAttachmentArray = attachmentIds;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    } });
+  }
 
   /**
    * Called after streaming completes to attach variant navigation if this was a regen.
@@ -4776,9 +5487,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     if (body) body.innerHTML = v.html;
     msgElement.dataset.raw = v.raw;
     msgElement.dataset.variantIndex = String(newIdx);
-    if (window.hljs) {
-      msgElement.querySelectorAll('pre code').forEach(block => window.hljs.highlightElement(block));
-    }
+    if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(msgElement);
     _renderVariantNav(msgElement, variants, newIdx);
 
     // Persist selected variant to server
@@ -4877,7 +5586,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
               _wrap.appendChild(chatRenderer.createMsgFooter(_wrap));
               _appendViewReportLink(_wrap, sessionId);
               _box.appendChild(_wrap);
-              if (window.hljs) _wrap.querySelectorAll('pre code').forEach(function(b) { window.hljs.highlightElement(b); });
+              if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(_wrap);
               uiModule.scrollHistory();
             }
           }
@@ -5028,9 +5737,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   ) + findingsHtml;
                   holder.dataset.raw = rData.result;
                   _appendViewReportLink(holder, sessionId);
-                  if (window.hljs) {
-                    holder.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
-                  }
+                  if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(holder);
                 }
               }
             } else {
@@ -5444,7 +6151,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     }
   }
 
-  // Open a chat attachment in the right place: images → Gallery editor; PDFs &
+  // Open a chat attachment in the right place: images → Imps; PDFs &
   // text/code/markdown → Documents viewer; anything else → raw file. A given
   // upload's imported document is reused (cached by upload id) so clicking it
   // again re-opens the same doc instead of making duplicates.
@@ -5464,12 +6171,12 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     const id = att.id, name = att.name || '', mime = att.mime || '';
     const url = `${API_BASE}/api/upload/${id}`;
 
-    // Images → Gallery editor.
+    // Images → Imps.
     if (isImage) {
       try {
-        const gx = await import('./galleryEditor.js');
+        const gx = await import('./imps.js');
         if (gx.openEditor) { gx.openEditor(url, id, null, name); return; }
-      } catch (e) { console.warn('gallery open failed', e); }
+      } catch (e) { console.warn('imps open failed', e); }
       window.open(url, '_blank');
       return;
     }
@@ -5565,6 +6272,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
     continueFrom,
     _appendViewReportLink,
     hasActiveStream,
+    captureComposerDraftState,
+    captureCodeEvidenceDraft,
+    appendCodeEvidence,
+    restoreComposerDraft,
   };
 
   // Single delegated handler for tool-call fold/expand. One listener on

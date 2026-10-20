@@ -31,6 +31,41 @@ def test_blocked_tools_for_owner_includes_edit_file_for_non_admin(monkeypatch):
     assert blocked_tools_for_owner("admin") == set()
 
 
+def test_non_admin_file_tools_open_only_for_assigned_visibility(tmp_path, monkeypatch):
+    """An assignment changes tool advertisement; the Rust lane remains the authority."""
+    from src.openclank import filesystem_registry
+
+    monkeypatch.setattr(filesystem_registry, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: False)
+    registry = filesystem_registry.FilesystemRootRegistry()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    record = registry.add("admin", str(root), "recursive_directory", ["read", "write"])
+    registry.assign_visibility("admin", "bob", record["id"], ["read"])
+
+    blocked = blocked_tools_for_owner("bob")
+    assert {"read_file", "ls", "glob", "grep"}.isdisjoint(blocked)
+    # A read-only assignment is still allowed to reach the handler; Rust will
+    # deny write/edit at the capability check rather than falling back locally.
+    assert "write_file" not in blocked
+    assert "edit_file" not in blocked
+
+
+def test_non_admin_without_assignment_stays_closed(tmp_path, monkeypatch):
+    from src.openclank import filesystem_registry
+
+    monkeypatch.setattr(filesystem_registry, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: False)
+    filesystem_registry.FilesystemRootRegistry().path.parent.mkdir(parents=True)
+    filesystem_registry.FilesystemRootRegistry().path.write_text(
+        '{"version": 1, "generation": 0, "roots": {}, "visibility_assignments": {}}',
+        encoding="utf-8",
+    )
+
+    blocked = blocked_tools_for_owner("bob")
+    assert {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}.issubset(blocked)
+
+
 @pytest.mark.asyncio
 async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
     # Execution-level gate: a non-admin owner must be refused even if the tool
@@ -53,6 +88,29 @@ async def test_edit_file_blocked_at_execution_for_non_admin(monkeypatch):
     )
     assert result.get("exit_code") == 1 and "admin" in result.get("error", "").lower()
     os.unlink(p)
+
+
+@pytest.mark.asyncio
+async def test_model_process_is_admitted_under_the_os_boundary(tmp_path, monkeypatch):
+    """2026-08-14 owner ruling: a configured policy registry no longer denies
+    model-directed process tools; confinement is the OS account's job and
+    destructive commands still pass through interactive approval."""
+    import src.tool_execution as te
+
+    registry_path = tmp_path / "roots.json"
+    registry_path.write_text(
+        '{"version": 1, "generation": 0, "roots": {}, "visibility_assignments": {}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry_path))
+    monkeypatch.setattr(te, "_owner_is_admin", lambda owner: True)
+    _desc, result = await te.execute_tool_block(
+        ToolBlock("bash", "printf admission-ok"),
+        owner="admin",
+        session_id="chat-a",
+    )
+    assert result.get("exit_code") == 0, result
+    assert "admission-ok" in str(result.get("output", ""))
 
 
 # ── Behavior ──────────────────────────────────────────────────────────────

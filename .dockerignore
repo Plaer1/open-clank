@@ -1,15 +1,23 @@
 venv/
 .venv/
 node_modules/
+.node_modules.bak-*/
 services/node_modules/
 __pycache__/
+.ruff_cache/
+.turbo/
 *.pyc
 *.pyo
 *.egg-info/
+*.tsbuildinfo
 dist/
 build/
+target/
 .env
 .env.bak.*
+# Local tunnel/platform environment variants must never enter image layers.
+.env.bak-*
+.env.*-source
 # Secrets: keep plaintext and every transient secrets.env variant out of
 # the build context. If an encrypted secrets.env is used, it is mounted
 # at runtime — never baked into the image. Mirrored in .gitignore.
@@ -21,27 +29,46 @@ secrets.env~
 **/#secrets.env#
 !secrets.env.example
 /data/
+/data.before-restore-*/
+/data.failed-restore-*/
+/backups/
 /logs/
 .git/
 .archive/
 .references/
 references/
-.futures/
-robonotes/
-.robonotes/
+# Every singular Clanker workspace is private, including tools and Hexes.
+**/.clanker/
+# History credentials and their authority/root sidecars are runtime state.
+**/history-credentials*.json
+**/.history-credentials*.tmp
+**/.clankers/robonotes/
 .mimocode/
+.mimocode-test-fixtures-*/
 /bin/
+/cache/
+/libexec/
 .claude/
 .playwright-mcp/
 .pytest_cache/
 .vscode/
 .idea/
 dev-docs/
-docs/
+# Operator guides only; static/docs is shipped handbook media.
+/docs/
 *.md
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
 /reports/
 /research_data/
 tasks/
@@ -51,6 +78,11 @@ search_analytics.json
 **/search_analytics.json
 tests/
 api/
+/packages/Copal/.codebase-memory/
+/packages/Copal/.next/
+/packages/Copal/db/
+/packages/Copal/out/
+/packages/Copal/treehouse/
 *.log
 *.error.log
 chart.png
@@ -58,3 +90,19 @@ timetree*.png
 *_signin_page.png
 *_calendar_view.png
 .gitignore
+
+# Local capture harness and personal workstation launcher; never release inputs.
+/.s26-visual/
+/packages/Copal/move-timeline.desktop
+/packages/Copal/worklog.md
+/packages/Copal/public/data/
+
+# Keep the assembled offline pack in images; omit duplicate release part files.
+**/emoji-assets.pack.part-*
+**/emoji-assets.parts.json
+
+# Local Mimo scheduler coordination, never a publication artifact.
+.mimocode/.cron-lock
+
+# Standalone/native and hosted mutable planning payloads stay operator-local.
+**/move-data.json

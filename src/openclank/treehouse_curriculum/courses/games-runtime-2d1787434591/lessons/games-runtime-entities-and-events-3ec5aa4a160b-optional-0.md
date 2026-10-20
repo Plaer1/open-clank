@@ -1,0 +1,1 @@
+The door's open state and key inventory survive save/load; transient feedback does not reapply the transaction.

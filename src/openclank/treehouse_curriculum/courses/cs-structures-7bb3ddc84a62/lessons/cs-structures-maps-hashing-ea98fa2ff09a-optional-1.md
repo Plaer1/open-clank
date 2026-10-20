@@ -1,0 +1,1 @@
+Replacing the old entry just because hashes match loses data.

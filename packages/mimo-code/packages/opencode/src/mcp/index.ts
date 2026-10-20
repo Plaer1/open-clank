@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { ObservingStdioTransport } from "./stdio-transport"
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js"
 import {
   CallToolResultSchema,
@@ -17,6 +18,7 @@ import z from "zod/v4"
 import { Installation } from "../installation"
 import { InstallationVersion } from "../installation/version"
 import { withTimeout } from "@/util/timeout"
+import { childProcessEnv } from "@/util/child-process-env"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { McpOAuthProvider } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
@@ -30,6 +32,8 @@ import { EffectBridge } from "@/effect"
 import { InstanceState } from "@/effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
+import { McpSampling } from "./sampling"
+import { SessionID } from "@/session/schema"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
@@ -68,6 +72,139 @@ export const Failed = NamedError.create(
 )
 
 type MCPClient = Client
+
+export const TURN_LIFECYCLE_CAPABILITY = "com.xiaomi.mimo/turn-lifecycle"
+export const TURN_LIFECYCLE_NOTIFICATION = `notifications/${TURN_LIFECYCLE_CAPABILITY}`
+export const TURN_LIFECYCLE_VERSION = 1
+export const TURN_LIFECYCLE_NOTIFICATION_TIMEOUT = 1_000
+// A send that has already outlived the per-turn budget can never be useful to wait
+// on again, so later turns abandon it instead of queueing behind it forever.
+export const TURN_LIFECYCLE_STUCK_TIMEOUT = TURN_LIFECYCLE_NOTIFICATION_TIMEOUT
+
+export const CLIENT_OPTIONS = {
+  capabilities: {
+    // Sampling is registered below. Keep tools/context undeclared because they
+    // are intentionally unsupported on this MCP surface.
+    sampling: {},
+    experimental: { [TURN_LIFECYCLE_CAPABILITY]: { version: TURN_LIFECYCLE_VERSION } },
+  },
+}
+
+export interface TurnContext {
+  [key: string]: unknown
+  sessionId: string
+  turnId: string
+  actorId?: string
+}
+
+export type TurnStatus = "completed" | "cancelled" | "error"
+
+function supportsTurnLifecycle(client: MCPClient) {
+  const capability = client.getServerCapabilities()?.experimental?.[TURN_LIFECYCLE_CAPABILITY]
+  return typeof capability === "object" && capability !== null && "version" in capability && capability.version === TURN_LIFECYCLE_VERSION
+}
+
+interface PendingTurnLifecycleNotification {
+  readonly promise: Promise<void>
+  readonly waiters: Set<() => void>
+  readonly startedAt: number
+}
+
+const pendingTurnLifecycleNotifications = new WeakMap<MCPClient, PendingTurnLifecycleNotification>()
+
+function startTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus) {
+  if (pendingTurnLifecycleNotifications.has(client)) return undefined
+  const promise = Promise.resolve().then(() =>
+    client.notification({
+      method: TURN_LIFECYCLE_NOTIFICATION,
+      params: { ...context, status },
+    } as Parameters<MCPClient["notification"]>[0]),
+  )
+  const notification: PendingTurnLifecycleNotification = { promise, waiters: new Set(), startedAt: Date.now() }
+  pendingTurnLifecycleNotifications.set(client, notification)
+  const clear = () => {
+    if (pendingTurnLifecycleNotifications.get(client) === notification) pendingTurnLifecycleNotifications.delete(client)
+    const waiters = [...notification.waiters]
+    notification.waiters.clear()
+    for (const waiter of waiters) waiter()
+  }
+  void promise.then(clear, clear)
+  return notification
+}
+
+function releaseStuckTurnLifecycleNotification(client: MCPClient, notification: PendingTurnLifecycleNotification, clientName: string) {
+  if (pendingTurnLifecycleNotifications.get(client) !== notification) return
+  pendingTurnLifecycleNotifications.delete(client)
+  log.warn("abandoning stuck MCP turn lifecycle notification", { clientName, elapsed: Date.now() - notification.startedAt })
+  const waiters = [...notification.waiters]
+  notification.waiters.clear()
+  for (const waiter of waiters) waiter()
+}
+
+function waitForTurnLifecycleNotification(client: MCPClient, notification: PendingTurnLifecycleNotification) {
+  return Effect.tryPromise({
+    try: (signal) =>
+      new Promise<void>((resolve, reject) => {
+        let done = false
+        const cleanup = () => {
+          notification.waiters.delete(onSettled)
+          signal.removeEventListener("abort", onAbort)
+        }
+        const finish = (complete: () => void) => {
+          if (done) return
+          done = true
+          cleanup()
+          complete()
+        }
+        const onSettled = () => finish(resolve)
+        const onAbort = () => finish(() => reject(signal.reason instanceof Error ? signal.reason : new Error("Lifecycle wait aborted")))
+        notification.waiters.add(onSettled)
+        signal.addEventListener("abort", onAbort, { once: true })
+        if (signal.aborted) onAbort()
+        else if (pendingTurnLifecycleNotifications.get(client) !== notification) onSettled()
+      }),
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  })
+}
+
+function sendTurnLifecycleNotification(client: MCPClient, context: TurnContext, status: TurnStatus, clientName: string) {
+  return Effect.gen(function* () {
+    while (true) {
+      const pending = pendingTurnLifecycleNotifications.get(client)
+      if (pending) {
+        if (Date.now() - pending.startedAt >= TURN_LIFECYCLE_STUCK_TIMEOUT) {
+          releaseStuckTurnLifecycleNotification(client, pending, clientName)
+          continue
+        }
+        yield* waitForTurnLifecycleNotification(client, pending)
+        continue
+      }
+      const notification = startTurnLifecycleNotification(client, context, status)
+      if (!notification) continue
+      return yield* Effect.tryPromise({
+        try: () => notification.promise,
+        catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      })
+    }
+  })
+}
+
+export function notifyTurnLifecycle(clients: Record<string, MCPClient>, context: TurnContext, status: TurnStatus) {
+  return Effect.forEach(
+    Object.entries(clients),
+    ([clientName, client]) => {
+      if (!supportsTurnLifecycle(client)) return Effect.void
+      return sendTurnLifecycleNotification(client, context, status, clientName).pipe(
+        Effect.timeout(TURN_LIFECYCLE_NOTIFICATION_TIMEOUT),
+        Effect.tapError((error) =>
+          Effect.sync(() => log.warn("failed to notify MCP turn lifecycle", { clientName, status, error })),
+        ),
+        Effect.ignore,
+      )
+    },
+    { concurrency: "unbounded", discard: true },
+  )
+}
 
 export const Status = z
   .discriminatedUnion("status", [
@@ -137,7 +274,7 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
 const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
 // Convert MCP tool definition to AI SDK Tool type
-function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
+function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number, context?: TurnContext): Tool {
   const inputSchema = mcpTool.inputSchema
 
   // Spread first, then override type to ensure it's always "object"
@@ -151,15 +288,18 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
   return dynamicTool({
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(schema),
-    execute: async (args: unknown) => {
+    execute: async (args: unknown, options) => {
+      if (context) McpSampling.setActiveSession(client, SessionID.make(context.sessionId))
       return client.callTool(
         {
           name: mcpTool.name,
           arguments: (args || {}) as Record<string, unknown>,
+          ...(context && supportsTurnLifecycle(client) ? { _meta: { [TURN_LIFECYCLE_CAPABILITY]: context } } : {}),
         },
         CallToolResultSchema,
         {
           resetTimeoutOnProgress: true,
+          signal: options.abortSignal,
           timeout,
         },
       )
@@ -228,7 +368,7 @@ interface State {
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
-  readonly tools: () => Effect.Effect<Record<string, Tool>>
+  readonly tools: (context?: TurnContext) => Effect.Effect<Record<string, Tool>>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: () => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
   readonly add: (name: string, mcp: ConfigMCP.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
@@ -261,7 +401,8 @@ export const layer = Layer.effect(
     const auth = yield* McpAuth.Service
     const bus = yield* Bus.Service
 
-    type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
+    const createClient = () => new Client({ name: "mimocode", version: InstallationVersion }, CLIENT_OPTIONS)
+    type Transport = StdioClientTransport | ObservingStdioTransport | StreamableHTTPClientTransport | SSEClientTransport
 
     /**
      * Connect a client via the given transport with resource safety:
@@ -273,7 +414,7 @@ export const layer = Layer.effect(
         (t) =>
           Effect.tryPromise({
             try: () => {
-              const client = new Client({ name: "mimocode", version: InstallationVersion })
+              const client = createClient()
               return withTimeout(client.connect(t), timeout).then(() => client)
             },
             catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -398,20 +539,22 @@ export const layer = Layer.effect(
     ) {
       const [cmd, ...args] = mcp.command
       const cwd = yield* InstanceState.directory
-      const transport = new StdioClientTransport({
-        stderr: "pipe",
+      // ObservingStdioTransport owns the child through child_process and applies
+      // childProcessEnv() at the spawn site — local MCP servers are third-party
+      // binaries running as the user. Replaces StdioClientTransport so exit
+      // identity stays observable after close().
+      const transport = new ObservingStdioTransport({
         command: cmd,
         args,
         cwd,
         env: {
-          ...process.env,
           ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
           ...mcp.environment,
         },
       })
-      transport.stderr?.on("data", (chunk: Buffer) => {
-        log.info(`mcp stderr: ${chunk.toString()}`, { key })
-      })
+      transport.onStderr = (text: string) => {
+        log.info(`mcp stderr: ${text}`, { key })
+      }
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       return yield* connectTransport(transport, connectTimeout).pipe(
@@ -491,6 +634,7 @@ export const layer = Layer.effect(
         s.defs[name] = listed
         await bridge.promise(bus.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
+      McpSampling.serve(name, client, bridge)
     }
 
     const state = yield* InstanceState.make<State>(
@@ -525,6 +669,10 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                if (key.startsWith("lifetools")) {
+                  const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+                  memory.registerManagedMcpClient(key, result.mcpClient)
+                }
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -534,10 +682,18 @@ export const layer = Layer.effect(
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             yield* Effect.forEach(
-              Object.values(s.clients),
-              (client) =>
+              Object.entries(s.clients),
+              ([name, client]) =>
                 Effect.gen(function* () {
-                  const pid = client.transport instanceof StdioClientTransport ? client.transport.pid : null
+                  if (name.startsWith("lifetools")) {
+                    const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+                    memory.unregisterManagedMcpClient(name, client)
+                  }
+                  yield* McpSampling.cancelAll(client)
+                  const pid =
+                    client.transport instanceof ObservingStdioTransport || client.transport instanceof StdioClientTransport
+                      ? client.transport.pid
+                      : null
                   if (typeof pid === "number") {
                     const pids = yield* descendants(pid)
                     for (const dpid of pids) {
@@ -561,8 +717,16 @@ export const layer = Layer.effect(
     function closeClient(s: State, name: string) {
       const client = s.clients[name]
       delete s.defs[name]
-      if (!client) return Effect.void
-      return Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+      return Effect.gen(function* () {
+        if (name.startsWith("lifetools")) {
+          const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+          memory.unregisterManagedMcpClient(name, client)
+        }
+        if (client) {
+          yield* McpSampling.cancelAll(client)
+          yield* Effect.tryPromise(() => client.close()).pipe(Effect.ignore)
+        }
+      })
     }
 
     const storeClient = Effect.fnUntraced(function* (
@@ -577,6 +741,10 @@ export const layer = Layer.effect(
       s.status[name] = { status: "connected" }
       s.clients[name] = client
       s.defs[name] = listed
+      if (name.startsWith("lifetools")) {
+        const memory = yield* Effect.promise(() => import("@/memory/mcp-client"))
+        memory.registerManagedMcpClient(name, client)
+      }
       watch(s, name, client, bridge, timeout)
       return s.status[name]
     })
@@ -637,7 +805,7 @@ export const layer = Layer.effect(
       s.status[name] = { status: "disabled" }
     })
 
-    const tools = Effect.fn("MCP.tools")(function* () {
+    const tools = Effect.fn("MCP.tools")(function* (context?: TurnContext) {
       const result: Record<string, Tool> = {}
       const s = yield* InstanceState.get(state)
 
@@ -664,7 +832,7 @@ export const layer = Layer.effect(
 
             const timeout = entry?.timeout ?? defaultTimeout
             for (const mcpTool of listed) {
-              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
+              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout, context)
             }
           }),
         { concurrency: "unbounded" },

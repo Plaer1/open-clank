@@ -1,0 +1,2352 @@
+{
+  "id": "batch-040",
+  "group": "files",
+  "surface": "files",
+  "entry_count": 186,
+  "character_count": 15170,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.add.current.folder.to.favorites",
+      "source": "Add current folder to Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3015",
+        "static/js/files.js:930"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.favorite",
+      "source": "Add favorite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2330"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.file.value.every.content.line.must.start.with",
+      "source": "add file {path}: every content line must start with +",
+      "placeholders": [
+        "path"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/agent_tools/filesystem_tools.py:2185"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.host.location",
+      "source": "Add host Location",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:66"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.host.location.56034430",
+      "source": "Add host location",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3009"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.location.80fb1d44",
+      "source": "Add location",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3009"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.location.closed",
+      "source": "Add Location closed.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2621"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.location.fff38c0f",
+      "source": "Add Location",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:120"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.adding.location",
+      "source": "Adding Location…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:171"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.access.is.explicit.and.can.still.be.narrowed.per",
+      "source": "Agent access is explicit and can still be narrowed per workspace or chat. Whole disk delegates file safety to the host OS.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:115"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.all.source.search.failed",
+      "source": "All-source search failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2130"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.value",
+      "source": "Archive {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:858"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.value.workspace.scoped.agent.approvals.are.revoked.files.and",
+      "source": "Archive “{0}”? Workspace-scoped agent approvals are revoked; files and the Location are not removed.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archive.workspace",
+      "source": "Archive Workspace?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:795"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.archived.workspace.value",
+      "source": "Archived Workspace: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:810"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ascending",
+      "source": "ascending",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1155"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.audio.playback.was.blocked",
+      "source": "Audio playback was blocked",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1623"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.audio.preview.for.value",
+      "source": "Audio preview for {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1568"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.files.could.not.be.loaded",
+      "source": "Available files could not be loaded (",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:577"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.files.could.not.be.loaded.950f269c",
+      "source": "Available files could not be loaded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3154",
+        "static/js/files.js:3156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.files.could.not.be.reloaded",
+      "source": "Available files could not be reloaded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2961"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.host.files.and.folders",
+      "source": "Available host files and folders",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2995",
+        "static/js/files.js:417"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.available.worktree",
+      "source": "Available worktree",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2991"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browse.host.folders",
+      "source": "Browse host folders…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.folder.on.the.open.clank.host.nothing.is",
+      "source": "Choose a folder on the Open Clank host. Nothing is granted until you review and add the Location.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationController.js:55"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.host.path",
+      "source": "Choose a host path",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:39"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.a.new.file.name",
+      "source": "Choose a new file name.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.folder",
+      "source": "Choose folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationController.js:56"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.host.folder",
+      "source": "Choose host folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationController.js:54"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.the.destination.name.for.this.document",
+      "source": "Choose the destination name for this document.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.the.name.shown.across.files.chat.and.editor",
+      "source": "Choose the name shown across Files, chat, and Editor.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:772"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.choose.what.open.clank.may.see.on.its.host.adding",
+      "source": "Choose what Open Clank may see on its host. Adding a Location does not make it the default folder or share it with another person.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:69"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.close.preview",
+      "source": "Close preview",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1559",
+        "static/js/files.js:1682"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.column.could.not.be.sorted",
+      "source": "Column could not be sorted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1436"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.column.unavailable",
+      "source": "Column unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1475"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.columns.view",
+      "source": "Columns view",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copal.host.and.library",
+      "source": "Copal · Host and library",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2971"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.crop.image",
+      "source": "Crop image",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.current.agent.workspace",
+      "source": "Current agent Workspace",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.current.file.access.could.not.be.refreshed.the.prior.view",
+      "source": "Current file access could not be refreshed; the prior view was retained",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2888"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.descending",
+      "source": "descending",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1155"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.authorization.changed.during.stream",
+      "source": "download authorization changed during stream",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/odysseus_files_routes.py:775"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.file",
+      "source": "Download file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1691"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.full.file",
+      "source": "Download full file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1664"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.policy.changed.during.stream",
+      "source": "download policy changed during stream",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/odysseus_files_routes.py:747"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.requires.a.regular.file",
+      "source": "download requires a regular file",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/odysseus_files_routes.py:688"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.selected",
+      "source": "Download selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3011"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.source.is.not.part.of.this.open.clank.session",
+      "source": "Download source is not part of this Open Clank session",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.downloading.value.741c8364",
+      "source": "Downloading {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2280",
+        "static/js/files.js:2289"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enter.a.host.path.and.select.at.least.one.access",
+      "source": "Enter a host path and select at least one access capability.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:166"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.exact.file",
+      "source": "Exact file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorite.could.not.be.changed",
+      "source": "Favorite could not be changed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorite.could.not.be.removed",
+      "source": "Favorite could not be removed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:748"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.access.could.not.be.revalidated.the.current.view.was",
+      "source": "File access could not be revalidated; the current view was retained",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2870"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.c799eced",
+      "source": "-file",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2593"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.icon",
+      "source": "File icon",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1139"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.preview",
+      "source": "File preview",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3075"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.sort.order",
+      "source": "File sort order",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3057"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.file.view.mode",
+      "source": "File view mode",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3040"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.details",
+      "source": "Files details",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1179"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.navigation",
+      "source": "Files navigation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2978"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.provider.request.failed.value",
+      "source": "Files provider request failed ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/filesFacadeClient.js:42"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.source",
+      "source": "Files source",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3019"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.tree.message.error",
+      "source": "files-tree-message error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:477"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.files.value.5a6fbc55",
+      "source": "files-{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2405"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.filesystem.request.failed.value",
+      "source": "filesystem request failed ({0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/filesServiceClient.js:143"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folder.30baa249",
+      "source": "Folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1218"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folder.and.descendants",
+      "source": "Folder and descendants",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folder.could.not.be.sorted",
+      "source": "Folder could not be sorted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2050"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folders.first",
+      "source": "Folders first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3065"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folders.first.is.off",
+      "source": "Folders first is off",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:242"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.folders.first.is.on",
+      "source": "Folders first is on",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:242",
+        "static/js/files.js:3066"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.from.favorites",
+      "source": "from Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:735"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gridcell",
+      "source": "gridcell",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1188",
+        "static/js/files.js:1214"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.home",
+      "source": "Home",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:105"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.home.is.pinned.in.favorites",
+      "source": "Home is pinned in Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:930"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.folder.could.not.be.selected",
+      "source": "Host folder could not be selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:158"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.folder.selected",
+      "source": "Host folder selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationController.js:57"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.home.is.unavailable",
+      "source": "Host home is unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:147"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.location.added",
+      "source": "Host Location added.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2621"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.path",
+      "source": "Host path",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.host.volume.is.unavailable",
+      "source": "Host volume is unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:92"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.size",
+      "source": "Image size",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1578"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.live.folder.updates.paused.use.refresh.to.reconcile",
+      "source": "Live folder updates paused · use Refresh to reconcile",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1952"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.available.files",
+      "source": "Loading available files…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3129"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.more",
+      "source": "Loading more…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1841"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.preview",
+      "source": "Loading preview…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1543"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.value.d5e904ef",
+      "source": "Loading {0}…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1996"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.locating.resource",
+      "source": "Locating resource…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3207"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.locating.workspace.resource",
+      "source": "Locating Workspace resource…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.location.could.not.be.added",
+      "source": "Location could not be added",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:181",
+        "static/js/files.js:2623"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.location.type",
+      "source": "Location type",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:71"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.modified.49f54b7e",
+      "source": "Modified ↓",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:27"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.modified.8d045c8f",
+      "source": "Modified ↑",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:26"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.more.column.items.could.not.be.loaded",
+      "source": "More column items could not be loaded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1511"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.more.items.could.not.be.loaded",
+      "source": "More items could not be loaded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1863",
+        "static/js/files.js:2086"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.more.results.exist",
+      "source": "· more results exist",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.document",
+      "source": "Move document",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2399"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.move.value.to.trash.0e977bf4",
+      "source": "Move {0} to trash?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2404"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mute",
+      "source": "Mute",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1616",
+        "static/js/files.js:1634"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.226ac4ac",
+      "source": "Name ↑",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:22"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.d45a64fa",
+      "source": "Name ↓",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:23"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.access.selected",
+      "source": "No access selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:39"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.favorites.yet",
+      "source": "No favorites yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.host.locations.available",
+      "source": "No host locations available",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:418"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.items.in.this.source",
+      "source": "No items in this source.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1186"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.readable.host.folder.is.available",
+      "source": "No readable host folder is available",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2958",
+        "static/js/files.js:3147"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.workspaces.yet",
+      "source": "No Workspaces yet",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:821"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.object",
+      "source": "object",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/filesFacadeClient.js:40",
+        "static/js/filesServiceClient.js:143",
+        "static/js/galleryEditor.js:2056",
+        "static/js/memory.js:3280",
+        "static/js/memory.js:3362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.a.searchable.source.or.folder.first",
+      "source": "Open a searchable source or folder first.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2155"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.does.not.accept.arguments",
+      "source": "Open does not accept arguments",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/files_facade_routes.py:424"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.selected.in.source.app",
+      "source": "Open selected in source app",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3010"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.workspace.value",
+      "source": "Open Workspace {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:832"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.opened.in.files.value",
+      "source": "Opened in Files: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.opened.value.in.editor",
+      "source": "Opened {0} in Editor",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2370"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.opened.value.in.its.source.app",
+      "source": "Opened {0} in its source app",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2553"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.opened.workspace.folder.value",
+      "source": "Opened Workspace folder: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3191"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.original.c0a8060f",
+      "source": "Original",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:65"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.parent.folder",
+      "source": "Parent folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3006"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.path.on.the.open.clank.host",
+      "source": "/path/on-the-open-clank-host",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:102"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pause",
+      "source": "Pause",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1637",
+        "static/js/goals.js:170",
+        "static/js/tasks.js:885"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.play",
+      "source": "Play",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1613",
+        "static/js/files.js:1638"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.play.preview",
+      "source": "Play preview",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1613"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preview.selected",
+      "source": "Preview selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3072"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preview.unavailable",
+      "source": "Preview unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1569",
+        "static/js/files.js:1687",
+        "static/js/files.js:1697"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.preview.volume",
+      "source": "Preview volume",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reloading.available.files",
+      "source": "Reloading available files…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2950"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.all",
+      "source": "Remove all",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:220"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.attachment",
+      "source": "Remove attachment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.current.folder.from.favorites",
+      "source": "Remove current folder from Favorites",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:930"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.favorite",
+      "source": "Remove favorite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2330"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.document",
+      "source": "Rename document",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2399"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.value.c01839ec",
+      "source": "Rename {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:853"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.workspace",
+      "source": "Rename Workspace",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:773"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.renamed.workspace.to.value",
+      "source": "Renamed Workspace to {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:786"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resize.files.navigation",
+      "source": "Resize Files navigation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3000"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resolving.host.home",
+      "source": "Resolving host home…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:138"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resolving.host.volume",
+      "source": "Resolving host volume…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:85"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resource.could.not.be.shown",
+      "source": "Resource could not be shown",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3256"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revalidating.file.access",
+      "source": "Revalidating file access…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2865"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reveal",
+      "source": "reveal",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2588"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.search.is.unavailable",
+      "source": "Saved search is unavailable",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/files_facade_routes.py:398"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.current.files.folder",
+      "source": "Search current Files folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3026"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.current.folder",
+      "source": "Search current folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3038"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.query.is.required",
+      "source": "search query is required",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/filesFacadeClient.js:150"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.this.folder",
+      "source": "Search this folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3025"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.value.0b345ec6",
+      "source": "Search: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1809"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching.all.sources",
+      "source": "Searching all sources…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2104"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching.value",
+      "source": "Searching {0}…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1778"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.seek.audio.preview",
+      "source": "Seek audio preview",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1614"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.one.actionable.item",
+      "source": "Select one actionable item",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2352"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.one.actionable.managed.item",
+      "source": "Select one actionable managed item",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3012"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.one.managed.file.to.open",
+      "source": "Select one managed file to open.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2604"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.one.or.more.files.first",
+      "source": "Select one or more files first.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.by.value",
+      "source": "Sort by {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.by.value.currently.value",
+      "source": "Sort by {0}, currently {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1155"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sort.value.column",
+      "source": "Sort {0} column",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1276",
+        "static/js/files.js:1277"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.source.app.could.not.be.opened",
+      "source": "Source app could not be opened",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2555"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.folder.does.not.expose.that.metadata.for.sorting",
+      "source": "This folder does not expose that metadata for sorting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:210",
+        "static/js/files.js:222"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.folder.is.empty.60db81ce",
+      "source": "This folder is empty.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1186"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.workspace.does.not.have.agent.access",
+      "source": "This Workspace does not have Agent access",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:767"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.trash",
+      "source": "trash",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2336",
+        "static/js/files.js:2588"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type",
+      "source": "Type ↑",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:24"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.9c9ce3dd",
+      "source": "Type ↓",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:25"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unmute",
+      "source": "Unmute",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1634"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.cancelled",
+      "source": "Upload cancelled",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:338"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.failed.7c67e1cb",
+      "source": "Upload failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:341",
+        "static/js/rag.js:133",
+        "static/js/rag.js:135"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.as.workspace",
+      "source": "Use as workspace",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2325"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.crop",
+      "source": "Use crop",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/fileHandler.js:66"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.value.as.workspace",
+      "source": "Use {0} as workspace",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.managed.by.value.open.it.in.its.source",
+      "source": "{0} is managed by {1}; open it in its source app.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1228"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.unavailable",
+      "source": "{0} is unavailable",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:832"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.items",
+      "source": "{0} items",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1294"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.result.value.value",
+      "source": "{0} result{1}{2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.search.value",
+      "source": "{0} · Search: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1819"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.sorting.is.unavailable.for.this.folder",
+      "source": "{0} sorting is unavailable for this folder",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1156"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.start.only.preview.tail.unavailable.from.this.source",
+      "source": "{0} · start-only preview · tail unavailable from this source",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1668"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.unavailable",
+      "source": "{0} unavailable",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2254",
+        "static/js/files.js:2255"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.unified.library",
+      "source": "{0} · unified library",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2191"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.items",
+      "source": "{0}{1} items",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:1433",
+        "static/js/files.js:1740",
+        "static/js/files.js:1857",
+        "static/js/files.js:1982",
+        "static/js/files.js:2082",
+        "static/js/files.js:2760"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.whole.disk.volume",
+      "source": "Whole disk / volume",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/fileLocationWizard.js:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.could.not.be.archived",
+      "source": "Workspace could not be archived",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:812"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.could.not.be.renamed",
+      "source": "Workspace could not be renamed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:788"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.resource.could.not.be.shown",
+      "source": "Workspace resource could not be shown",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:3196"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspace.value",
+      "source": "Workspace: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2392",
+        "static/js/files.js:765",
+        "static/js/historySettings.js:126"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.workspaces",
+      "source": "Workspaces",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/files.js:2986"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

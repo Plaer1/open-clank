@@ -1,0 +1,1 @@
+Returning any match violates a first-match contract when duplicates exist.

@@ -1,0 +1,1 @@
+Use a document title and lang on the full page. Alternative text conveys an image's purpose in context; decorative images can use empty alt. Native elements usually provide better starting semantics than clickable generic containers.

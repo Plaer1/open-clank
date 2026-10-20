@@ -6,11 +6,15 @@ and context formatting for LLM injection. Used by chat_handler.py.
 import asyncio
 import json
 import logging
+import time
 import shutil
 import sys
 import urllib.parse
+import re
+import requests
+import threading
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +22,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-YOUTUBE_INSTRUCTION_PROMPT = """When the user shares a YouTube video, respond with a structured breakdown:
+YOUTUBE_INSTRUCTION_PROMPT = """Use the supplied YouTube transcript and comments as evidence for the user's question. Cite the video and transcript timestamps when useful, and say when captions do not establish an answer. You may use other retrieval when the user asks for information outside the supplied video or when captions are missing; do not force a summary format."""
 
-1. **Summary** — Concise overview of the video's content and main thesis (2-4 sentences)
-2. **Key Points** — Bullet list of the most important topics, arguments, or moments
-3. **Notable Timestamps** — If timestamps are available from the transcript, highlight 3-5 interesting moments with their approximate timestamps (e.g. "03:45 — discusses X")
-4. **Audience Reception** — If comments are available, summarize what viewers think: general sentiment, top reactions, any debate or controversy
-
-Keep it conversational and concise. Do NOT web search for this video — use only the transcript and comments provided."""
+TRANSCRIPT_CONTEXT_LIMIT = 12000
+TRANSCRIPT_TIMEOUT = 20
+_QUERY_STOPWORDS = {"the", "and", "for", "when", "what", "with", "from", "that", "this", "are", "how", "why", "does", "did", "can", "you", "video", "tell", "about"}
 
 # ---------------------------------------------------------------------------
 # Init / helpers
@@ -101,8 +102,153 @@ def extract_youtube_id(url: str) -> Optional[str]:
     return None
 
 
+def _caption_error_kind(error: Exception) -> str:
+    name = type(error).__name__.lower()
+    if ("notranscript" in name or "disabled" in name or "caption" in name
+            or "no captions" in str(error).lower()):
+        return "missing_captions"
+    return "retrieval_failed"
+
+
+def _select_context_segments(segments: list[dict], query: str = "", limit: int = TRANSCRIPT_CONTEXT_LIMIT, url: str = "") -> list[dict]:
+    """Select bounded windows after the complete timed transcript is fetched."""
+    if not segments:
+        return []
+    terms = {term for term in re.findall(r"[\w']{3,}", (query or "").lower()) if term not in _QUERY_STOPWORDS}
+    scored = []
+    for i, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        overlap = terms.intersection(re.findall(r"[\w']{3,}", seg.get("text", "").lower()))
+        if overlap:
+            scored.append((len(overlap), i))
+    matches = [i for _score, i in sorted(scored, key=lambda item: (-item[0], item[1]))]
+    if not matches:
+        # Cover the whole duration when there is no lexical answer match.
+        count = min(12, len(segments))
+        candidates = sorted({round(i * (len(segments) - 1) / max(1, count - 1)) for i in range(count)})
+    else:
+        candidates = []
+        for index in matches:
+            candidates.extend(range(max(0, index - 2), min(len(segments), index + 3)))
+        # Rank windows by useful term overlap, then render chronologically.
+        candidates = sorted(set(candidates), key=lambda i: (-len(terms.intersection(
+            re.findall(r"[\w']{3,}", segments[i].get("text", "").lower())
+        )), i))
+    chosen = []
+    chosen_lengths = []
+    seen = set()
+    for index in candidates:
+        if index in seen:
+            continue
+        candidate = segments[index]
+        if not isinstance(candidate, dict):
+            continue
+        seconds = int(float(candidate.get("start", 0)))
+        line_length = len(f"[{candidate.get('timestamp', '00:00')}] {candidate.get('text', '')} ({_timestamp_url(url, seconds)})\n") if url else len(candidate.get("text", "")) + 28
+        proposed = sum(chosen_lengths) + line_length
+        if proposed > limit:
+            # Keep the strongest candidate available for the formatter to
+            # truncate deliberately. Never emit a segment when no body budget
+            # remains; that used to make a zero-budget selection look full.
+            if not chosen and limit > 0:
+                chosen.append(candidate)
+                chosen_lengths.append(proposed)
+            continue
+        chosen.append(candidate)
+        chosen_lengths.append(line_length)
+        seen.add(index)
+    return sorted(chosen, key=lambda item: item.get("start", 0))
+
+
+def _timestamp_url(url: str, seconds: int) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = [(key, value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+             if key.lower() not in {"t", "start"}]
+    query.append(("t", f"{seconds}s"))
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
+                                    urllib.parse.urlencode(query), parsed.fragment))
+
+
+class _DeadlineSession(requests.Session):
+    def __init__(self, deadline: float, cancelled: threading.Event):
+        super().__init__()
+        self.deadline = deadline
+        self.cancelled = cancelled
+
+    def request(self, method, url, **kwargs):
+        if self.cancelled.is_set():
+            raise asyncio.CancelledError()
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Transcript retrieval deadline exceeded")
+        requested_timeout = kwargs.get("timeout")
+        kwargs["timeout"] = min(float(requested_timeout) if requested_timeout is not None else remaining, remaining)
+        return super().request(method, url, **kwargs)
+
+
+def _fetch_transcript_sync(video_id: str, preferred_languages: Optional[Iterable[str]], deadline: float, cancelled) -> dict:
+    session = _DeadlineSession(deadline, cancelled)
+    try:
+        if cancelled.is_set():
+            raise asyncio.CancelledError()
+        api = YouTubeTranscriptApi(http_client=session)
+        if cancelled.is_set():
+            raise asyncio.CancelledError()
+        transcript_list = api.list(video_id)
+        available = list(transcript_list)
+        if not available:
+            raise LookupError("No captions are available for this video")
+        preferred = list(preferred_languages or ())
+        selected = None
+        for language in preferred:
+            for candidate in available:
+                if candidate.language_code == language:
+                    selected = candidate
+                    break
+            if selected:
+                break
+        caption_origin = "manual"
+        source_language = None
+        source_language_code = None
+        if selected is None and preferred:
+        # A requested language may only be available through YouTube's
+        # translation track. Keep that provenance explicit in the result.
+            for candidate in available:
+                if cancelled.is_set():
+                    raise asyncio.CancelledError()
+                if getattr(candidate, "is_translatable", False):
+                    try:
+                        if cancelled.is_set():
+                            raise asyncio.CancelledError()
+                        selected = candidate.translate(preferred[0])
+                        caption_origin = "translated"
+                        source_language = candidate.language
+                        source_language_code = candidate.language_code
+                        break
+                    except Exception:
+                        continue
+        if selected is None:
+        # TranscriptList iteration puts manual tracks before generated tracks.
+            selected = available[0]
+        if cancelled.is_set():
+            raise asyncio.CancelledError()
+        if cancelled.is_set():
+            raise asyncio.CancelledError()
+        fetched = selected.fetch()
+        if caption_origin != "translated":
+            caption_origin = "automatic" if selected.is_generated else "manual"
+        return {"fetched": fetched, "caption_origin": caption_origin,
+                "source_language": source_language or selected.language,
+                "source_language_code": source_language_code or selected.language_code}
+    finally:
+        session.close()
+
+
 async def extract_transcript_async(
-    url: str, video_id: str, max_retries: int = 3
+    url: str, video_id: str, max_retries: int = 3, query: str = "",
+    preferred_languages: Optional[Iterable[str]] = None,
+    timeout: float = TRANSCRIPT_TIMEOUT,
 ) -> Dict[str, Any]:
     """
     Async YouTube transcript extraction with retries.
@@ -116,46 +262,75 @@ async def extract_transcript_async(
         Dict with success/error/transcript keys
     """
     if not YOUTUBE_AVAILABLE or YouTubeTranscriptApi is None:
-        return {"success": False, "error": "YouTube transcript API not available", "transcript": None}
+        return {"success": False, "status": "unavailable", "error": "YouTube transcript API not available", "transcript": None}
 
+    deadline = time.monotonic() + max(0.01, timeout)
+    cancelled = threading.Event()
     for attempt in range(max_retries):
         try:
-            api = YouTubeTranscriptApi()
-            transcript = api.fetch(video_id)
-            transcript_list = list(transcript)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            result = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_transcript_sync, video_id, preferred_languages, deadline, cancelled),
+                timeout=remaining,
+            )
+            transcript = result["fetched"]
 
             formatted = []
-            for snippet in transcript_list:
-                text = snippet.text.strip()
+            for snippet in getattr(transcript, "snippets", transcript):
+                text = (snippet.get("text", "") if isinstance(snippet, dict) else getattr(snippet, "text", "")).strip()
                 if not text:
                     continue
-                start = snippet.start
+                start = snippet.get("start", 0) if isinstance(snippet, dict) else getattr(snippet, "start", 0)
+                duration = snippet.get("duration", 0) if isinstance(snippet, dict) else getattr(snippet, "duration", 0)
                 formatted.append({
                     "text": text,
                     "start": start,
-                    "duration": snippet.duration,
+                    "duration": duration,
                     "timestamp": f"{int(start // 60):02d}:{int(start % 60):02d}",
                 })
 
             full_text = " ".join(e["text"] for e in formatted)
-            max_len = 8000
-            if len(full_text) > max_len:
-                full_text = full_text[:max_len] + "... [transcript truncated]"
+            context_segments = _select_context_segments(formatted, query, TRANSCRIPT_CONTEXT_LIMIT, url)
+            context_text = " ".join(e["text"] for e in context_segments)
 
+            fetched_count = len(getattr(transcript, "snippets", transcript))
             return {
                 "success": True,
-                "transcript": full_text,
+                "status": "empty" if not formatted else "complete",
+                "source_status": "complete",
+                "transcript": context_text,
+                "full_transcript": full_text,
                 "video_id": video_id,
-                "language": "en",
-                "is_generated": False,
+                "query": query,
+                "language": transcript.language,
+                "language_code": transcript.language_code,
+                "caption_origin": result["caption_origin"],
+                "source_language": result["source_language"],
+                "source_language_code": result["source_language_code"],
+                "is_generated": transcript.is_generated,
                 "segments": formatted,
+                "context_segments": context_segments,
             }
+        except asyncio.TimeoutError:
+            cancelled.set()
+            return {"success": False, "status": "retrieval_failed", "error": "Transcript retrieval timed out", "transcript": None}
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
         except Exception as e:
             logger.warning(f"Transcript attempt {attempt + 1} failed: {e}")
+            error_kind = _caption_error_kind(e)
+            if error_kind == "missing_captions":
+                return {"success": False, "status": error_kind, "error": str(e), "transcript": None}
             if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(1 * (attempt + 1), remaining))
 
-    return {"success": False, "error": f"Failed after {max_retries} attempts", "transcript": None}
+    return {"success": False, "status": "retrieval_failed", "error": f"Failed after {max_retries} attempts or deadline", "transcript": None}
 
 
 def format_transcript_for_context(
@@ -163,19 +338,27 @@ def format_transcript_for_context(
     title: str = "", channel: str = ""
 ) -> str:
     """Format transcript data for inclusion in LLM context."""
+    title = str(title or "")[:256]
+    channel = str(channel or "")[:128]
+    raw_video_id = str(transcript_data.get("video_id") or "")
+    video_id = raw_video_id if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", raw_video_id) else ""
+    canonical_url = (f"https://www.youtube.com/watch?v={urllib.parse.quote(video_id, safe='-_.~_')}"
+                     if video_id else str(url or "")[:512])
     if not transcript_data.get("success"):
         header = ""
         if title:
             header = f" \"{title}\""
             if channel:
                 header += f" by {channel}"
-        return f"\n[YouTube Video{header}: Transcript unavailable ({transcript_data.get('error', 'Unknown error')}). Use the comments below if available, do NOT web search for this video.]"
+        status = transcript_data.get("status", "retrieval_failed")
+        text = f"\n[YouTube Video{header}: Transcript unavailable ({status}: {transcript_data.get('error', 'Unknown error')}). Captions are not evidence for this question; use comments or other retrieval when appropriate.]"
+        return text[:TRANSCRIPT_CONTEXT_LIMIT]
 
-    transcript = transcript_data.get("transcript", "")
-    video_id = transcript_data.get("video_id", "")
+    transcript = str(transcript_data.get("transcript", "") or "")
     language = transcript_data.get("language", "unknown")
     is_generated = transcript_data.get("is_generated", False)
-    segments = transcript_data.get("segments", [])
+    segments = transcript_data.get("segments") or transcript_data.get("context_segments", [])
+    caption_origin = transcript_data.get("caption_origin", "automatic" if is_generated else "manual")
 
     ctx = "\n[YOUTUBE VIDEO TRANSCRIPT]\n"
     if title:
@@ -183,26 +366,53 @@ def format_transcript_for_context(
     if channel:
         ctx += f"Channel: {channel}\n"
     ctx += f"Video ID: {video_id}\n"
-    ctx += f"Language: {language}\n"
-    ctx += f"Source: {'Auto-generated' if is_generated else 'Manual'}\n"
-    ctx += f"URL: {url}\n\n"
+    source_language = transcript_data.get("source_language")
+    source_suffix = f"; source: {source_language} ({transcript_data.get('source_language_code')})" if source_language and caption_origin == "translated" else ""
+    ctx += f"Language: {language} ({transcript_data.get('language_code', 'unknown')}){source_suffix}\n"
+    ctx += f"Caption source: {caption_origin}\n"
+    ctx += f"URL: {canonical_url}\n\n"
+    footer = "\n[END TRANSCRIPT]\n"
+    omission = "[Transcript context bounded; additional selected captions omitted.]\n"
+    # Select against the actual header/footer budget so strong late captions
+    # survive final rendering instead of being lost to a blind tail slice.
+    omitted = False
+    if segments:
+        original_segment_count = len(segments)
+        available = max(0, TRANSCRIPT_CONTEXT_LIMIT - len(ctx) - len(footer) - len(omission))
+        segments = _select_context_segments(segments, transcript_data.get("query", ""), available, canonical_url)
+        omitted = len(segments) < original_segment_count
     # Include timestamped segments for the LLM to reference
     if segments:
         ctx += "Timestamped Transcript:\n"
         for seg in segments:
             if not isinstance(seg, dict):
                 continue
-            ctx += f"[{seg['timestamp']}] {seg['text']}\n"
-        # Check length — fall back to plain text if too long
-        if len(ctx) > 12000:
-            ctx = ctx[:ctx.index("Timestamped Transcript:\n")]
-            ctx += "Transcript:\n"
-            ctx += transcript
+            timestamp = seg.get("timestamp", "00:00")
+            seconds = int(float(seg.get("start", 0)))
+            timestamp_url = _timestamp_url(canonical_url, seconds)
+            line = f"[{timestamp}] {str(seg.get('text', '') or '')} ({timestamp_url})\n"
+            if len(ctx) + len(line) + len(footer) <= TRANSCRIPT_CONTEXT_LIMIT:
+                ctx += line
+            elif ctx.endswith("Timestamped Transcript:\n"):
+                tail_budget = TRANSCRIPT_CONTEXT_LIMIT - len(ctx) - len(footer)
+                suffix = f" ({timestamp_url})\n"
+                marker = " [caption excerpt truncated]"
+                text_budget = max(0, tail_budget - len(f"[{timestamp}] ") - len(suffix) - len(marker) - len(omission))
+                if text_budget > 0:
+                    ctx += f"[{timestamp}] {str(seg.get('text', '') or '')[:text_budget]}{marker}{suffix}"
+                omitted = True
+            else:
+                omitted = True
+        if omitted and len(ctx) + len(omission) + len(footer) <= TRANSCRIPT_CONTEXT_LIMIT:
+            ctx += omission
     else:
         ctx += "Transcript:\n"
         ctx += transcript
-    ctx += "\n[END TRANSCRIPT]\n"
-    return ctx
+    if len(ctx) + len(footer) > TRANSCRIPT_CONTEXT_LIMIT:
+        bounded_marker = "\n[Transcript context bounded; additional metadata omitted.]\n"
+        budget = max(0, TRANSCRIPT_CONTEXT_LIMIT - len(footer) - len(bounded_marker))
+        ctx = ctx[:budget] + bounded_marker
+    return ctx + footer
 
 
 async def fetch_youtube_comments(

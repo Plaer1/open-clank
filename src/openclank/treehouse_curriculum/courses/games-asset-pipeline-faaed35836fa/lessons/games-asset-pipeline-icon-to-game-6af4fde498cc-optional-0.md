@@ -1,0 +1,1 @@
+Actual edited SVG, PNG dimensions/transparent corner and correctly oriented Godot display are evidenced. Color changes; lower-left mark remains. Existing collision remains unchanged. Unavailable or failed tools stay pending.

@@ -1,0 +1,1 @@
+The domain is part of the problem; a solver cannot choose it for you silently.

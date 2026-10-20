@@ -1,0 +1,1 @@
+Degree counts incident edges (in/out separately when directed). Connectivity concerns reachable vertices. A tree on n vertices has n−1 edges. Coloring prohibits matching colors on adjacent vertices; matching chooses disjoint-endpoint edges. Games owns communities, spreading, and network robustness applications.

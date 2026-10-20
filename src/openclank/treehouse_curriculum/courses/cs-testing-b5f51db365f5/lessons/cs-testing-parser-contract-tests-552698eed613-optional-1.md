@@ -1,0 +1,1 @@
+Calling int alone does not enforce this contract; an intentional ValueError is correct rejection.

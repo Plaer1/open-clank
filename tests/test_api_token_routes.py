@@ -266,7 +266,20 @@ def test_list_tokens_returns_safe_display_fields_only(monkeypatch, token_routes_
 
     assert len(result) == 2
 
-    safe_fields = {"id", "name", "owner", "token_prefix", "scopes", "is_active", "last_used_at", "created_at"}
+    safe_fields = {
+        "id",
+        "name",
+        "owner",
+        "token_prefix",
+        "scopes",
+        "is_active",
+        "client_kind",
+        "device_label",
+        "last_used_at",
+        "created_at",
+        "expires_at",
+        "revoked_at",
+    }
     for item in result:
         assert set(item.keys()) == safe_fields
         assert "token" not in item

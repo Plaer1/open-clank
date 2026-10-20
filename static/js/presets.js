@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/presets.js
 
 /**
@@ -89,7 +90,7 @@ async function loadDefaultPersona() {
   } catch (e) { /* factory fallbacks apply */ }
 }
 
-function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Odysseus'; }
+function _defaultPersonaName() { return (defaultPersona && defaultPersona.name) || 'Open Clank'; }
 function _defaultPersonaPrompt() { return (defaultPersona && defaultPersona.system_prompt) || ''; }
 
 // Branding follows the GLOBAL default persona only (e's ruling: the
@@ -151,15 +152,15 @@ function _syncSessionPersona(sessionId) {
  */
 export function applyAgentName() {
   const name = _activeAgentName();
-  const previous = window.__agentName || 'Odysseus';
+  const previous = window.__agentName || 'Open Clank';
   window.__agentName = name;
   const msg = document.getElementById('message');
   if (msg && /^Message .*\.\.\.$/.test(msg.placeholder || '')) msg.placeholder = `Message ${name}...`;
   const meta = document.getElementById('current-meta');
-  if (meta && (meta.textContent === `${previous} Chat` || meta.textContent === 'Odysseus Chat')) {
+  if (meta && (meta.textContent === `${previous} Chat` || meta.textContent === 'Open Clank Chat')) {
     meta.textContent = `${name} Chat`;
   }
-  if (document.title === `${previous} Chat` || document.title === 'Odysseus Chat') {
+  if (document.title === `${previous} Chat` || document.title === 'Open Clank Chat') {
     document.title = `${name} Chat`;
   }
   // Live rebrand of already-rendered message labels (R17): every role
@@ -245,7 +246,7 @@ function initExpandButton() {
       promptInput.style.opacity = '0.3';
     } catch (e) {}
 
-    btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:2px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg> Expanding...';
+    btn.innerHTML = uiIcon("sparkles", 11, {"style":"vertical-align:-1px;margin-right:2px;"}) + " Expanding...";
 
     try {
       const res = await fetch(`${API_BASE}/api/presets/expand`, {

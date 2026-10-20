@@ -38,25 +38,14 @@ export function globalMemoryPath(): string {
   return path.join(Global.Path.data, "memory", "global", "MEMORY.md")
 }
 
-/**
- * One-shot rename of a legacy `projects/<pid>/memory.md` to the canonical
- * `MEMORY.md`. Idempotent: no-op when the uppercase file already exists or
- * when neither exists. The rename is atomic, so concurrent readers see either
- * the old or new name, never a missing file. Call before reading/writing
- * project memory so the uppercase path is authoritative.
- */
-export async function migrateProjectMemory(projectID: ProjectID): Promise<void> {
-  const upper = memoryPath(projectID)
-  const lower = path.join(path.dirname(upper), "memory.md")
-  if (await Bun.file(upper).exists()) return
-  if (await Bun.file(lower).exists())
-    // Two migrators (e.g. concurrent sessions/writers on the same project) can
-    // both pass the exists() checks; the loser's rename then sees lower already
-    // gone. ENOENT means the peer won — treat as success. Re-throw real FS
-    // errors (permissions, disk).
-    await fs.rename(lower, upper).catch((e) => {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e
-    })
+/** Reject legacy project memory before any current-path read/write. */
+export async function assertCurrentProjectMemory(projectID: ProjectID): Promise<void> {
+  const dir = path.dirname(memoryPath(projectID))
+  const names = await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [] as string[]
+    throw error
+  })
+  if (names.includes("memory.md")) throw new Error(`Legacy project memory ${dir}; run .clanker/tools/native/mimo memory with that explicit directory`)
 }
 
 /**

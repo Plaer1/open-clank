@@ -19,6 +19,42 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../context/tui-config"
 
 type PermissionStage = "permission" | "always" | "reject"
+type PromptTheme = ReturnType<typeof useTheme>["theme"]
+
+export function BashDeleteBody(props: {
+  command: string
+  deletes: string[]
+  label?: string
+  theme: PromptTheme
+  scrollAcceleration?: ReturnType<typeof getScrollAcceleration>
+}) {
+  const dimensions = useTerminalDimensions()
+  const wrapRows = (text: string) => {
+    const width = Math.max(20, dimensions().width - 6)
+    return text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / width)), 0)
+  }
+  const commandRows = createMemo(() => wrapRows("$ " + props.command))
+  const deleteRows = createMemo(() => props.deletes.reduce((total, command) => total + wrapRows(" - " + command + " "), 0))
+  const deletesFloor = createMemo(() => Math.min(props.deletes.length, 4))
+  const trackOptions = () => ({ backgroundColor: props.theme.background, foregroundColor: props.theme.borderActive })
+  return (
+    <box paddingLeft={1} gap={1} flexShrink={1} minHeight={0}>
+      <Show when={props.command}>
+        <scrollbox maxHeight={commandRows()} flexShrink={1} minHeight={1} scrollAcceleration={props.scrollAcceleration} verticalScrollbarOptions={{ trackOptions: trackOptions() }}>
+          <text fg={props.theme.text}>{"$ " + props.command}</text>
+        </scrollbox>
+      </Show>
+      <Show when={props.deletes.length > 0}>
+        <box gap={0} flexShrink={1} minHeight={deletesFloor() + 1}>
+          <text fg={props.theme.textMuted} flexShrink={0}>{props.label ?? "Detected deletions"}</text>
+          <scrollbox maxHeight={deleteRows()} flexShrink={1} minHeight={deletesFloor()} scrollAcceleration={props.scrollAcceleration} verticalScrollbarOptions={{ trackOptions: trackOptions() }}>
+            <For each={props.deletes}>{(command) => <text fg={selectedForeground(props.theme, props.theme.warning)} bg={props.theme.warning}>{" - " + command + " "}</text>}</For>
+          </scrollbox>
+        </box>
+      </Show>
+    </box>
+  )
+}
 
 function normalizePath(input?: string) {
   if (!input) return ""
@@ -132,6 +168,7 @@ function TextBody(props: { title: string; description?: string; icon?: string })
 export function PermissionPrompt(props: { request: PermissionRequest }) {
   const sdk = useSDK()
   const sync = useSync()
+  const config = useTuiConfig()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
   })
@@ -306,28 +343,16 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
               }
             }
 
-            if (permission === "bash_delete") {
+            if (permission === "bash_destructive" || permission === "bash_delete") {
               const meta = props.request.metadata ?? {}
               const command = typeof meta["command"] === "string" ? meta["command"] : ""
-              const deletes = (props.request.patterns ?? []).filter((p): p is string => typeof p === "string")
+              const workdir = typeof meta["workdir"] === "string" ? meta["workdir"] : ""
+              const actions = (props.request.patterns ?? []).filter((p): p is string => typeof p === "string")
+              const legacyDelete = permission === "bash_delete"
               return {
-                icon: "✗",
-                title: "Confirm irreversible deletion",
-                body: (
-                  <box paddingLeft={1} gap={1}>
-                    <Show when={command}>
-                      <text fg={theme.text}>{"$ " + command}</text>
-                    </Show>
-                    <Show when={deletes.length > 0}>
-                      <box gap={0}>
-                        <text fg={theme.textMuted}>Detected deletions</text>
-                        <box>
-                          <For each={deletes}>{(cmd) => <text fg={theme.warning}>{"- " + cmd}</text>}</For>
-                        </box>
-                      </box>
-                    </Show>
-                  </box>
-                ),
+                icon: legacyDelete ? "✗" : "!",
+                title: legacyDelete ? "Confirm irreversible deletion" : "Confirm sensitive shell action",
+                body: <BashDeleteBody command={command + (workdir ? ` (in ${workdir})` : "")} deletes={actions} label={legacyDelete ? "Detected deletions" : "Detected actions"} theme={theme} scrollAcceleration={getScrollAcceleration(config)} />,
               }
             }
 
@@ -444,12 +469,12 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
           }
 
           const current = info()
-          // Forced-ask permissions (bash_delete, …) never persist an allow rule
+          // Forced-ask shell permissions never persist an allow rule
           // server-side, so surfacing "Allow always" would be a UX trap: the
           // click looks like durable trust but the next invocation still
           // prompts. Offer only "once" and "reject" for those.
           const options: Record<string, string> =
-            props.request.permission === "bash_delete"
+            props.request.permission === "bash_destructive" || props.request.permission === "bash_delete"
               ? { once: "Allow once", reject: "Reject" }
               : { once: "Allow once", always: "Allow always", reject: "Reject" }
 

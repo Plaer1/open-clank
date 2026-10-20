@@ -1,0 +1,1 @@
+Naming a strong algorithm does not establish secure key handling or protocol use.

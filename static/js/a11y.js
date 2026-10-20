@@ -76,7 +76,21 @@
   var MODAL_SEL = MODAL_KINDS.map(function (k) { return k.sel; }).join(',');
 
   function enhanceModal(mc, headingSel) {
-    if (!mc || mc.nodeType !== 1 || mc.dataset.a11yDialog === '1') return;
+    if (!mc || mc.nodeType !== 1) return;
+    // Copal applets already own a named nonmodal dialog on their outer root.
+    // Its workspace is content, not a second blocking dialog. Native blocking
+    // confirmations and other modal kinds keep their existing enhancement.
+    var owner = mc.parentElement && mc.parentElement.closest('[role="dialog"],dialog');
+    if (mc.classList.contains('copal-workspace') && owner && owner.getAttribute('aria-modal') === 'false') {
+      if (mc.dataset.a11yDialog === '1') {
+        if (mc.getAttribute('role') === 'dialog') mc.removeAttribute('role');
+        mc.removeAttribute('aria-modal');
+        mc.removeAttribute('aria-labelledby');
+      }
+      mc.dataset.a11yDialog = 'owner';
+      return;
+    }
+    if (mc.dataset.a11yDialog === '1') return;
     mc.dataset.a11yDialog = '1';
     if (!mc.hasAttribute('role')) mc.setAttribute('role', 'dialog');
     if (!mc.hasAttribute('aria-modal')) mc.setAttribute('aria-modal', 'true');

@@ -1,0 +1,1 @@
+Two instances do not share an instance field merely because their class is the same.

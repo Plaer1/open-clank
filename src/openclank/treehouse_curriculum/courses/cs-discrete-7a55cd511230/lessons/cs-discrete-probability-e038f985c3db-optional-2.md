@@ -1,0 +1,1 @@
+Bayes reverses a conditional using base rates. A random variable maps outcomes to numbers. Variance E[(X−E[X])²] measures spread. Linearity of expectation does not require independence; product probabilities generally do.

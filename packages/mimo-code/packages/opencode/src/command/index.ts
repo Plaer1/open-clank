@@ -13,10 +13,6 @@ import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_LOOPS from "./template/loops.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 
-type State = {
-  commands: Record<string, Info>
-}
-
 export const Event = {
   Executed: BusEvent.define(
     "command.executed",
@@ -36,6 +32,7 @@ export const Info = z
     agent: z.string().optional(),
     model: z.string().optional(),
     source: z.enum(["command", "mcp", "skill"]).optional(),
+    bundled: z.boolean().optional(),
     // workaround for zod not supporting async functions natively so we use getters
     // https://zod.dev/v4/changelog?id=zfunction
     template: z.promise(z.string()).or(z.string()),
@@ -67,6 +64,7 @@ export const Default = {
   GOAL: "goal",
   DEEP_RESEARCH: "deep-research",
   LOOPS: "loops",
+  REBUILD: "rebuild",
 } as const
 
 export function deepResearchTemplate(): string {
@@ -108,6 +106,7 @@ export const layer = Layer.effect(
 
       commands[Default.INIT] = {
         name: Default.INIT,
+          bundled: true,
         description: "guided AGENTS.md setup",
         source: "command",
         get template() {
@@ -117,6 +116,7 @@ export const layer = Layer.effect(
       }
       commands[Default.REVIEW] = {
         name: Default.REVIEW,
+          bundled: true,
         description: "review changes [commit|branch|pr], defaults to uncommitted",
         source: "command",
         get template() {
@@ -127,6 +127,7 @@ export const layer = Layer.effect(
       }
       commands[Default.DREAM] = {
         name: Default.DREAM,
+          bundled: true,
         description: "manually consolidate project memory from memory files and raw trajectory",
         agent: "dream",
         source: "command",
@@ -147,6 +148,7 @@ export const layer = Layer.effect(
       }
       commands[Default.DISTILL] = {
         name: Default.DISTILL,
+          bundled: true,
         description: "find repeated workflows in recent work and package them into skills, subagents, or commands",
         agent: "distill",
         source: "command",
@@ -169,7 +171,19 @@ export const layer = Layer.effect(
       }
       commands[Default.GOAL] = {
         name: Default.GOAL,
-        description: "set a stop-condition goal; runs until a judge says it's met. /goal clear to abort",
+          bundled: true,
+        description: "set a stop-condition goal; /goal with no arguments or /goal clear cancels it",
+        source: "command",
+        subtask: false,
+        get template() {
+          return "$ARGUMENTS"
+        },
+        hints: ["$ARGUMENTS"],
+      }
+      commands[Default.REBUILD] = {
+        name: Default.REBUILD,
+          bundled: true,
+        description: "rebuild the conversation context now from the latest checkpoint (frees context; keeps recent messages)",
         source: "command",
         subtask: false,
         get template() {
@@ -181,6 +195,7 @@ export const layer = Layer.effect(
       if (Flag.MIMOCODE_EXPERIMENTAL_WORKFLOW_TOOL) {
         commands[Default.DEEP_RESEARCH] = {
           name: Default.DEEP_RESEARCH,
+          bundled: true,
           description: "deep multi-source, fact-checked research report (runs the deep-research workflow)",
           source: "command",
           subtask: false,
@@ -194,6 +209,7 @@ export const layer = Layer.effect(
       if (Flag.MIMOCODE_EXPERIMENTAL_CRON) {
         commands[Default.LOOPS] = {
           name: Default.LOOPS,
+          bundled: true,
           description: "list active scheduled jobs; accepts `cancel <id>` to delete one",
           source: "command",
           subtask: false,
@@ -248,12 +264,16 @@ export const layer = Layer.effect(
         }
       }
 
-      for (const item of yield* skill.all()) {
+      // Host slash entries use the same trust filter as the skill tool's
+      // user-explicit mode. Skill.all is NOT a trust filter — disabled,
+      // untrusted, revoked, and staged skills must never become commands.
+      for (const item of yield* skill.explicit()) {
         if (commands[item.name]) continue
         commands[item.name] = {
           name: item.name,
           description: item.description,
           source: "skill",
+          bundled: item.bundled,
           get template() {
             return item.content
           },
@@ -266,15 +286,17 @@ export const layer = Layer.effect(
       }
     })
 
-    const state = yield* InstanceState.make<State>((ctx) => init(ctx))
-
     const get = Effect.fn("Command.get")(function* (name: string) {
-      const s = yield* InstanceState.get(state)
-      return s.commands[name]
+      const context = yield* InstanceState.context
+      const s = yield* init(context)
+      if (s.commands[name]?.source !== "skill") return s.commands[name]
+      // Revalidate explicit skill trust at execution, even if discovery was stale.
+      yield* skill.reload()
+      return (yield* init(context)).commands[name]
     })
 
     const list = Effect.fn("Command.list")(function* () {
-      const s = yield* InstanceState.get(state)
+      const s = yield* init(yield* InstanceState.context)
       return Object.values(s.commands)
     })
 
@@ -282,10 +304,23 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(MCP.defaultLayer),
-  Layer.provide(Skill.defaultLayer),
+/**
+ * Application composition variant. The process-wide AppLayer supplies the
+ * MCP service so Command and SessionPrompt share one client set instead of
+ * each hiding a separately scoped transport layer.
+ *
+ * Layer.suspend defers the Config/Skill/MCP `.defaultLayer` reads to first
+ * use. Without it a circular import that loads this module mid-bootstrap
+ * throws "Cannot access 'defaultLayer' before initialization" and poisons
+ * combined test runs that share the process module registry.
+ */
+export const appLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Config.defaultLayer),
+    Layer.provide(Skill.defaultLayer),
+  ),
 )
+
+export const defaultLayer = Layer.suspend(() => appLayer.pipe(Layer.provide(MCP.defaultLayer)))
 
 export * as Command from "."

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import hashlib
+import json
 import time
 from typing import Any, Dict, Iterable, List, Optional
+
+from src.memory_scope import CanonicalScope, effective_scope_set
 
 
 @dataclass
@@ -45,6 +51,15 @@ class MemoryRecord:
     exempt_from_decay: bool = False
     exempt_from_dedup: bool = False
     last_accessed_at: Optional[str] = None
+    source_uri: Optional[str] = None
+    source_revision: Any = None
+    content_hash: Optional[str] = None
+    recall_explanation: Dict[str, Any] = field(default_factory=dict)
+    provenance_conflict: bool = False
+    # Owner-relative epistemic Trust assignment. This is deliberately
+    # separate from producer confidence/quality scores and from prompt
+    # authority (which remains a policy decision).
+    trust: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -66,10 +81,22 @@ class MemoryScope:
     session_id: Optional[str] = None
     session_key: Optional[str] = None
     include_global: bool = True
+    project_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.owner.strip() or not self.workspace_id.strip():
             raise MemoryScopeError("authenticated owner and workspace_id are required")
+        if self.project_id is not None and not self.project_id.strip():
+            raise MemoryScopeError("project_id cannot be blank")
+
+    def exact_scopes(self, *, owner_only: bool = False) -> List[CanonicalScope]:
+        """Canonical owner/workspace/project scopes, global first."""
+        return effective_scope_set(
+            self.owner,
+            self.workspace_id,
+            self.project_id,
+            owner_only=owner_only,
+        )
 
 
 class MemoryProviderError(RuntimeError):
@@ -84,12 +111,38 @@ class MemoryTransportError(MemoryProviderError):
     """The configured provider could not complete a transport operation."""
 
 
+class MemoryRequestRejectedError(MemoryProviderError):
+    """The provider completed transport and definitively rejected the request."""
+
+    def __init__(self, *args: object, code: str | None = None):
+        super().__init__(*args)
+        # Optional machine-readable reason; callers must not interpret messages.
+        self.code = code
+
+
+def code_node_forget_refusal_detail(exc: Exception) -> dict[str, str] | None:
+    """Known public guidance shared by app/tool transports, not diagnostics."""
+    if (
+        isinstance(exc, MemoryRequestRejectedError)
+        and exc.code == "code_node_forget_requires_workspace_erase"
+    ):
+        return {
+            "code": "code_node_forget_requires_workspace_erase",
+            "message": (
+                "A code-graph node cannot be forgotten individually. "
+                "Use explicit workspace-index erasure to remove its indexed code. "
+                "Nothing was deleted."
+            ),
+        }
+    return None
+
+
 class MemoryAmbiguousIdError(MemoryProviderError):
     """A short display ID matches more than one record."""
 
 
 class MemoryProvider(ABC):
-    """Base contract for Odysseus memory providers.
+    """Base contract for Open Clank memory providers.
 
     The native memory provider should always be available. External providers
     can add recall/write behavior and their own tools without replacing the
@@ -187,11 +240,11 @@ class MemoryProvider(ABC):
         memory_id: str,
         *,
         resolved_by: Optional[str] = None,
+        answer: Optional[str] = None,
+        expected_revision: Optional[int] = None,
         owner: Optional[str] = None,
     ) -> bool:
-        """Close one open question (kind=unknown): archive with
-        {resolved_by, resolved_at} provenance. Only unknown-kind records
-        resolve — never a plain delete."""
+        """Answer one open question by revising its stable knowledge block."""
         raise NotImplementedError(
             f"Provider {self.provider_id} does not support question resolution"
         )
@@ -227,6 +280,17 @@ class MemoryProvider(ABC):
     async def purge_owner(self, *, owner: Optional[str] = None) -> Dict[str, Any]:
         raise NotImplementedError(f"Provider {self.provider_id} does not support owner purge")
 
+    async def reset_owner(
+        self,
+        action: str,
+        *,
+        owner: Optional[str] = None,
+        components: list[str],
+        expected_counts: Optional[dict] = None,
+    ) -> dict:
+        """Preview or commit an owner-scoped selective memory reset."""
+        raise NotImplementedError(f"Provider {self.provider_id} does not support owner reset")
+
     async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
         raise NotImplementedError(f"Provider {self.provider_id} does not support owner rename")
 
@@ -241,6 +305,47 @@ class MemoryProvider(ABC):
         """Run provider-native maintenance when supported."""
         raise NotImplementedError(f"Provider {self.provider_id} does not support grooming")
 
+    async def retention(
+        self,
+        action: str,
+        *,
+        owner: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        **policy: Any,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support retention")
+
+    async def forget(
+        self,
+        action: str,
+        *,
+        owner: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        selector_kind: Optional[str] = None,
+        selector: Optional[str] = None,
+        preview_token: Optional[str] = None,
+        tombstone_id: Optional[str] = None,
+        operation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support provenance forget")
+
+    async def export_scope(
+        self,
+        *,
+        owner: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support scoped export")
+
+    async def explain(
+        self,
+        memory_id: str,
+        *,
+        owner: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        raise NotImplementedError(f"Provider {self.provider_id} does not support explanations")
+
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return provider-defined tool schemas when this provider is enabled."""
         return []
@@ -251,10 +356,10 @@ class MemoryProvider(ABC):
 
 
 class NativeMemoryProvider(MemoryProvider):
-    """Provider adapter for Odysseus' built-in memory manager and vector store."""
+    """Provider adapter for Open Clank' built-in memory manager and vector store."""
 
     provider_id = "native"
-    display_name = "Odysseus native memory"
+    display_name = "Open Clank native memory"
 
     _CORE_FIELDS = {
         "id",
@@ -293,6 +398,35 @@ class NativeMemoryProvider(MemoryProvider):
             metadata=metadata,
             pinned=bool(entry.get("pinned", metadata.get("pinned", False))),
         )
+
+    async def mark_conversation_source_removed(self, *, owner: str, session_id: str) -> Dict[str, Any]:
+        """Retain independent native memories and mark exact removed sources."""
+        if not owner or not session_id:
+            raise MemoryScopeError("owner and exact conversation id required")
+        def detach():
+            from services.memory.skill_lifecycle import locked
+            with locked(self.memory_manager.memory_file):
+                entries = self.memory_manager.load_all()
+                changed, already = 0, 0
+                for entry in entries:
+                    if entry.get("owner") != owner:
+                        continue
+                    original_metadata = entry.get("metadata")
+                    metadata = dict(original_metadata) if isinstance(original_metadata, dict) else ({"previous_metadata": original_metadata} if original_metadata is not None else {})
+                    marker = metadata.get("conversation_source_removed") or {}
+                    if entry.get("session_id") == session_id:
+                        entry["session_id"] = None
+                        metadata["conversation_source_removed"] = {"session_id": session_id}
+                        entry["metadata"] = metadata
+                        changed += 1
+                    elif isinstance(marker, dict) and marker.get("session_id") == session_id:
+                        already += 1
+                if changed:
+                    self.memory_manager.save(entries)
+            return {"complete": True, "owner": owner, "session_id": session_id,
+                    "detached": {"native": changed + already}, "already_applied": changed == 0 and already > 0,
+                    "independent_content_retained": True}
+        return await asyncio.to_thread(detach)
 
     async def remember(
         self,
@@ -469,6 +603,85 @@ class NativeMemoryProvider(MemoryProvider):
                 if entry.get("id"):
                     self.memory_vector.remove(entry["id"])
         return {"purged": True, "counts": {"curated": len(removed)}}
+
+    async def reset_owner(
+        self,
+        action: str,
+        *,
+        owner: Optional[str] = None,
+        components: list[str],
+        expected_counts: Optional[dict] = None,
+    ) -> dict:
+        if action not in {"reset_preview", "reset_commit"}:
+            raise ValueError("action must be reset_preview|reset_commit")
+        requested = []
+        for component in components:
+            if component not in {"memories", "graph", "ingest"}:
+                raise ValueError(f"unsupported reset component: {component}")
+            if component not in requested:
+                requested.append(component)
+        if not requested:
+            raise ValueError("at least one reset component is required")
+        expanded = list(requested)
+        if "memories" in requested:
+            expanded = ["memories", "graph", "ingest"]
+
+        memories = self.memory_manager.load_all()
+        owned = [entry for entry in memories if entry.get("owner") == owner]
+        owned_material = sorted(
+            json.dumps(
+                entry,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            for entry in owned
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(owned_material, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        zero_fingerprint = hashlib.sha256(b"[]").hexdigest()
+        snapshot = {
+            "memories": {"count": len(owned), "fingerprint": fingerprint},
+            "graph": {"count": 0, "fingerprint": zero_fingerprint},
+            "ingest": {"count": 0, "fingerprint": zero_fingerprint},
+        }
+        implications = [
+            "The native provider has no graph or ingest state."
+        ]
+        if "memories" in requested:
+            implications.insert(0, "Memories expands to the graph and ingest dependency closure.")
+        if action == "reset_preview":
+            return {
+                "components": snapshot,
+                "expanded_components": expanded,
+                "implications": implications,
+            }
+
+        expected = expected_counts or {}
+        stale = any(
+            expected.get(component) != snapshot[component]
+            for component in expanded
+        )
+        current_empty = all(snapshot[component]["count"] == 0 for component in expanded)
+        if stale and not current_empty:
+            raise RuntimeError("owner reset preview is stale; preview again before committing")
+
+        if "memories" in expanded and owned:
+            self.memory_manager.save(
+                [entry for entry in memories if entry.get("owner") != owner]
+            )
+            if self._vector_available():
+                for entry in owned:
+                    if entry.get("id"):
+                        self.memory_vector.remove(entry["id"])
+        return {
+            "complete": True,
+            "categories": {
+                component: {"state": "complete", **snapshot[component]}
+                for component in expanded
+            },
+        }
 
     async def rename_owner(self, new_owner: str, *, owner: Optional[str] = None) -> Dict[str, Any]:
         memories = self.memory_manager.load_all()

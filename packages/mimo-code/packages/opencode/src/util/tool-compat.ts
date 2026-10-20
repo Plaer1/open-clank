@@ -1,21 +1,29 @@
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { isRecord } from "./record"
 
-/** Collapse PascalCase, camelCase, snake_case, and kebab-case to one comparable token. */
-export function canonical(name: string): string {
-  return name.replace(/[-_\s]+/g, "").toLowerCase()
+/**
+ * Collapse PascalCase, camelCase, snake_case, and kebab-case to one comparable
+ * token. With `ignoreCase` off, separators are still stripped but letter case
+ * is preserved, so `apply-patch` and `apply_patch` share a token while
+ * `applyPatch` does not.
+ */
+export function canonical(name: string, ignoreCase = true): string {
+  const collapsed = name.replace(/[-_\s]+/g, "")
+  return ignoreCase ? collapsed.toLowerCase() : collapsed
 }
 
-/** Resolve a model-provided identifier to a registered name when casing or separators differ. */
-export function resolveName(name: string, candidates: readonly string[]): string | undefined {
-  if (candidates.includes(name)) return name
-
-  const lower = name.toLowerCase()
-  const caseMatch = candidates.find((candidate) => candidate.toLowerCase() === lower)
-  if (caseMatch) return caseMatch
-
-  const key = canonical(name)
-  return candidates.find((candidate) => canonical(candidate) === key)
+/** Resolve provider tool-name spelling back to the locally registered tool. */
+export function resolveName(name: string, registered: readonly string[]): string | undefined {
+  if (registered.includes(name)) return name
+  const wanted = canonical(name)
+  const exact = registered.find((candidate) => canonical(candidate) === wanted)
+  if (exact) return exact
+  const stripped = name.replace(/^(?:functions?|tools?)\./i, "")
+  if (stripped !== name) {
+    const normalized = canonical(stripped)
+    return registered.find((candidate) => canonical(candidate) === normalized)
+  }
+  return undefined
 }
 
 export function schemaPropertyKeys(schema: JSONSchema7): string[] {
@@ -100,11 +108,77 @@ export function normalizeInput(input: unknown, schema: JSONSchema7): unknown {
   return result
 }
 
+// Repair `\uXXXX` escapes whose 4 hex digits were split by injected whitespace
+// (e.g. a CJK char `\u7ed1` arriving as `\u7 ed1` when a streaming/router
+// boundary cuts the 6-char escape and rejoins it with a space). We walk each
+// `\u`, then pull the next 4 hex digits, tolerating whitespace between them, and
+// re-emit a clean `\uXXXX`. Anything that isn't a recoverable 4-hex escape is
+// left byte-for-byte unchanged so valid content and other escapes are untouched.
+function repairUnicodeEscapes(input: string): string {
+  if (!input.includes("\\u")) return input
+  let out = ""
+  let i = 0
+  while (i < input.length) {
+    const ch = input[i]
+    if (ch !== "\\") {
+      out += ch
+      i++
+      continue
+    }
+    const next = input[i + 1]
+    // Preserve escaped backslash so `\\u...` (a literal backslash + u) is not
+    // mistaken for a unicode escape.
+    if (next === "\\") {
+      out += "\\\\"
+      i += 2
+      continue
+    }
+    if (next !== "u") {
+      out += ch
+      i++
+      continue
+    }
+    // Collect up to 4 hex digits after `\u`, skipping interleaved whitespace.
+    let j = i + 2
+    const hex: string[] = []
+    while (j < input.length && hex.length < 4) {
+      const c = input[j]
+      if (/[0-9a-fA-F]/.test(c)) {
+        hex.push(c)
+        j++
+        continue
+      }
+      if (/\s/.test(c)) {
+        j++
+        continue
+      }
+      break
+    }
+    if (hex.length === 4) {
+      out += "\\u" + hex.join("")
+      i = j
+      continue
+    }
+    // Not a recoverable escape — leave the `\u` as-is and move on.
+    out += ch
+    i++
+  }
+  return out
+}
+
 export function parseToolInput(input: string): unknown {
   if (input.trim() === "") return {}
   try {
     return JSON.parse(input) as unknown
   } catch {
+    const repaired = repairUnicodeEscapes(input)
+    if (repaired !== input) {
+      try {
+        return JSON.parse(repaired) as unknown
+      } catch {
+        return input
+      }
+    }
     return input
   }
 }
@@ -125,20 +199,31 @@ export type RepairedToolCall = {
   input: string
 }
 
-/** Repair tool name and/or argument keys so AI SDK validation can succeed. */
+/** Repair argument keys (and the exec raw-source wrap) so AI SDK validation can succeed. */
 export async function repairToolCall(input: RepairToolCallInput): Promise<RepairedToolCall | undefined> {
-  const resolvedName = resolveName(input.toolName, input.toolNames)
-  if (!resolvedName) return undefined
+  if (!input.toolNames.includes(input.toolName)) return undefined
 
-  const schema = await Promise.resolve(input.getSchema(resolvedName))
+  const schema = await Promise.resolve(input.getSchema(input.toolName))
   const parsed = parseToolInput(input.input)
+  const codeSchema = isRecord(schema.properties) ? schema.properties.code : undefined
+  if (
+    input.toolName === "exec" &&
+    typeof parsed === "string" &&
+    isRecord(codeSchema) &&
+    codeSchema.type === "string"
+  ) {
+    return {
+      toolName: input.toolName,
+      input: JSON.stringify({ code: parsed }),
+    }
+  }
   const normalized = normalizeInput(parsed, schema)
   const repairedInput = stringifyToolInput(normalized)
 
-  if (resolvedName === input.toolName && repairedInput === input.input) return undefined
+  if (repairedInput === input.input) return undefined
 
   return {
-    toolName: resolvedName,
+    toolName: input.toolName,
     input: repairedInput,
   }
 }

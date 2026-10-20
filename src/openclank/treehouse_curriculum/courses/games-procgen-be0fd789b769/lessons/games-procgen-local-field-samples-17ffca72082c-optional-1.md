@@ -1,0 +1,1 @@
+Compute endpoint dot contributions before blending.

@@ -6,12 +6,13 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
-const base = (process.argv[2] || 'http://127.0.0.1:7000').replace(/\/$/, '');
+const explicitBase = (process.argv[2] || '').replace(/\/$/, '');
 const outputDir = process.argv[3] || '/tmp/openclank-i18n-browser';
 fs.mkdirSync(outputDir, { recursive: true });
 
-const port = await new Promise((resolve, reject) => {
+const freePort = () => new Promise((resolve, reject) => {
   const server = net.createServer();
   server.once('error', reject);
   server.listen(0, '127.0.0.1', () => {
@@ -19,8 +20,65 @@ const port = await new Promise((resolve, reject) => {
     server.close(() => resolve(selected));
   });
 });
+
+async function stopProcess(child) {
+  if (!child || child.exitCode != null) return;
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.kill('SIGTERM');
+  await Promise.race([exited, delay(3000)]);
+  if (child.exitCode == null) {
+    child.kill('SIGKILL');
+    await Promise.race([exited, delay(1000)]);
+  }
+}
+
+function chromeExecutable() {
+  const candidates = [
+    process.env.OPENCLANK_CHROME_BIN,
+    process.env.CHROME_BIN,
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/opt/homebrew/bin/chromium',
+    '/usr/local/bin/chromium',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+  ].filter(Boolean);
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+const chrome = chromeExecutable();
+assert(chrome, 'Chrome/Chromium executable required; set OPENCLANK_CHROME_BIN or CHROME_BIN');
+let staticServer;
+let base = explicitBase;
+if (!base) {
+  const staticPort = await freePort();
+  const localPython = path.join(process.cwd(), 'venv', 'bin', 'python');
+  const python = process.env.PYTHON || (fs.existsSync(localPython) ? localPython : 'python3');
+  staticServer = spawn(python, ['-m', 'http.server', String(staticPort), '--bind', '127.0.0.1'], {
+    cwd: process.cwd(),
+    stdio: 'ignore',
+  });
+  base = `http://127.0.0.1:${staticPort}`;
+  let ready = false;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (staticServer.exitCode != null) break;
+    try {
+      if ((await fetch(`${base}/static/login.html`)).ok) {
+        ready = true;
+        break;
+      }
+    } catch {}
+    await delay(25);
+  }
+  if (!ready) {
+    await stopProcess(staticServer);
+    throw new Error('Disposable i18n static server did not become ready');
+  }
+}
+
+const port = await freePort();
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'openclank-i18n-'));
-const chromium = spawn('/usr/bin/chromium', [
+const chromium = spawn(chrome, [
   '--headless=new', '--no-sandbox', '--disable-gpu',
   `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank',
 ], { stdio: 'ignore' });
@@ -28,12 +86,15 @@ const chromium = spawn('/usr/bin/chromium', [
 let socket;
 try {
   const debuggerBase = `http://127.0.0.1:${port}`;
-  let targets;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try { targets = await fetch(`${debuggerBase}/json`).then(response => response.json()); break; }
-    catch { await new Promise(resolve => setTimeout(resolve, 50)); }
+  let target;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const targets = await fetch(`${debuggerBase}/json`).then(response => response.json());
+      target = targets?.find(item => item.type === 'page' && item.webSocketDebuggerUrl);
+      if (target) break;
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
-  const target = targets?.find(item => item.type === 'page');
   assert(target?.webSocketDebuggerUrl, 'Chromium page target is unavailable');
   socket = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
@@ -143,14 +204,76 @@ try {
   fs.writeFileSync(path.join(outputDir, 'japanese-interface.png'), Buffer.from(capture.data, 'base64'));
 
   await command('Page.navigate', { url: `${base}/static/login.html?__lang=zh-TW&__fresh=1` });
-  await waitFor("window.openClankI18n && document.readyState === 'complete'", 'unsupported locale page');
+  await waitFor("location.pathname === '/static/login.html' && location.search.includes('__lang=zh-TW') && document.readyState === 'complete'", 'Traditional Chinese locale page navigation');
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.equal(await evaluate("window.openClankI18n.locale"), 'en');
-  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), false);
+  assert.equal(await evaluate("Boolean(document.querySelector('.i18n-offer'))"), true);
+  assert.equal(await evaluate("document.querySelector('.i18n-offer').lang"), 'zh-Hant');
+  await evaluate("document.querySelector('.i18n-offer [data-decline]').click()");
 
-  console.log(JSON.stringify({ offer, matrix, contentSafety, unsupportedTraditionalChinese: true }, null, 2));
+  // The login page exposes the i18n facade before its asynchronous catalog
+  // registry has finished loading. Wait for the registry itself before
+  // checking aliases; this keeps the assertion about catalog semantics while
+  // avoiding a page-load/module-load race.
+  await waitFor("window.openClankI18n && window.openClankI18n.locales && window.openClankI18n.locales['en-CA'] && window.openClankI18n.locales.fr && window.openClankI18n.locales.ms", 'complete i18n catalog');
+
+  // French-backed “Canadian English” display alias: selection label is the
+  // joke, catalog bytes are French, html lang is French, and real fr remains.
+  const canadian = await evaluate(`(async () => {
+    await window.openClankI18n.setLocale('en-CA');
+    const descriptor = window.openClankI18n.locales['en-CA'];
+    await window.openClankI18n.setLocale('fr');
+    const french = window.openClankI18n.locales.fr;
+    return {
+      aliasName: descriptor.name,
+      aliasCatalog: descriptor.catalog,
+      aliasHtmlLang: descriptor.html_lang || descriptor.catalog,
+      frenchName: french.name,
+      frenchCatalog: french.catalog,
+      locale: window.openClankI18n.locale,
+      dir: document.documentElement.dir,
+    };
+  })()`);
+  assert.equal(canadian.aliasName, 'Canadian English');
+  assert.equal(canadian.aliasCatalog, 'fr');
+  assert.equal(canadian.aliasHtmlLang, 'fr');
+  assert.equal(canadian.frenchName, 'Français');
+  assert.equal(canadian.frenchCatalog, 'fr');
+  assert.equal(canadian.locale, 'fr');
+
+  // Malay stays a dedicated catalog selection, not a duplicate or English stub.
+  const malay = await evaluate(`(async () => {
+    await window.openClankI18n.setLocale('ms');
+    return {
+      locale: window.openClankI18n.locale,
+      name: window.openClankI18n.locales.ms.name,
+      catalog: window.openClankI18n.locales.ms.catalog,
+      lang: document.documentElement.lang,
+      dir: document.documentElement.dir,
+    };
+  })()`);
+  assert.equal(malay.locale, 'ms');
+  assert.equal(malay.name, 'Bahasa Melayu');
+  assert.equal(malay.catalog, 'ms');
+  assert.equal(malay.lang, 'ms');
+  assert.equal(malay.dir, 'ltr');
+
+  console.log(JSON.stringify({ offer, matrix, contentSafety, traditionalChineseAlias: 'zh-TW→zh-Hant', canadian, malay }, null, 2));
 } finally {
   try { socket?.close(); } catch {}
   chromium.kill('SIGTERM');
-  fs.rmSync(profile, { recursive: true, force: true });
+  if (chromium.exitCode == null) {
+    await new Promise(resolve => {
+      const timer = setTimeout(() => {
+        if (chromium.exitCode == null) chromium.kill('SIGKILL');
+        resolve();
+      }, 3000);
+      chromium.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  for (let attempt = 0; attempt < 10 && fs.existsSync(profile); attempt += 1) {
+    fs.rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    if (fs.existsSync(profile)) await delay(100);
+  }
+  await stopProcess(staticServer);
 }

@@ -24,6 +24,11 @@ from fastapi.responses import HTMLResponse
 
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
+from src.openclank.chat_routing import (
+    MANAGED_ENGINE_PUBLIC_URL,
+    group_chat_routes,
+    list_chat_routes,
+)
 
 from companion import pairing as _pairing
 
@@ -41,15 +46,6 @@ def token_owner(request: Request) -> str | None:
     return get_current_user(request)
 
 
-def owner_can_see(row_owner, owner) -> bool:
-    """Owner-scope rule for read endpoints.
-
-    Authenticated callers see only their own rows.  A null owner is legacy
-    single-user state, not a shared multi-user catalogue entry.
-    """
-    return row_owner == owner if owner else row_owner is None
-
-
 def require_models_scope(request: Request) -> None:
     """Require the companion chat scope for bearer-token model inventory."""
     if not getattr(request.state, "api_token", False):
@@ -60,6 +56,30 @@ def require_models_scope(request: Request) -> None:
     scope_set = {str(scope).strip() for scope in scopes if str(scope).strip()}
     if _pairing.COMPANION_SCOPE not in scope_set:
         raise HTTPException(403, "API token requires chat scope")
+
+
+def _allowed_model_ids(request: Request, owner: str | None) -> frozenset[str] | None:
+    """Return the caller's model allow-list, or ``None`` when unrestricted."""
+
+    if not owner:
+        return None
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    auth_manager = getattr(app_state, "auth_manager", None)
+    get_privileges = getattr(auth_manager, "get_privileges", None)
+    if not callable(get_privileges):
+        return None
+    privileges = get_privileges(owner) or {}
+    if privileges.get("block_all_models"):
+        return frozenset()
+    raw = privileges.get("allowed_models")
+    allowed = (
+        frozenset(str(item) for item in raw)
+        if isinstance(raw, list)
+        else frozenset()
+    )
+    if privileges.get("allowed_models_restricted") or allowed:
+        return allowed
+    return None
 
 
 def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
@@ -105,59 +125,48 @@ def setup_companion_routes() -> APIRouter:
 
     @router.get("/models")
     def models(request: Request):
-        """LLM model endpoints the CALLER can use.
+        """Normalized chat routes the CALLER can use.
 
-        The stock /api/models route scopes to get_current_user, which for a
-        bearer token is the sandboxed pseudo-user "api" (owns nothing). Here we
-        scope to the token's real owner instead. Legacy null-owner rows remain
-        available only in unauthenticated single-user mode. Read-only; never
-        returns api_key material.
+        Paired bearer clients run as the sandboxed pseudo-user ``api``, so this
+        projection resolves the token's real owner before listing own and
+        accepted shared routes.  The historical response envelope is retained,
+        but endpoint_url is always the managed public marker and no provider
+        URL or credential store is consulted.
         """
         require_models_scope(request)
-        import json as _json
-
-        from core.database import SessionLocal, ModelEndpoint
-        from src.endpoint_resolver import build_chat_url
 
         owner = token_owner(request)
         if getattr(request.state, "api_token", False) and not owner:
             raise HTTPException(403, "API token has no owner")
-        out = []
-        db = SessionLocal()
         try:
-            q = db.query(ModelEndpoint).filter(
-                ModelEndpoint.is_enabled == True,  # noqa: E712
-                (ModelEndpoint.model_type == "llm") | (ModelEndpoint.model_type == None),  # noqa: E711
-            )
-            if owner:
-                q = q.filter(ModelEndpoint.owner == owner)
-            else:
-                q = q.filter(ModelEndpoint.owner == None)  # noqa: E711
-            for ep in q.all():
-                if not owner_can_see(ep.owner, owner):
-                    continue
-                try:
-                    model_ids = _json.loads(ep.cached_models) if ep.cached_models else []
-                except (ValueError, TypeError):
-                    model_ids = []
-                try:
-                    hidden = set(_json.loads(ep.hidden_models)) if ep.hidden_models else set()
-                except (ValueError, TypeError):
-                    hidden = set()
-                model_ids = [m for m in model_ids if m not in hidden]
-                try:
-                    chat_url = build_chat_url(ep.base_url)
-                except Exception:
-                    chat_url = ep.base_url
-                out.append({
-                    "endpoint_id": ep.id,
-                    "name": ep.name,
-                    "endpoint_url": chat_url,
-                    "models": model_ids,
-                    "supports_tools": ep.supports_tools,
-                })
-        finally:
-            db.close()
+            own, shared = list_chat_routes(owner)
+        except Exception as exc:
+            raise HTTPException(503, "Provider catalogue is unavailable") from exc
+
+        allowed = _allowed_model_ids(request, owner)
+        visible = [
+            route
+            for route in (*own, *shared)
+            if allowed is None
+            or route.provider_model_id in allowed
+            or route.model_route_id in allowed
+        ]
+        out = []
+        for endpoint_id, routes in sorted(group_chat_routes(visible).items()):
+            first = routes[0]
+            name = first.share_label or first.connection_label
+            if first.disclosed_owner:
+                name = f"{name} · shared by {first.disclosed_owner}"
+            out.append({
+                "endpoint_id": endpoint_id,
+                "name": name,
+                "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+                "models": [route.provider_model_id for route in routes],
+                "supports_tools": any(
+                    bool((route.capabilities or {}).get("tools"))
+                    for route in routes
+                ),
+            })
         return {"endpoints": out}
 
     @router.get("/pair")

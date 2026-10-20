@@ -1,0 +1,1 @@
+The checks address actual traversal and preserve the distinction between a convincing image and playable geometry.

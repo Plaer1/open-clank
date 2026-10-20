@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package lore.environment.v1;
+
+// Server-side environment discovery service. Clients call this once during
+// connection setup to learn which auxiliary endpoints (storage, revision,
+// lock, notification, ...) live at which URLs and to read server-tunable
+// configuration (compression mode, query batch size). The service is
+// unauthenticated — it does not depend on any per-repository state.
+service EnvironmentService {
+  // Fetch the server's current environment configuration. Servers in
+  // maintenance mode respond with `Unavailable` and a message containing
+  // "maintenance".
+  rpc EnvironmentGet(EnvironmentGetRequest) returns (EnvironmentGetResponse);
+}
+
+// Per-service endpoint URLs. An empty string means "no override for this
+// service"; clients fall back to the URL they were configured with. The
+// server stores whatever the operator configured verbatim; URLs are
+// expected to be fully-qualified (`scheme://host[:port][/path]`).
+message Endpoint {
+  // Authentication / authorisation token-exchange endpoint.
+  string auth_url = 1;
+  // Repository-management service endpoint.
+  string repository_url = 2;
+  // Storage service endpoint.
+  string storage_url = 3;
+  // Revision-graph service endpoint.
+  string revision_url = 4;
+  // Lock service endpoint.
+  string lock_url = 5;
+  // Notification service endpoint.
+  string notification_url = 6;
+}
+
+// Compression algorithm to use when storing payloads.
+enum CompressionMode {
+  // Server has no opinion; the client picks based on its own configuration.
+  NOT_SPECIFIED = 0;
+  // Disable compression entirely.
+  NO_COMPRESSION = 1;
+  LZ4 = 2;
+  OODLE = 3;
+  ZSTD = 4;
+}
+
+// Server-tunable configuration knobs returned alongside the endpoint
+// directory.
+message Config {
+  // Maximum number of addresses the server accepts in a single
+  // `StorageService.Query` batch. `0` means "use the client default".
+  uint32 max_query_batch = 1;
+  // Preferred compression mode for new payloads. Unset means the server
+  // has no opinion; the client's local configuration wins.
+  optional CompressionMode compression_mode = 2;
+}
+
+// Composite environment record returned by EnvironmentGet.
+message Environment {
+  // Per-service endpoint URLs.
+  Endpoint endpoint = 1;
+  // Server-tunable configuration knobs.
+  Config config = 2;
+}
+
+// Empty request envelope (the call has no parameters).
+message EnvironmentGetRequest {}
+
+// Response carrying the environment record.
+message EnvironmentGetResponse {
+  // The server's current environment configuration.
+  Environment environment = 1;
+}

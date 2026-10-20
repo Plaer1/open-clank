@@ -1,4 +1,3 @@
-export * as JsonMigration from "./json-migration"
 export * as Database from "./db"
 export * as Storage from "./storage"
 export {

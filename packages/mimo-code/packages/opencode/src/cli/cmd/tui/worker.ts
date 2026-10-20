@@ -7,13 +7,25 @@ import { Rpc } from "@/util"
 import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config"
 import { GlobalBus } from "@/bus/global"
-import { Flag } from "@/flag/flag"
+import { Flag, clearGeneratedServerPassword, generateServerPassword } from "@/flag/flag"
 import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
+import { SessionCheckpoint } from "@/session/checkpoint"
 import { ensureProcessMetadata } from "@/util/mimo-process"
 
+import { ModelsDev } from "@/provider/models"
+import { watchModelsCatalogReload } from "@/provider/models-catalog-reload"
+
 ensureProcessMetadata("worker")
+ModelsDev.startRefresh()
+// Successful models.dev publishes rebuild provider state like `/connect`:
+// dispose idle instances → `server.instance.disposed` → TUI bootstrap.
+// `disposeAll` skips directories with in-flight work.
+watchModelsCatalogReload({
+  subscribe: (listener) => ModelsDev.subscribe(listener),
+  reload: () => Instance.disposeAll(),
+})
 
 await Log.init({
   print: process.argv.includes("--print-logs"),
@@ -44,6 +56,7 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+let serverPromise: ReturnType<typeof Server.listen> | undefined
 
 export const rpc = {
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
@@ -69,9 +82,25 @@ export const rpc = {
     const result = writeHeapSnapshot("server.heapsnapshot")
     return result
   },
-  async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
-    if (server) await server.stop(true)
-    server = await Server.listen(input)
+  async server(input?: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
+    // Idempotent. The previous behaviour was to stop and rebind, which moves the port
+    // out from under whoever is already talking to it — and now that a listener is
+    // bound unasked, a second caller is the normal case rather than a mistake.
+    // Memoized: two calls arriving before the first `await Server.listen` resolves
+    // must not both pass the guard and create two listeners.
+    if (server) return { url: server.url.toString() }
+    if (!serverPromise) {
+      // No input means nobody asked for a reachable server: we are binding one anyway so
+      // that the `/v1` capability API exists at all (it is only reachable over a socket,
+      // and a consumer spawned mid-session cannot ask for one retroactively). That makes
+      // every other instance route reachable by any process running as this user, so it
+      // gets a credential first — generated before `listen`, never after.
+      if (!input) generateServerPassword()
+      serverPromise = Server.listen(input ?? { port: 0, hostname: "127.0.0.1" })
+    }
+    // Server.listen publishes cwd into the llm-server address registry and
+    // unpublishes on stop, so `mimo llm-server issue` can resolve base_url.
+    server = await serverPromise
     return { url: server.url.toString() }
   },
   async checkUpgrade(input: { directory: string }) {
@@ -88,9 +117,34 @@ export const rpc = {
   },
   async shutdown() {
     Log.Default.info("worker shutting down")
+    // Flush instead of closing: the host may kill the worker during the drain
+    // below, so queued records must already be on disk. Closing here would
+    // leave the rest of teardown without a file sink.
+    await Log.flush()
+
+    // Give in-flight background checkpoint writers a bounded chance to finish
+    // before we tear down instances. A checkpoint writer can run for minutes on
+    // a large session; when the host recycles the worker (e.g. right after a
+    // user abort), a straight disposeAll() interrupts the writer mid-LLM-call,
+    // leaving the on-disk checkpoint stale and the session's token count pinned
+    // — the exact wedge that makes a large session unable to send. Draining
+    // here mirrors cli/bootstrap.ts's headless-run teardown so both entry
+    // points shut down gracefully. Writers that don't settle within the drain
+    // budget are abandoned (disposeAll would kill them anyway).
+    await AppRuntime.runPromise(SessionCheckpoint.Service.use((svc) => svc.drainWriters({ timeoutMs: 30_000 }))).catch(
+      (error) => Log.Default.warn("checkpoint drain failed during shutdown", { error: String(error) }),
+    )
 
     await Instance.disposeAll()
-    if (server) await server.stop(true)
+    if (server) {
+      // Server.stop withdraws the llm-server advertisement before the socket goes
+      // away. A crash skips this; the pid liveness check in `addresses` is the backstop.
+      await server.stop(true)
+      server = undefined
+      serverPromise = undefined
+      clearGeneratedServerPassword()
+    }
+    await Log.shutdown()
   },
 }
 

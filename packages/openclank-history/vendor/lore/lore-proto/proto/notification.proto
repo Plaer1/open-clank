@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "model.proto";
+import "lock.proto";
+import "epic_events.proto";
+
+package urc.notification;
+
+// An event published when a branch is created on the server
+message BranchCreated {
+  bytes branch = 1;
+}
+
+// Represents a revision pushed event
+message BranchPushed {
+  // TODO(mjansson): This should be bytes, string is not a data carrier for binary data
+  string revision_string_deprecated = 1;
+  uint64 revision_number = 2;
+  // TODO(mjansson): This should be bytes, string is not a data carrier for binary data
+  string branch_string_deprecated = 3;
+  string user_id = 4;
+  bytes revision = 5;
+  bytes branch = 6;
+}
+
+// An event published when a branch is deleted from the server
+message BranchDeleted {
+  bytes branch = 1;
+}
+
+message ResourceLocked {
+  string user_id = 1;
+  repeated urc.lock.Resource resources = 2;
+}
+
+message ResourceUnlocked {
+  string user_id = 1;
+  repeated urc.lock.Resource resources = 2;
+}
+
+message Obliterate {
+  urc.model.Address address = 1;
+  bytes repository = 2;
+}
+
+message Event {
+  // Tags associated with the event
+  repeated string tags = 1;
+
+  // Reserved
+  string reserved = 2;
+
+  // Event payload
+  oneof event {
+    BranchPushed branch_pushed = 3;
+    ResourceLocked resource_locked = 4;
+    ResourceUnlocked resource_unlocked = 5;
+    BranchDeleted branch_deleted = 6;
+    BranchCreated branch_created = 7;
+  }
+}
+
+message SubscribeRequest {
+  string stream = 1;
+}
+
+message CreateStreamRequest {
+  string name = 1;
+}
+
+message PublishRequest {
+  Event event = 1;
+  bool create_stream = 2;
+}
+
+message AckRequest {
+  string acknowledgement_id = 1;
+}
+
+message SubscribeOrAckRequest {
+  oneof message {
+    SubscribeRequest subscribe = 1;
+    AckRequest ack = 2;
+  }
+}
+
+service NotificationService {
+  rpc Subscribe (SubscribeRequest) returns (stream Event);
+  rpc Publish (PublishRequest) returns (google.protobuf.Empty);
+}
+
+service NotificationAdminService {
+  rpc CreateStream (CreateStreamRequest) returns (google.protobuf.Empty);
+  rpc SubscribeWithAcks (stream SubscribeOrAckRequest) returns (stream Event);
+}

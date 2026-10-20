@@ -1,0 +1,1 @@
+The original circle moves and stays inside the stated limits; halving the speed changes travel time, and elapsed-time reasoning is correct.

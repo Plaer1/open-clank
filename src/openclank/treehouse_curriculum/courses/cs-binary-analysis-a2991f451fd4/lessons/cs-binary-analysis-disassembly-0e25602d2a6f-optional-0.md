@@ -1,0 +1,1 @@
+w0=3; cannot establish original variable name, full source type, or application intent.

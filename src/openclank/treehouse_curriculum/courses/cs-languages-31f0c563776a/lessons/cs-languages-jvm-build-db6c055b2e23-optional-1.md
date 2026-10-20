@@ -1,0 +1,1 @@
+Do not choose a game's JDK from the newest general Java documentation.

@@ -1,0 +1,52 @@
+/* Layered important shell declarations also override legacy mobile/theme
+   selectors; applet interiors and normal theme radius declarations are untouched. */
+@layer oc-applet-frame {
+/* The actual moving applet frame shares one slim gutter and outline. Internal
+   content, title accents and theme radius choices remain owned by each applet. */
+body .oc-applet-frame {
+  box-sizing: border-box;
+  padding: 3px !important;
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-color: var(--border) !important;
+  box-shadow: 0 3px 14px color-mix(in srgb, #000 28%, transparent) !important;
+}
+body:is(.theme-clanker-dark, .theme-clanker-light) .oc-applet-frame {
+  border-color: var(--clanker-outline, var(--border)) !important;
+  box-shadow: inset 0 1px var(--clanker-bevel), 0 1px 0 var(--clanker-outline), 0 8px 20px color-mix(in srgb, var(--clanker-outline) 36%, transparent) !important;
+}
+
+/* These outer tab rows used to cancel a 10px or 16px shell gutter. Keep the
+   slim frame visible instead of allowing the old negative margins to clip it. */
+.oc-applet-frame.tasks-modal-content .tasks-tabs,
+.oc-applet-frame#theme-popup .admin-tabs,
+.oc-applet-frame > .preset-tabs {
+  margin-inline: 0 !important;
+  padding-inline: 3px !important;
+}
+
+@media (min-width: 769px) {
+  body :is(.modal, .research-overlay):has(> .oc-applet-frame) {
+    left: var(--oc-workspace-left, 4px) !important;
+    top: var(--oc-workspace-top, 4px) !important;
+    right: auto !important;
+    width: var(--oc-workspace-width, calc(100vw - 8px)) !important;
+    height: var(--oc-workspace-height, calc(100dvh - 8px)) !important;
+    transition: none !important;
+  }
+  /* Legacy route fullscreen classes represent applet maximize too. */
+  body:not(.email-doc-split-active) :is(.email-lib-fullscreen, .email-window-fullscreen, .doclib-fullscreen):not(.modal-left-docked):not(.modal-right-docked) > .oc-applet-frame:not([data-_tile-zone]) {
+    position: fixed !important;
+    left: var(--oc-workspace-left, 4px) !important;
+    top: var(--oc-workspace-top, 4px) !important;
+    right: auto !important;
+    bottom: auto !important;
+    width: var(--oc-workspace-width, calc(100vw - 8px)) !important;
+    height: var(--oc-workspace-height, calc(100dvh - 8px)) !important;
+  }
+  body .oc-applet-frame {
+    max-width: var(--oc-workspace-width, calc(100vw - 8px)) !important;
+    max-height: var(--oc-workspace-height, calc(100dvh - 8px)) !important;
+  }
+}
+}

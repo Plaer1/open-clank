@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { Instance } from "../../src/project/instance"
 import { Session as SessionNs } from "../../src/session"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ProviderID, ModelID } from "../../src/provider/schema"
 import { buildLLMRequestPrefix } from "../../src/session/llm-request-prefix"
 import { AppRuntime } from "../../src/effect/app-runtime"
@@ -113,4 +113,33 @@ describe("fork prefix invariant", () => {
       },
     })
   })
+})
+
+
+test("reserved fork remaps durable source anchors before writes and preserves attachments and assistant parents", async () => {
+  await using tmp = await tmpdir({ git: true })
+  await Instance.provide({ directory: tmp.path, fn: async () => {
+    const source = await AppRuntime.runPromise(SessionNs.Service.use((service) => service.create({})))
+    const userID = MessageID.ascending()
+    const assistantID = MessageID.ascending()
+    await AppRuntime.runPromise(SessionNs.Service.use((service) => service.updateMessage({ id: userID, sessionID: source.id, role: "user", time: { created: Date.now() }, agent: "build", model: { providerID: ProviderID.make("test"), modelID: ModelID.make("test") } })))
+    await AppRuntime.runPromise(SessionNs.Service.use((service) => service.updatePart({ id: PartID.ascending(), sessionID: source.id, messageID: userID, type: "text", text: "", synthetic: true, ignored: true, metadata: { hostSourceMessageID: "root-source" } })))
+    await AppRuntime.runPromise(SessionNs.Service.use((service) => service.updatePart({ id: PartID.ascending(), sessionID: source.id, messageID: userID, type: "file", filename: "fixture.txt", mime: "text/plain", url: "data:text/plain;base64,SGk=" })))
+    await AppRuntime.runPromise(SessionNs.Service.use((service) => service.updateMessage({ id: assistantID, sessionID: source.id, role: "assistant", parentID: userID, time: { created: Date.now() }, agent: "build", mode: "build", modelID: ModelID.make("test"), providerID: ProviderID.make("test"), path: { cwd: tmp.path, root: tmp.path }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })))
+    const rejectedTarget = SessionID.descending()
+    await expect(AppRuntime.runPromise(SessionNs.Service.use((service) => service.fork({ sessionID: source.id, targetSessionID: rejectedTarget, hostSourceMap: {} })))).rejects.toThrow("incomplete")
+    await expect(AppRuntime.runPromise(SessionNs.Service.use((service) => service.get(rejectedTarget)))).rejects.toMatchObject({ name: "NotFoundError" })
+    const target = SessionID.descending()
+    const forked = await AppRuntime.runPromise(SessionNs.Service.use((service) => service.fork({ sessionID: source.id, targetSessionID: target, hostSourceMap: { "root-source": "root-child" }, forkFingerprint: "a".repeat(64) })))
+    expect(forked.id).toBe(target)
+    const messages = await AppRuntime.runPromise(SessionNs.Service.use((service) => service.messages({ sessionID: target, agentID: "*" })))
+    const user = messages.find((message) => message.info.role === "user")!
+    const assistant = messages.find((message) => message.info.role === "assistant")!
+    expect(user.info.id).not.toBe(userID)
+    expect(user.parts.find((part) => part.type === "text")).toMatchObject({ ignored: true, synthetic: true, metadata: { hostSourceMessageID: "root-child" } })
+    expect(user.parts.filter((part) => part.type === "text").find((part) => part.metadata?.nativeForkReceipt)).toMatchObject({ metadata: { nativeForkReceipt: { sourceSessionID: source.id, targetSessionID: target, fingerprint: "a".repeat(64), sourceMessageCount: 2 } } })
+    expect(user.parts.find((part) => part.type === "file")).toMatchObject({ filename: "fixture.txt", url: "data:text/plain;base64,SGk=" })
+    expect(assistant.info).toMatchObject({ parentID: user.info.id })
+    await expect(AppRuntime.runPromise(SessionNs.Service.use((service) => service.fork({ sessionID: source.id, targetSessionID: target, hostSourceMap: { "root-source": "root-other" } })))).rejects.toThrow("already exists")
+  } })
 })

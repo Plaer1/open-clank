@@ -1,15 +1,16 @@
-"""
-RAG-based tool selection for agent mode.
+"""Frankenmemory-backed tool selection for agent mode.
 
-Instead of injecting all tool descriptions into the system prompt,
-embed them in a ChromaDB collection and retrieve only the top-K
-relevant ones per user message.
+The legacy Chroma class remains importable for migration tests, but the live
+singleton has one authority: Frankenmemory.
 """
 
 import logging
 import hashlib
+import os
 import re
+import sqlite3
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
 from src.embedding_lanes import (
@@ -17,7 +18,6 @@ from src.embedding_lanes import (
     LANE_FASTEMBED,
     build_embedding_lanes,
     dedupe_results,
-    migrate_legacy_collection,
 )
 
 try:
@@ -44,6 +44,10 @@ ALWAYS_AVAILABLE = frozenset({
     # Ask the user a multiple-choice question for a decision/clarification.
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
+    # Copal is a bounded pure-read surface and must remain discoverable when a
+    # user says "read/edit this Copal note" without knowing its storage model.
+    "read_copal",
+    "manage_copal",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
 })
@@ -51,9 +55,9 @@ ALWAYS_AVAILABLE = frozenset({
 # Tools that the Personal Assistant always has access to during scheduled
 # check-ins and proactive tasks, in addition to RAG-selected tools.
 ASSISTANT_ALWAYS_AVAILABLE = frozenset({
-    "list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email",
+    "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email",
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
-    "manage_calendar", "manage_notes", "manage_tasks",
+    "manage_calendar", "manage_notes", "manage_tasks", "read_copal", "manage_copal",
     "manage_memory", "web_search", "read_file",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
@@ -71,6 +75,7 @@ COLLECTION_NAME = "odysseus_tool_index"
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
 BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
+    "search_code": "Read authorized active Workspace code: exact symbols, segmented identifiers, typo suggestions, file outline, witnessed incoming callers/impact, outgoing dependencies and directed paths. Read bounded current source windows. No index/admit/erase controls, no arbitrary root or owner; semantic capability is explicitly unavailable.",
     "bash": "Run shell commands on the server. Install packages, git operations, builds, system info, process management. Prefer a dedicated tool whenever one fits the job (file read/write/edit, search, listing); use bash only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "python": "Execute Python code for computation, data processing, math, scripting, and parsing. Not for writing code for the user. Prefer a dedicated tool for reading, writing, or searching files; use python only for what no dedicated tool covers. Do not use for web lookup/search; use web_search or web_fetch when web tools are available.",
     "web_search": "Quick single web lookup for a fact, current event, latest/current information, or doc mid-task. Use this instead of bash/curl/python/requests for web searches. NOT for 'research X' / 'do research on X' requests — those are deep-research jobs (use trigger_research). web_search = one query; trigger_research = a full researched report in the sidebar.",
@@ -79,9 +84,13 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
-    "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
+    "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; shell writes are contained to it with bubblewrap when available. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
+    "publish_file": "Post a downloadable copy of an accessible local file and add it to Files. Use for 'give me a download link', 'post this zip', or 'make this file downloadable'. Owner links require the user's login; public links are anonymous and expiring. The user can break links or delete the managed copy from Files.",
     "write_file": "Write/create or fully rewrite a file ON DISK (source code, configs, project files). Use for new files or full rewrites — NOT create_document (editor panel) and NOT a bash heredoc.",
     "edit_file": "Edit an existing file ON DISK by exact string replacement (fix a bug, change a function). Shows a diff. The tool for changing files on disk — NOT edit_document (editor panel) and NOT bash sed/heredoc.",
+    "apply_patch": "Apply a multi-file patch to source files ON DISK. Use for implementation, refactors, and bug fixes where several edits belong together. Workspace-confined and returns a diff. Prefer over bash redirects/heredocs/sed.",
+    "manage_files": "Move a regular file without overwriting, move it to recoverable trash, restore by trash id, or list trash. Use instead of shell rm/mv so stale sources conflict and deletes remain recoverable.",
+    "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
     "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
     "update_document": "Replace the entire active document content. ONLY for full rewrites (>50% changed). Do not use for small edits — use edit_document instead.",
@@ -93,15 +102,17 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_models": "List all available AI models and their endpoints.",
     "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'). Use for 'rename my chats', 'rename this chat', 'archive/delete a chat'.",
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
+    "read_copal": "Read Copal's owner-scoped Notes, Wiki, Timeline, Galaxy, Graph, Mind, Bases, TreeHouse, or Meatbag Tasks through bounded pure reads. Use for explicit Copal/view requests and for an active Copal resource; pass a logical workspace and stable id when known. This never writes data.",
+    "manage_copal": "Create, edit, organize, and maintain Copal resources through exact semantic actions. Use only for explicit Copal mutation requests; high-impact operations require a server preview token and conflicts are terminal.",
     "recall_memory": "Read-only memory recall: search saved memories (or fetch one by id) when the memory index lists a topic relevant to the request. Cannot add, edit, or delete.",
     "manage_skills": "Skill management: add, update, publish, or search reusable skills/presets.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
-    "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
+    "manage_endpoints": "List managed provider connections and stable model routes.",
     "manage_mcp": "MCP server management: list, add, delete, reconnect servers, or list available tools.",
     "manage_webhooks": "Webhook management: list, add, delete, enable, or disable webhooks.",
     "api_call": "Call a configured API integration by name (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, RSS reader, git forge, bookmark manager, smart home, or any other registered service). Make a GET/POST/PUT/PATCH/DELETE request to the integration's endpoint path, with an optional JSON body. Use whenever the user asks to query or control one of their connected integrations/services.",
     "manage_tokens": "API token management: list, create, or delete API access tokens.",
-    "manage_documents": "List, read, delete, or tidy documents in the editor panel. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes a doc (only way to delete). Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
+    "manage_documents": "List or read documents and delete only a selected document. action='list' returns clickable rows (most-recent first) so the user can open any doc by clicking. action='read' (aka view/open/get) with document_id returns the content; supports offset=<N> + limit=<N> to page through large docs (response includes next_offset when more remains, so you can keep calling with offset=next_offset). action='delete' with document_id removes that selected doc. Use this for ANY 'show/read/list/open my documents/docs/files/notes' request — never shell or curl.",
     "manage_research": "List, read/open, or delete saved DEEP RESEARCH results from the Library. action='list' returns clickable [query](#research-<id>) rows (most-recent first). action='read' (aka open/view/get) with id returns the report + sources. action='delete' with id removes it. Use this for ANY 'open/read/find/delete my research / that report / the research on X' request. NOTE: this is for EXISTING research; to START new research use trigger_research.",
     "manage_settings": "Change ANY real app setting (the ones the Settings panel writes) so the user never has to open it: TTS voice/provider/speed, STT, search engine + result count, default/teacher/task/utility/vision/image/research models, image quality, reminder channel (browser/email/ntfy), agent timeout/tool-call budget, and more. action=set with key (friendly aliases ok: voice, 'search engine', 'default model', 'teacher model', 'image quality', 'reminder channel'...) + value; get/list/reset too. Also toggles tools on/off (disable_tool/enable_tool/list_tools). Secrets/API keys are read-only. Use for any 'change my…/set my…/use X for…/turn on…' preference request.",
     "create_session": "Create a new chat with a name and model.",
@@ -110,10 +121,12 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "search_chats": "Search past session transcripts across chats.",
     "ask_user": "Ask the user a multiple-choice question to get a decision or clarification. Use this when the task is genuinely ambiguous and the answer changes what you do next — pick between approaches, confirm an assumption, choose among options — instead of guessing. Provide a clear `question` and 2-6 `options` (each with a short `label`, optional `description`). Omit `multi`/keep it false unless the question explicitly permits choosing multiple options. Calling this ENDS your turn: the user sees clickable buttons and their choice arrives as your next message. Don't use it for things you can decide from context or sensible defaults, or for irreversible-action confirmation if a dedicated flow exists.",
     "update_plan": "Write back to the ACTIVE PLAN while executing an approved plan: mark steps done or revise them. After finishing a step call this with the full checklist and that step marked done; when the user asks to change the plan call it with the revised checklist. Always pass the COMPLETE markdown checklist (`- [ ]` / `- [x]`), not a diff. The user's docked plan window updates live. No effect when there is no active plan.",
-    "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, memories/brain, skills, settings, cookbook) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply <body text>` (or structured body) to open an email reply draft document without sending. USE THIS whenever the user says to write/draft a reply or tells you what to say — opening an empty draft or sending immediately is wrong. Body can continue on subsequent lines for multi-line replies. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
+    "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, memories/brain, skills, settings, cookbook, usage) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply <body text>` (or structured body) to open an email reply draft document without sending. USE THIS whenever the user says to write/draft a reply or tells you what to say — opening an empty draft or sending immediately is wrong. Body can continue on subsequent lines for multi-line replies. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
     "list_email_accounts": "List configured email accounts and default status. Use before reading or sending mail when the user mentions Gmail, work mail, custom domain mail, another mailbox, or asks to compare/check multiple inboxes.",
     "list_emails": "List emails for a folder/account, newest first, including read messages by default. Shows subject, sender, date, UID, account, and AI summary. Check inbox, find emails needing replies. Supports account from list_email_accounts for Gmail/work/custom mailboxes. For last/latest/newest email, use max_results=1 and unread_only=false.",
     "read_email": "Read the full content of a specific email by UID or Message-ID. View email body, check details. Supports account from list_email_accounts when the UID belongs to a non-default mailbox.",
+    "scan_email_unsubscribes": "Scan recent email headers for spam/newsletter unsubscribe candidates. Review-only; returns UIDs, reasons, and mailto/web unsubscribe methods.",
+    "unsubscribe_email": "Execute an approved unsubscribe action by UID. Mailto methods are sent/staged; web URL methods return exact browser/web instructions.",
     "send_email": "Send a new email via SMTP. Provide recipient, subject, body, and optional account from list_email_accounts. For replying to a thread use reply_to_email instead.",
     "reply_to_email": "SEND a reply email immediately by UID. Do not use for write/draft/open/start reply requests; use ui_control open_email_reply with body so the user can review. Only use when the user explicitly says to send now. For send requests, use the exact UID and account from latest read_email/list_emails output; never invent UID 1. Threads automatically with In-Reply-To/References, prefixes Re:, marks original as Answered.",
     "archive_email": "Move an email out of the inbox into the Archive folder. Use after handling messages you want to keep but get out of the way.",
@@ -132,20 +145,21 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_downloads": "List in-progress HuggingFace model downloads in the Cookbook. Shows model name, phase, percent, session ID. Use for 'what's downloading', 'show my downloads', 'check download progress'.",
     "cancel_download": "Cancel an in-progress model download by tmux session ID. Use for 'cancel the download', 'stop downloading X', 'kill the download'. Call list_downloads first to get the session_id.",
     "search_hf_models": "Search HuggingFace for models matching a query (e.g. 'qwen 8B', 'flux', 'llama-3 instruct'). Returns ranked repo IDs with sizes and download counts. Use for 'find a model', 'search huggingface for X', 'what models are there for Y'.",
-    "list_cached_models": "List models already cached on disk locally or on a remote host. Accepts friendly Cookbook server names like ajax. Use for 'what models do I have', 'show cached models', 'is X downloaded', 'list my models'. Avoids re-downloading.",
-    "list_serve_presets": "List saved Cookbook serve presets (templates with model+host+port+cmd). Always call this BEFORE serve_model when the user asks to launch a known model — they probably have a preset for it from the UI.",
+    "list_cached_models": "List models already cached on disk locally or on a remote host. Accepts friendly Cookbook server names like workstation. Use for 'what models do I have', 'show cached models', 'is X downloaded', 'list my models'. Avoids re-downloading.",
+    "list_serve_presets": "List saved Cookbook serve presets (templates with model+host+port+cmd). Call this BEFORE raw serve_model when the user asks to launch a known model manually.",
     "serve_preset": "Launch a saved Cookbook serve preset by name. Reuses the exact tmux command + host the user already saved. Use for 'run stable diffusion 3.5', 'serve vllm-qwen', 'start the inpaint model' — preset-name matches the user's UI labels.",
     "adopt_served_model": "Register an existing tmux model server (one started manually or outside the cookbook flow) into Cookbook tracking AND add it as a chat endpoint. Use when the user (or a previous turn) launched something via ssh+tmux and now wants it visible in the UI, stoppable via stop_served_model, and usable in the model picker.",
     "list_cookbook_servers": "List the cookbook's configured servers (remote GPU boxes + local) and which is the current default. Use this BEFORE download_model/serve_model when the user didn't name a host — to decide where to run, or to ask the user which server when ambiguous. Downloads/serves default to the cookbook's selected server, NOT localhost.",
-    "app_api": "Generic loopback to allowed Odysseus internal endpoints. Use this when the user wants something the UI can do but there's no named tool for it. Covers calendar, gallery, library/documents, memory, notes, tasks, settings, research, compare, cookbook GPUs/state — allowed UI buttons hit /api/* endpoints and you can hit them too. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked; do NOT use app_api for shell commands, package installs, engine rebuilds, or PID signalling. Use named command tooling for shell commands. action='endpoints' with filter=<keyword> lists available endpoints. action='call' takes method+path+body. Hits same routes the UI uses — auth flows free. NOTE: themes are NOT an API endpoint — use the ui_control tool (create_theme / set_theme), not app_api. SESSIONS/CHATS: do NOT use app_api for these — GET /api/sessions returns EMPTY for tool calls (it's owner-filtered and tool calls authenticate as a different identity). EMAIL ACCOUNTS: do NOT use /api/email/accounts via app_api; use list_email_accounts, list_emails, and read_email instead. To list/rename/archive/delete/fork chats use the list_sessions and manage_session tools instead.",
+    "app_api": "Generic loopback to allowed Open Clank internal endpoints. Use this when the user wants something the UI can do but there's no named tool for it. Covers calendar, gallery, library/documents, memory, notes, tasks, settings, research, compare, cookbook GPUs/state — allowed UI buttons hit /api/* endpoints and you can hit them too. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked; do NOT use app_api for shell commands, package installs, engine rebuilds, or PID signalling. Use named command tooling for shell commands. action='endpoints' with filter=<keyword> lists available endpoints. action='call' takes method+path+body. Hits same routes the UI uses — auth flows free. NOTE: themes are NOT an API endpoint — use the ui_control tool (create_theme / set_theme), not app_api. SESSIONS/CHATS: do NOT use app_api for these — GET /api/sessions returns EMPTY for tool calls (it's owner-filtered and tool calls authenticate as a different identity). EMAIL ACCOUNTS: do NOT use /api/email/accounts via app_api; use list_email_accounts, list_emails, and read_email instead. To list/rename/archive/delete/fork chats use the list_sessions and manage_session tools instead.",
     "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
-    "manage_bg_jobs": "Inspect and control detached background `bash` jobs (the ones started with a `#!bg` marker). action='list' shows this chat's jobs (id/status/age/command); action='output' returns a job's captured output so far (check on a long-running job, or re-read a finished one); action='kill' stops a runaway job by id. Use for 'is the background job done', 'check on that job', 'show the build output', 'kill the background job', 'stop the bg task'. output/kill need a job_id from list.",
+    "manage_bg_jobs": "Start and control durable workspace-contained shell sessions scoped to this owner/chat/workspace. Actions: start, poll, write, wait, terminate, list, tail. Tail uses a bounded byte cursor; terminate tears down the process tree.",
+    "capture_desktop": "Capture one opted-in display, visible window, or bounded region on macOS or Windows for the current task; retain it through Files without exposing a host path.",
 }
 
 
-class ToolIndex:
-    """ChromaDB-backed tool index for RAG-based tool selection."""
+class _ChromaToolIndex:
+    """Legacy Chroma-backed tool index retained for migration/tests only."""
 
     def __init__(self):
         self._lanes = build_embedding_lanes(COLLECTION_NAME)
@@ -156,7 +170,7 @@ class ToolIndex:
             (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
             self._lanes[0].collection,
         )
-        migrate_legacy_collection(COLLECTION_NAME, self._lanes)
+
         self._fingerprint = ""
         self._mcp_generation = -1
         self._healthy = True
@@ -347,12 +361,13 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        frozenset({"source code", "code search", "symbol", "function", "callers", "callees", "codebase", "repository", "workspace code"}): {"search_code"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
         # believed it had only email tools and refused web/other tasks (#1707).
         frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
-            {"list_email_accounts", "list_emails", "read_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
+            {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
@@ -363,6 +378,10 @@ class ToolIndex:
             {"manage_bg_jobs"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
+        # Explicit Copal/view language selects the canonical Redb-backed read
+        # surface; an unqualified note still retains legacy manage_notes.
+        frozenset({"copal", "timeline", "wiki", "galaxy", "graph", "mind", "base", "bases", "treehouse", "meatbag tasks", "this copal note", "active copal"}):
+            {"read_copal", "manage_copal"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
         # keywords to surface the right tools (NOT app_api — /api/sessions is
@@ -476,8 +495,10 @@ class ToolIndex:
             {"list_served_models", "stop_served_model"},
         # Cookbook serve / launch / preset / server selection
         frozenset({"serve", "launch", "spin up", "start the model", "run the model",
+                   "debug launch", "launch command", "drivers", "driver",
                    "preset", "presets", "which server", "what servers",
-                   "gpu box", "cookbook server", "vllm", "on the server", "on the gpu"}):
+                   "gpu box", "cookbook server", "vllm", "sglang", "mlx", "llama.cpp",
+                   "on the server", "on the gpu"}):
             {"serve_preset", "serve_model", "list_serve_presets",
              "list_cookbook_servers", "list_cached_models"},
         # Cookbook downloads
@@ -592,6 +613,132 @@ class ToolIndex:
         return base
 
 
+class FrankenmemoryToolIndex:
+    """Canonical deterministic tool catalogue stored beside Frankenmemory.
+
+    Tool descriptions are system-owned index data, not user memories.  Keeping
+    them in the Frankenmemory SQLite authority removes the default Chroma
+    dependency while preserving the existing retrieval and keyword policy
+    contract used by the agent.
+    """
+
+    backend = "frankenmemory"
+    _owner = "__open_clank_tool_index__"
+    _SCHEDULE_RE = _ChromaToolIndex._SCHEDULE_RE
+    _WEB_RE = _ChromaToolIndex._WEB_RE
+    _KEYWORD_HINTS = _ChromaToolIndex._KEYWORD_HINTS
+    get_tools_for_query = _ChromaToolIndex.get_tools_for_query
+
+    def __init__(self, db_path: Optional[str] = None):
+        from src.constants import FM_DB_PATH
+
+        self.db_path = os.path.abspath(str(db_path or FM_DB_PATH))
+        self._mcp_generation = -1
+        self._healthy = False
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fm_v2_tool_catalog (
+                    owner_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    tool_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, tool_name)
+                )
+                """
+            )
+        self._healthy = True
+
+    @property
+    def healthy(self) -> bool:
+        return self._healthy
+
+    def index_builtin_tools(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [
+            (self._owner, name, "builtin", f"Tool: {name}\n{description}", now)
+            for name, description in BUILTIN_TOOL_DESCRIPTIONS.items()
+        ]
+        wanted = {name for _, name, _, _, _ in rows}
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
+            if wanted:
+                placeholders = ",".join("?" for _ in wanted)
+                conn.execute(
+                    "DELETE FROM fm_v2_tool_catalog WHERE owner_id=? AND tool_type='builtin' AND tool_name NOT IN (%s)" % placeholders,
+                    [self._owner, *sorted(wanted)],
+                )
+            else:
+                conn.execute("DELETE FROM fm_v2_tool_catalog WHERE owner_id=? AND tool_type='builtin'", (self._owner,))
+            conn.executemany(
+                "INSERT INTO fm_v2_tool_catalog(owner_id,tool_name,tool_type,description,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(owner_id,tool_name) DO UPDATE SET tool_type=excluded.tool_type,description=excluded.description,updated_at=excluded.updated_at",
+                rows,
+            )
+
+    def index_mcp_tools(self, mcp_mgr, disabled_map: Optional[Dict] = None):
+        if not mcp_mgr:
+            return
+        generation = getattr(mcp_mgr, "_generation", 0)
+        if generation == self._mcp_generation:
+            return
+        try:
+            all_tools = mcp_mgr.get_tool_descriptions_for_prompt(disabled_map or {})
+        except Exception:
+            all_tools = ""
+        rows = []
+        current_server = ""
+        for line in (all_tools or "").strip().split("\n"):
+            line = line.strip()
+            if line.startswith("**") and line.endswith(":**"):
+                current_server = line.strip("*:")
+            elif line.startswith("- ") and ":" in line:
+                name, description = line[2:].split(":", 1)
+                name = name.strip()
+                if name:
+                    server = f" (server: {current_server})" if current_server else ""
+                    # McpManager already emits the callable, schema-qualified
+                    # name (mcp__<server>__<tool>). Store that identity verbatim
+                    # so agent_loop's selected-name/schema filter can match it.
+                    rows.append((self._owner, name, "mcp", f"Tool: {name}{server}\n{description.strip()}", datetime.now(timezone.utc).isoformat()))
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
+            conn.execute("DELETE FROM fm_v2_tool_catalog WHERE owner_id=? AND tool_type='mcp'", (self._owner,))
+            if rows:
+                conn.executemany(
+                    "INSERT INTO fm_v2_tool_catalog(owner_id,tool_name,tool_type,description,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(owner_id,tool_name) DO UPDATE SET tool_type=excluded.tool_type,description=excluded.description,updated_at=excluded.updated_at",
+                    rows,
+                )
+        self._mcp_generation = generation
+
+    def retrieve(self, query: str, k: int = 8) -> List[str]:
+        tokens = [token for token in re.findall(r"[\w-]+", str(query or "").casefold()) if len(token) > 1]
+        if not tokens:
+            return []
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
+            rows = conn.execute(
+                "SELECT tool_name,description FROM fm_v2_tool_catalog WHERE owner_id=?",
+                (self._owner,),
+            ).fetchall()
+        ranked = []
+        for name, description in rows:
+            haystack = f"{name} {description}".casefold()
+            present = sum(1 for token in tokens if token in haystack)
+            if not present:
+                continue
+            score = present / len(tokens)
+            if " ".join(tokens) in haystack:
+                score += 0.25
+            ranked.append((score, str(name)))
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        return [name for _, name in ranked[: max(1, min(int(k), 100))]]
+
+
+# The public/default type is canonical Frankenmemory. Legacy Chroma coverage
+# imports the explicit migration-only name.
+LegacyChromaToolIndex = _ChromaToolIndex
+ToolIndex = FrankenmemoryToolIndex
+
+
 # ── Singleton ──
 
 _tool_index: Optional[ToolIndex] = None
@@ -612,7 +759,7 @@ def get_tool_index() -> Optional[ToolIndex]:
     _last_attempt = now
 
     try:
-        _tool_index = ToolIndex()
+        _tool_index = FrankenmemoryToolIndex()
         _tool_index.index_builtin_tools()
         return _tool_index
     except Exception as e:

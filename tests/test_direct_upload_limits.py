@@ -1,4 +1,5 @@
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -61,9 +62,8 @@ def test_direct_upload_routes_use_bounded_reads():
         "routes/stt_routes.py": [
             "read_upload_limited(file, STT_MAX_AUDIO_BYTES",
         ],
-        "routes/gallery/gallery_routes.py": [
-            "read_upload_limited(file, GALLERY_UPLOAD_MAX_BYTES",
-            "read_upload_limited(file, GALLERY_TRANSFORM_UPLOAD_MAX_BYTES",
+        "routes/imps_routes.py": [
+            "read_upload_limited(upload, GALLERY_TRANSFORM_UPLOAD_MAX_BYTES",
         ],
         "routes/memory/memory_routes.py": [
             "read_upload_limited(file, MEMORY_IMPORT_MAX_BYTES",
@@ -79,4 +79,6 @@ def test_direct_upload_routes_use_bounded_reads():
     for path, needles in expectations.items():
         text = _source(path)
         for needle in needles:
-            assert needle in text
+            limit = needle.split(", ", 1)[1]
+            pattern = rf"read_upload_limited\(\s*file,\s*{re.escape(limit)}"
+            assert re.search(pattern, text)

@@ -7,17 +7,14 @@ httpx
 httpcore>=1.0,<2.0
 pydantic>=2.13.4
 pydantic-settings>=2.14.1
+jsonschema>=4.24,<5
 SQLAlchemy
 pypdf
 beautifulsoup4
 charset-normalizer
 numpy
-# Vector store + local embeddings for RAG, semantic memory, and tool
-# selection. Used on core agent paths, so installed by default — the app
-# still degrades to keyword fallback if they're ever missing.
-# chromadb-client is the lightweight HTTP client (talks to a standalone
-# ChromaDB service); fastembed runs local ONNX embeddings.
-chromadb-client
+# Local ONNX embeddings remain available for optional derived-index lanes.
+# Canonical Frankenmemory RAG does not require a vector service.
 fastembed
 youtube-transcript-api
 # Markdown rendering for research reports (src/visual_report.py).
@@ -38,10 +35,27 @@ python-dateutil
 # the protocol without it.
 caldav
 cryptography
+# Private macOS Files transport runtime. Protobuf/gRPC generators stay out of
+# the installed app; reproducibly generated client stubs are checked in.
+grpcio==1.83.0
+protobuf==7.35.1
 bcrypt
-mcp
+# Native client credentials live only in Keychain, Credential Manager, or
+# Secret Service.  The CLI deliberately falls back to process memory when the
+# operating system exposes no usable keyring backend.
+keyring>=25,<26
+# MCP low-level server/client API (plan work 7: reconcile under `<2`).
+# src/openclank/mcp_tool_server.py carries a 1.x/2.x decorator shim so the
+# pin is satisfiable either way.
+mcp<2
+# SQLite remains the default, but a configured PostgreSQL DATABASE_URL needs
+# the SQLAlchemy psycopg2 dialect at native-install time. The binary wheel
+# avoids requiring libpq headers and a compiler during bare-metal setup.
+psycopg2-binary
 pyotp
 qrcode[pil]
+# Pre-alpha Memory photo admission/metadata normalization (JPEG/PNG/WebP).
+Pillow>=12,<13
 croniter
 pytest
 pytest-asyncio
@@ -49,3 +63,12 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Native Windows desktop OCR projections (CPython 3.9-3.14, x64/ARM64 wheels).
+winrt-runtime==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Foundation==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Foundation.Collections==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Media.Ocr==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Graphics.Imaging==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Storage.Streams==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"
+winrt-Windows.Globalization==3.2.1; sys_platform == "win32" and python_version >= "3.9" and python_version < "3.15"

@@ -1,0 +1,491 @@
+{
+  "id": "batch-070",
+  "group": "treehouse.lesson.house-making",
+  "surface": "treehouse",
+  "entry_count": 40,
+  "character_count": 8740,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-making.clipboard-media.body",
+      "source": "Paste an image into a document and inspect where the asset landed in [Files](clank://files). Paste a second image with the same name and observe the collision handling.\n\n**What is distinctive:** the layout is explicit and adoption is protected. Nothing you already own is replaced without you.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:916"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.clipboard-media.explanation",
+      "source": "Pasting media follows a chosen clipboard layout: the asset lands where the layout says, with an owned name. Adoption of existing material is **protected** — the system will not silently overwrite a file you already have. Collisions surface as a choice, not a surprise.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:916"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.clipboard-media.result",
+      "source": "A pasted image that lands in the right place without overwriting anything.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:916"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.clipboard-media.title",
+      "source": "Clipboard media layout and protected adoption",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:916"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.clipboard-media.whyThisHelps",
+      "source": "Media that lands predictably is media you can find later. Protected adoption is why a paste can be trusted near work you care about.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:916"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.files-workspaces.body",
+      "source": "Open [Files](clank://files) and browse. Open the same path from [Editor](clank://editor) and confirm it is the same resource.\n\n**What is distinctive:** Files and Editor share one resource identity. A path is not a copy — it is the same material seen from two places.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:887"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.files-workspaces.explanation",
+      "source": "[Files](clank://files) is the file tree. A **registered** workspace is one the installation knows about and can manage; a **loose** workspace is ordinary material you pointed at. Both are readable, and Files and Editor share one resource space — the same file is the same file.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:887"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.files-workspaces.result",
+      "source": "A file opened from Files that resolves to the same resource Editor sees.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:887"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.files-workspaces.title",
+      "source": "Files and registered versus loose workspaces",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:887"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.files-workspaces.whyThisHelps",
+      "source": "Knowing which kind of workspace you are in tells you what the assistant may do and what recovery can promise. One resource space means no export step just to edit what you can already see.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:887"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.body",
+      "source": "Open an image from [Files](clank://files) in Imps. Add a second editable layer. Save the project and reopen it.\n\n**Observable result:** the project reopens with the same project revision and the same layer identities. To undo the save, restore from the project's history and the preimage replays.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:944"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.explanation",
+      "source": "**Imps** is the image editor. A project keeps layers, masks and text as editable structure — not a flattened blob. Saving a managed edit captures a preimage first, so the original is recoverable from the project's history. Gallery assets are Files assets; Imps is where you edit them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:944"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.practice.cleanup",
+      "source": "Delete the practice project and its assets from Files when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:972"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.practice.expectedEvidence",
+      "source": "Reopening shows the same project revision and layer identities.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:973"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.practice.seed",
+      "source": "One image project with two layers: base plus one text or mask layer.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:971"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.practice.title",
+      "source": "Small editable practice image",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:970"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.result",
+      "source": "An image project with two editable layers, saved and reopened intact.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:944"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.title",
+      "source": "Imps layers, masks and text — and original-save recovery",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:944"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.imps-layers.whyThisHelps",
+      "source": "Editable layers are how an image stays useful after the first change. The preimage is why you can experiment: the original is not gone, it is retained.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:944"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.body",
+      "source": "Make a change to a practice document and record a checkpoint. Change it again. From the document's history, restore the retained version.\n\n**Observable result:** the restore commits and the resulting content hash matches the retained version. A digest-only or observed-after claim is not a restore receipt.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1010"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.explanation",
+      "source": "Lore retains versions of your work with the receipts needed to restore them. A restore commits a real change: the retained version's content is written back, and the result is confirmed against that version's hash. The restore is itself recorded, so you can go forward again.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1010"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.practice.cleanup",
+      "source": "Delete the practice document when finished; its history goes with it.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1039"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.practice.expectedEvidence",
+      "source": "The restore commits and the content hash matches the retained version.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1040"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.practice.seed",
+      "source": "Edit a practice document, checkpoint it, edit again, then restore the checkpoint.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1038"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.practice.title",
+      "source": "Recoverable practice version",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1037"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.result",
+      "source": "A document version restored from retained history, confirmed by content hash.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1010"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.title",
+      "source": "A Lore restore on a practice artifact",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1010"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.lore-restore.whyThisHelps",
+      "source": "Recovery you can verify is recovery you can trust. The hash check is the difference between \"it seems fine\" and \"this is the version I chose.\"",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1010"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.body",
+      "source": "Export the practice Imps project. Inspect the artifact.\n\n**Observable result:** the export confirms an editable artifact with a valid project manifest and a complete asset set. A bare Export click without a committed artifact does not count.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:978"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.explanation",
+      "source": "Exporting an Imps project produces an editable artifact: the project structure plus its assets, with a manifest describing them. Clicking Export is not the result — a committed export with a valid manifest is.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:978"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.practice.cleanup",
+      "source": "Delete the export artifact when finished if you do not need it.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1004"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.practice.expectedEvidence",
+      "source": "The export artifact contains a valid project manifest and its asset set.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1005"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.practice.seed",
+      "source": "Export the two-layer practice project and inspect its manifest.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1003"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.practice.title",
+      "source": "Practice project export",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1002"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.result",
+      "source": "An export artifact with a valid project manifest and asset set.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:978"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.title",
+      "source": "Editable project export",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:978"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-making.project-export.whyThisHelps",
+      "source": "An editable export is what makes work portable and reviewable. Someone else can open it and see the layers, not just a picture of them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:978"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.body",
+      "source": "Export the disposable practice material as a scoped export. Open its manifest and check the contents against what you selected.\n\n**Observable result:** the export finishes and its manifest validation succeeds, attributed to you. A filename on disk alone does not qualify.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1045"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.explanation",
+      "source": "A scoped export packages the material you selected and writes a manifest describing exactly what is inside. Reading the manifest is how you confirm the export is complete and nothing extra rode along. Filename existence is not proof.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1045"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-making.scoped-exports.practice.cleanup",
+      "source": "Delete the export artifact when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1073"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    }
+  ]
+}

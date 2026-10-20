@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-clank.local/contracts/frankenmemory/v2/schema.json",
+  "title": "Open Clank Frankenmemory v2 wire contract",
+  "type": "object",
+  "required": ["contract_version", "operation", "scope"],
+  "properties": {
+    "contract_version": {"const": "frankenmemory.v2"},
+    "operation": {"$ref": "#/$defs/operation"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "request_id": {"type": "string", "minLength": 1},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "operation": {
+      "enum": [
+        "scope.resolve",
+        "entity.create", "entity.get", "entity.update", "entity.history",
+        "knowledge.create", "knowledge.get", "knowledge.list", "knowledge.questions",
+        "knowledge.update", "knowledge.history", "knowledge.diff", "knowledge.blame",
+        "knowledge.revert", "conflict.record", "conflict.resolve"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "required": ["owner_id"],
+      "properties": {
+        "owner_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "workspace_id": {"type": ["string", "null"], "minLength": 1},
+        "project_id": {"type": ["string", "null"], "minLength": 1},
+        "session_id": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false,
+      "allOf": [{
+        "if": {"required": ["project_id"], "properties": {"project_id": {"type": "string"}}},
+        "then": {"required": ["workspace_id"], "properties": {"workspace_id": {"type": "string"}}}
+      }]
+    },
+    "typed_value": {
+      "oneOf": [
+        {"type": "object", "required": ["type"], "properties": {"type": {"const": "null"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "string"}, "value": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "number"}, "value": {"type": "number"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "boolean"}, "value": {"type": "boolean"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "entity_ref"}, "value": {"type": "object", "required": ["entity_id"], "properties": {"entity_id": {"type": "string", "minLength": 1}}, "additionalProperties": false}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"enum": ["time", "duration", "uri"]}, "value": {"type": "string"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "object"}, "value": {"type": "object"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "value"], "properties": {"type": {"const": "list"}, "value": {"type": "array"}}, "additionalProperties": false}
+      ]
+    },
+    "entity": {
+      "type": "object",
+      "required": ["entity_id", "scope", "entity_type", "canonical_label", "revision"],
+      "properties": {
+        "entity_id": {"type": "string", "minLength": 1},
+        "scope": {"$ref": "#/$defs/scope"},
+        "entity_type": {"type": "string", "minLength": 1},
+        "canonical_label": {"type": "string"},
+        "aliases": {"type": "array", "items": {"type": "string"}},
+        "roles": {"type": "array", "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "revision": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "knowledge_block": {
+      "type": "object",
+      "required": ["block_id", "scope", "subject_entity_id", "predicate", "claim_slot", "value", "status", "revision"],
+      "properties": {
+        "block_id": {"type": "string", "minLength": 1},
+        "scope": {"$ref": "#/$defs/scope"},
+        "subject_entity_id": {"type": "string", "minLength": 1},
+        "predicate": {"type": "string", "minLength": 1},
+        "claim_slot": {"type": "string", "minLength": 1},
+        "cardinality": {"enum": ["single", "set", "ordered_many", "time_scoped"]},
+        "value": {"$ref": "#/$defs/typed_value"},
+        "expected_value_type": {"type": ["string", "null"]},
+        "kind": {"type": "string", "minLength": 1},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "status": {"enum": ["open", "active", "superseded", "retracted"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "trust": {"type": "number", "minimum": 0, "maximum": 1},
+        "activation": {"type": "string", "minLength": 1},
+        "activation_rationale": {"type": ["string", "object"]},
+        "revision": {"type": "integer", "minimum": 1},
+        "expected_revision": {"type": ["integer", "null"], "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {"enum": ["scope_denied", "not_found", "validation", "stale_revision", "revision_conflict", "source_mismatch", "index_degraded", "unsupported_contract"]},
+        "message": {"type": "string"},
+        "retryable": {"type": "boolean"},
+        "current": {"type": ["object", "null"]},
+        "proposal": {"type": ["object", "null"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}

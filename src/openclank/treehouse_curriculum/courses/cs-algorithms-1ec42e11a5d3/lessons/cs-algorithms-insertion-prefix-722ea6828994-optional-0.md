@@ -1,0 +1,1 @@
+Prefixes: [3A]; [1B,3A]; [1B,3A,3C]; [1B,2D,3A,3C]. Prefix contains exactly the processed records in stable sorted order. Equal keys do not shift past each other. Empty/single input is unchanged. Reversed distinct keys can shift 1+2+…+(n−1) records, Θ(n²).

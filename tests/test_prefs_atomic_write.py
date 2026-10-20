@@ -45,3 +45,48 @@ def test_save_for_user_preserves_flat_prefs_when_auth_disabled(monkeypatch, tmp_
     data = json.loads(prefs_file.read_text(encoding="utf-8"))
     assert data == {"theme": "dark"}
     assert prefs_routes._load_for_user(None) == {"theme": "dark"}
+
+
+def test_memory_mode_backfill_freezes_existing_choices_and_is_idempotent(
+    monkeypatch, tmp_path
+):
+    prefs_file = tmp_path / "data" / "user_prefs.json"
+    prefs_file.parent.mkdir()
+    prefs_file.write_text(
+        json.dumps(
+            {
+                "_users": {
+                    "alice": {"auto_memory": False},
+                    "bob": {"theme": "dark"},
+                    "carol": {"memory_mode": "MANUAL"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
+
+    assert prefs_routes.backfill_memory_modes(["alice", "bob", "carol"])
+    assert not prefs_routes.backfill_memory_modes(["alice", "bob", "carol"])
+
+    users = json.loads(prefs_file.read_text(encoding="utf-8"))["_users"]
+    assert users["alice"]["memory_mode"] == "off"
+    assert users["bob"]["memory_mode"] == "automatic"
+    assert users["carol"]["memory_mode"] == "manual"
+
+
+def test_new_account_without_backfill_uses_manual_default(monkeypatch, tmp_path):
+    from src.memory_gate import memory_mode
+
+    prefs_file = tmp_path / "data" / "user_prefs.json"
+    prefs_file.parent.mkdir()
+    prefs_file.write_text(
+        json.dumps({"_users": {"existing": {"auto_memory": True}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prefs_routes, "PREFS_FILE", str(prefs_file))
+
+    prefs_routes.backfill_memory_modes(["existing"])
+
+    assert memory_mode(prefs_routes._load_for_user("existing")) == "automatic"
+    assert memory_mode(prefs_routes._load_for_user("new-user")) == "manual"

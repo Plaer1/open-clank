@@ -1,0 +1,1 @@
+Assuming the whole tree already has the claimed size is circular; assume only smaller pieces.

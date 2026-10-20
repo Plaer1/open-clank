@@ -1,0 +1,736 @@
+{
+  "id": "batch-059",
+  "group": "themes",
+  "surface": "themes",
+  "entry_count": 60,
+  "character_count": 4061,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.advanced.settings",
+      "source": "Advanced settings",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:869"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bad.hex.for",
+      "source": "Bad hex for",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:2034"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.bounce.force",
+      "source": "Bounce force",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.button.input.select.theme.opacity.wrap",
+      "source": "button, input, select, .theme-opacity-wrap",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:2184"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.character.variety",
+      "source": "Character variety",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:915"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.dark.e56eeab5",
+      "source": "Clanker Dark",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:51"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.light",
+      "source": "Clanker Light",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:52"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clanker.themes.bundle.and.lock.liga.comic.mono",
+      "source": "Clanker themes bundle and lock Liga Comic Mono",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1094"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.collision.force",
+      "source": "Collision force",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:923"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.color.variance",
+      "source": "Color variance",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:920"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.content",
+      "source": "content",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:534"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom.themes.delete.one.first",
+      "source": "custom themes. Delete one first.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1632",
+        "static/js/theme.js:2046"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.theme",
+      "source": "Delete theme",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1422"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.theme.value",
+      "source": "Delete theme \"{0}\"?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1468"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drift.speed",
+      "source": "Drift speed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:892"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.drift.speed.variation",
+      "source": "Drift speed variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:893"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.emoji.rarity.1.in",
+      "source": "Emoji rarity (1 in)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:931"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enable.color.variance",
+      "source": "Enable color variance",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.enter.a.name",
+      "source": "Enter a name.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1615"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.flicker",
+      "source": "Flicker",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:910"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.glow.likelihood",
+      "source": "Glow likelihood",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:898"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gpt.bacef3aa",
+      "source": "GPT",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:54"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gravity",
+      "source": "Gravity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:922"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.hamburger.menu.04ea4d9c",
+      "source": "Hamburger Menu",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:410"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.intensity.variation",
+      "source": "Intensity variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:895"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.invalid.json",
+      "source": "Invalid JSON.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:2026"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.invalid.name",
+      "source": "Invalid name.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1617"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.link",
+      "source": "link",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:610",
+        "static/js/theme.js:618"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.logo.gradient.end",
+      "source": "Logo Gradient End",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:409"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.long.snake.lifetime.scale",
+      "source": "Long snake lifetime scale",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:888"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.longer.snakes.disappear.sooner",
+      "source": "Longer snakes disappear sooner",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:887"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.max",
+      "source": "Max",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:1632",
+        "static/js/theme.js:2046"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.maximum.opacity",
+      "source": "Maximum opacity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:917"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.middle.intensity",
+      "source": "Middle intensity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:896"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.minimum.opacity",
+      "source": "Minimum opacity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:916"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.missing.feb2bbaa",
+      "source": "Missing:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:2031"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.number.of.snakes",
+      "source": "Number of snakes",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:878"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.paint.trail.on.grid",
+      "source": "Paint trail on grid",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:882"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quantity",
+      "source": "Quantity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:908"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rain.downward",
+      "source": "Rain downward",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:912"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rain.speed",
+      "source": "Rain speed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:909"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rare.emoji.mix",
+      "source": "Rare emoji mix",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:930"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reverse.chance",
+      "source": "Reverse chance",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:913"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotation.likelihood",
+      "source": "Rotation likelihood",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:899"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotation.speed",
+      "source": "Rotation speed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:900"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotation.speed.variation",
+      "source": "Rotation speed variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:901"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.short.snake.lifetime.scale",
+      "source": "Short snake lifetime scale",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:886"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shorter.snakes.last.longer",
+      "source": "Shorter snakes last longer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:885"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sidebar.bg",
+      "source": "Sidebar Bg",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:407"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.size.variance",
+      "source": "Size variance",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:918"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.size.variation",
+      "source": "Size variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:894"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.snake.length.variation",
+      "source": "Snake length variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:883"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.snake.lifetime.variation",
+      "source": "Snake lifetime variation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:884"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.snake.speed",
+      "source": "Snake speed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:879"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.spawn.in.waves",
+      "source": "Spawn in waves",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:914"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.speed.variation.amount",
+      "source": "Speed variation amount",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:881"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.spread",
+      "source": "Spread",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:911"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.total.quantity",
+      "source": "Total quantity",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:897"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vary.speed.per.snake",
+      "source": "Vary speed per snake",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:880"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.x2713.downloaded",
+      "source": "&#x2713; Downloaded!",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/theme.js:2003"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

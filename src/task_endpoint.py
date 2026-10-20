@@ -1,61 +1,12 @@
-"""Shared resolver for background-task AI endpoints."""
+"""Managed tool-free completion wrapper for background tasks."""
 
-from src.endpoint_resolver import (
-    resolve_chat_fallback_candidates,
-    resolve_endpoint,
-    resolve_utility_fallback_candidates,
-)
-from src.llm_core import llm_call_async_with_fallback
+import asyncio
+import uuid
+
 from src.interactive_gate import wait_for_interactive_quiet
 
 
-def resolve_task_endpoint(fallback_url=None, fallback_model=None, fallback_headers=None, owner=None):
-    """Return (endpoint_url, model, headers) for background tasks.
-
-    Reads task_endpoint_id / task_model from admin settings.
-    Falls back to the provided values when the setting is empty or the
-    endpoint cannot be resolved.
-    """
-    return resolve_endpoint("task", fallback_url, fallback_model, fallback_headers, owner=owner)
-
-
-def resolve_task_candidates(
-    fallback_url=None,
-    fallback_model=None,
-    fallback_headers=None,
-    owner=None,
-):
-    """Return ordered background-task LLM candidates.
-
-    Order:
-    1. configured Background Tasks endpoint/model, or caller fallback
-    2. Utility endpoint/model
-    3. Default endpoint/model
-    4. Utility fallback chain
-    5. Default fallback chain
-    """
-    candidates = []
-
-    def _append(url, model, headers):
-        if not url or not model:
-            return
-        key = (url, model)
-        if any((u, m) == key for u, m, _ in candidates):
-            return
-        candidates.append((url, model, headers or {}))
-
-    _append(*resolve_task_endpoint(fallback_url, fallback_model, fallback_headers, owner=owner))
-    _append(*resolve_endpoint("utility", owner=owner))
-    _append(*resolve_endpoint("default", owner=owner))
-    for url, model, headers in resolve_utility_fallback_candidates(owner=owner):
-        _append(url, model, headers)
-    for url, model, headers in resolve_chat_fallback_candidates(owner=owner):
-        _append(url, model, headers)
-
-    return candidates
-
-
-async def task_llm_call_async(
+async def task_complete_text(
     messages,
     *,
     fallback_url=None,
@@ -64,20 +15,43 @@ async def task_llm_call_async(
     owner=None,
     **kwargs,
 ):
-    """Call the shared background-task LLM candidate chain."""
-    candidates = resolve_task_candidates(
-        fallback_url=fallback_url,
-        fallback_model=fallback_model,
-        fallback_headers=fallback_headers,
-        owner=owner,
+    """Run a tool-free background completion through the managed task lane."""
+    from src.openclank.modality_facade import complete_text
+
+    # Compatibility-only inputs from pre-cutover callers. Provider transport
+    # data cannot cross the managed operation boundary.
+    del fallback_url, fallback_model, fallback_headers
+    purpose = str(kwargs.pop("purpose", "tasks") or "tasks").strip().lower()
+    model_route_id = kwargs.pop("model_route_id", None)
+    grant_id = kwargs.pop("grant_id", None)
+    root_operation_id = kwargs.pop("root_operation_id", None) or (
+        f"task-utility:{uuid.uuid4().hex}"
     )
-    if not candidates:
-        raise RuntimeError("No LLM endpoint available for background task")
+    temperature = kwargs.pop("temperature", None)
+    max_output_tokens = kwargs.pop(
+        "max_output_tokens",
+        kwargs.pop("max_tokens", None),
+    )
+    timeout = kwargs.pop("timeout", None)
+    # These legacy execution hints never granted tools and have no managed
+    # completion equivalent.
+    kwargs.pop("workload", None)
+    kwargs.pop("session_id", None)
+    kwargs.pop("cwd", None)
+    if kwargs:
+        unknown = ", ".join(sorted(kwargs))
+        raise TypeError(f"Unsupported managed task completion options: {unknown}")
     await wait_for_interactive_quiet("background task LLM")
-    kwargs.setdefault("workload", "background")
-    return await llm_call_async_with_fallback(
-        candidates,
+    completion = complete_text(
+        owner=owner or "local-installation",
         messages=messages,
-        owner=owner,
-        **kwargs,
+        purpose=purpose,
+        model_route_id=model_route_id,
+        grant_id=grant_id,
+        root_operation_id=root_operation_id,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
     )
+    if timeout is not None:
+        return await asyncio.wait_for(completion, timeout=float(timeout))
+    return await completion

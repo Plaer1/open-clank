@@ -1,0 +1,1 @@
+The exit is initially unreachable; opening the middle row's rightmost cell connects the path; the explanation honors four-neighbor movement.

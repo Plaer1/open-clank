@@ -1,0 +1,1 @@
+An optimality gap compares a candidate with an optimum or bound. Slack/redundancy may trade nominal cost for robustness. Economic allocative/productive efficiency and equilibrium efficiency are Games applications with explicit welfare assumptions.

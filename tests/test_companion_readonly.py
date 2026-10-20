@@ -1,119 +1,48 @@
-"""Owner-scope tests for the read-only companion bridge.
+"""Owner, share, privilege, and secrecy tests for companion model inventory."""
 
-Mirrors the direct-helper style of tests/test_null_owner_gates.py: exercise the
-small pure helpers against mock request state and owner values, so the scoping
-rule can't silently regress. A bearer token for owner A must never see owner B's
-rows, and legacy null-owner rows must not widen a token's access.
-"""
-
-import os
-import sys
-import types
-import json
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# core.database instantiates SQLAlchemy declarative classes at import time, which
-# blows up under conftest's sqlalchemy MagicMock stubs. companion.routes only
-# imports it lazily inside the /models handler, but stub it defensively so the
-# import is robust regardless of collection order.
-if "core.database" not in sys.modules:
-    _db = types.ModuleType("core.database")
-    _db.SessionLocal = MagicMock()
-    _db.ModelEndpoint = MagicMock()
-    sys.modules["core.database"] = _db
-
 import companion.routes as companion_routes
-from companion.routes import setup_companion_routes, token_owner, owner_can_see
+from companion.routes import setup_companion_routes, token_owner
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
 
-def _request(**state):
-    return SimpleNamespace(state=SimpleNamespace(**state))
+ROOT = Path(__file__).resolve().parents[1]
 
 
-class _Predicate:
-    def __init__(self, check):
-        self._check = check
-
-    def __call__(self, row):
-        return self._check(row)
-
-    def __or__(self, other):
-        return _Predicate(lambda row: self(row) or other(row))
-
-
-class _Column:
-    def __init__(self, name):
-        self.name = name
-
-    def __eq__(self, value):  # noqa: D401
-        return _Predicate(lambda row: getattr(row, self.name) == value)
+def _request(*, privileges=None, **state):
+    auth_manager = SimpleNamespace(
+        get_privileges=lambda _owner: privileges or {},
+    )
+    return SimpleNamespace(
+        state=SimpleNamespace(**state),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
+    )
 
 
-class _ModelEndpoint:
-    is_enabled = _Column("is_enabled")
-    model_type = _Column("model_type")
-    owner = _Column("owner")
-
-
-class _Query:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def filter(self, *predicates):
-        self._rows = [
-            row for row in self._rows
-            if all(predicate(row) for predicate in predicates)
-        ]
-        return self
-
-    def all(self):
-        return list(self._rows)
-
-
-class _DB:
-    def __init__(self, rows):
-        self._rows = rows
-        self.closed = False
-
-    def query(self, model):
-        assert model is _ModelEndpoint
-        return _Query(self._rows)
-
-    def close(self):
-        self.closed = True
-
-
-def _ep(
-    id,
-    name,
-    owner,
+def _route(
+    endpoint_id: str,
+    route_id: str,
+    model: str,
     *,
-    is_enabled=True,
-    model_type="llm",
-    base_url=None,
-    cached_models=None,
-    hidden_models=None,
-    supports_tools=False,
-    api_key="secret-key",
+    label: str,
+    tools: bool = False,
+    shared: bool = False,
+    disclosed_owner: str | None = None,
 ):
     return SimpleNamespace(
-        id=id,
-        name=name,
-        owner=owner,
-        is_enabled=is_enabled,
-        model_type=model_type,
-        base_url=base_url or f"https://{name}.example/v1",
-        cached_models=json.dumps(cached_models or [f"{name}-model"]),
-        hidden_models=json.dumps(hidden_models or []),
-        supports_tools=supports_tools,
-        api_key=api_key,
-        headers={"Authorization": "Bearer secret-header"},
+        public_endpoint_id=endpoint_id,
+        model_route_id=route_id,
+        provider_model_id=model,
+        display_name=model,
+        connection_label=label,
+        share_label=label if shared else None,
+        disclosed_owner=disclosed_owner,
+        capabilities={"tools": tools},
     )
 
 
@@ -125,121 +54,79 @@ def _models_route():
     raise AssertionError("GET /api/companion/models route not found")
 
 
-def _call_models_route(monkeypatch, rows, request):
-    db = _DB(rows)
-    db_mod = sys.modules["core.database"]
-    monkeypatch.setattr(db_mod, "SessionLocal", lambda: db)
-    monkeypatch.setattr(db_mod, "ModelEndpoint", _ModelEndpoint)
+def _call_models_route(monkeypatch, request, *, own=(), shared=()):
+    captured = {}
 
-    endpoint_mod = sys.modules.get("src.endpoint_resolver")
-    if endpoint_mod is None:
-        endpoint_mod = types.ModuleType("src.endpoint_resolver")
-        sys.modules["src.endpoint_resolver"] = endpoint_mod
-    monkeypatch.setattr(
-        endpoint_mod,
-        "build_chat_url",
-        lambda base_url: f"{base_url.rstrip('/')}/chat/completions",
-        raising=False,
-    )
+    def list_routes(owner):
+        captured["owner"] = owner
+        return list(own), list(shared)
 
+    monkeypatch.setattr(companion_routes, "list_chat_routes", list_routes)
     response = _models_route()(request)
-    assert db.closed is True
-    return response["endpoints"]
+    return response["endpoints"], captured
 
-
-def _endpoint_names(endpoints):
-    return [endpoint["name"] for endpoint in endpoints]
-
-
-# --- token_owner: who a request is attributed to ---------------------------
 
 def test_token_owner_bearer_resolves_to_token_owner():
-    # A paired bearer caller runs as the "api" pseudo-user, but must attribute
-    # to the token's real owner.
-    req = _request(api_token=True, api_token_owner="alice", current_user="api")
-    assert token_owner(req) == "alice"
+    request = _request(api_token=True, api_token_owner="alice", current_user="api")
+    assert token_owner(request) == "alice"
 
 
 def test_token_owner_cookie_uses_logged_in_user():
-    req = _request(api_token=False, current_user="alice")
-    assert token_owner(req) == "alice"
+    request = _request(api_token=False, current_user="alice")
+    assert token_owner(request) == "alice"
 
 
 def test_token_owner_none_when_unresolved():
-    req = _request(api_token=True, api_token_owner=None, current_user="api")
-    assert token_owner(req) is None
+    request = _request(api_token=True, api_token_owner=None, current_user="api")
+    assert token_owner(request) is None
 
 
-# --- owner_can_see: the read-scope rule ------------------------------------
-
-def test_owner_sees_their_own_rows():
-    assert owner_can_see("alice", "alice") is True
-
-
-def test_null_owner_legacy_rows_are_not_visible_to_authenticated_users():
-    assert owner_can_see(None, "alice") is False
-
-
-def test_null_owner_does_not_widen_access_to_others_rows():
-    # ...but a null-owner row must not be a backdoor to another OWNER's rows.
-    assert owner_can_see("bob", "alice") is False
-
-
-def test_cross_owner_is_blocked():
-    assert owner_can_see("bob", "alice") is False
-    assert owner_can_see("alice", "bob") is False
-
-
-def test_unauthenticated_owner_sees_only_shared_rows():
-    # owner=None (no resolved caller): only null-owner shared rows are visible,
-    # never any owned row.
-    assert owner_can_see(None, None) is True
-    assert owner_can_see("alice", None) is False
-
-
-# --- GET /api/companion/models: route-level scoping -----------------------
-
-def test_models_route_scopes_cookie_user_to_owned_rows(monkeypatch):
-    rows = [
-        _ep(1, "alice-endpoint", "alice"),
-        _ep(2, "shared-endpoint", None),
-        _ep(3, "bob-endpoint", "bob"),
-    ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
-
-    endpoints = _call_models_route(
-        monkeypatch,
-        rows,
-        _request(api_token=False, current_user="ignored"),
+def test_models_route_scopes_cookie_user_and_includes_accepted_shares(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "alice")
+    own = _route("pcn_alice", "pmr_alice", "own-model", label="Alice provider")
+    shared = _route(
+        "share:grant-1",
+        "pmr_shared",
+        "shared-model",
+        label="Team plan",
+        shared=True,
     )
 
-    assert _endpoint_names(endpoints) == ["alice-endpoint"]
-
-
-def test_models_route_scopes_api_token_to_token_owner(monkeypatch):
-    rows = [
-        _ep(1, "alice-endpoint", "alice"),
-        _ep(2, "shared-endpoint", None),
-        _ep(3, "bob-endpoint", "bob"),
-    ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "api")
-
-    endpoints = _call_models_route(
+    endpoints, captured = _call_models_route(
         monkeypatch,
-        rows,
+        _request(api_token=False, current_user="alice"),
+        own=[own],
+        shared=[shared],
+    )
+
+    assert captured == {"owner": "alice"}
+    assert [item["endpoint_id"] for item in endpoints] == [
+        "pcn_alice",
+        "share:grant-1",
+    ]
+
+
+def test_models_route_scopes_api_token_to_real_owner(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "api")
+    route = _route("pcn_alice", "pmr_alice", "model-1", label="Alice provider")
+
+    endpoints, captured = _call_models_route(
+        monkeypatch,
         _request(
             api_token=True,
             api_token_owner="alice",
             api_token_scopes=["chat"],
             current_user="api",
         ),
+        own=[route],
     )
 
-    assert _endpoint_names(endpoints) == ["alice-endpoint"]
+    assert captured == {"owner": "alice"}
+    assert [item["models"] for item in endpoints] == [["model-1"]]
 
 
 def test_models_route_rejects_api_token_without_chat_scope(monkeypatch):
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "api")
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "api")
 
     with pytest.raises(HTTPException) as exc:
         _models_route()(
@@ -256,148 +143,120 @@ def test_models_route_rejects_api_token_without_chat_scope(monkeypatch):
 
 
 def test_models_route_rejects_api_token_without_owner(monkeypatch):
-    rows = [
-        _ep(1, "alice-endpoint", "alice"),
-        _ep(2, "shared-endpoint", None),
-        _ep(3, "bob-endpoint", "bob"),
-    ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: None)
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: None)
 
     with pytest.raises(HTTPException) as exc:
-        _call_models_route(
-            monkeypatch,
-            rows,
+        _models_route()(
             _request(
                 api_token=True,
                 api_token_owner=None,
                 api_token_scopes=["chat"],
                 current_user="api",
-            ),
+            )
         )
 
     assert exc.value.status_code == 403
     assert "owner" in exc.value.detail
 
 
-def test_models_route_filters_hidden_models_and_secret_fields(monkeypatch):
-    rows = [
-        _ep(
-            1,
-            "alice-endpoint",
-            "alice",
-            base_url="https://alice.example/v1",
-            cached_models=["visible-model", "hidden-model"],
-            hidden_models=["hidden-model"],
-            supports_tools=True,
-            api_key="super-secret",
-        ),
+def test_models_route_projects_only_managed_secret_free_fields(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "alice")
+    routes = [
+        _route("pcn_alice", "pmr_b", "model-b", label="Private URL", tools=True),
+        _route("pcn_alice", "pmr_a", "model-a", label="Private URL"),
     ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
 
-    endpoints = _call_models_route(
+    endpoints, _ = _call_models_route(
         monkeypatch,
-        rows,
         _request(api_token=False, current_user="alice"),
+        own=routes,
     )
 
     assert endpoints == [{
-        "endpoint_id": 1,
-        "name": "alice-endpoint",
-        "endpoint_url": "https://alice.example/v1/chat/completions",
-        "models": ["visible-model"],
+        "endpoint_id": "pcn_alice",
+        "name": "Private URL",
+        "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+        "models": ["model-a", "model-b"],
         "supports_tools": True,
     }]
-    returned = endpoints[0]
-    assert "hidden-model" not in returned["models"]
-    assert set(returned) == {
+    assert set(endpoints[0]) == {
         "endpoint_id",
         "name",
         "endpoint_url",
         "models",
         "supports_tools",
     }
-    assert "api_key" not in returned
-    assert "headers" not in returned
-    assert "base_url" not in returned
-    assert "super-secret" not in repr(returned)
+    assert "api_key" not in repr(endpoints)
+    assert "Authorization" not in repr(endpoints)
+    assert "https://" not in repr(endpoints)
 
 
-def test_models_route_tolerates_invalid_cached_models_json(monkeypatch):
-    endpoint = _ep(1, "alice-endpoint", "alice")
-    endpoint.cached_models = "{not-json"
-    rows = [endpoint]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
-
-    endpoints = _call_models_route(
-        monkeypatch,
-        rows,
-        _request(api_token=False, current_user="alice"),
-    )
-
-    assert len(endpoints) == 1
-    returned = endpoints[0]
-    assert returned["name"] == "alice-endpoint"
-    assert returned["models"] == []
-    assert "api_key" not in returned
-    assert "headers" not in returned
-    assert "base_url" not in returned
-
-
-def test_models_route_tolerates_invalid_hidden_models_json(monkeypatch):
-    endpoint = _ep(
-        1,
-        "alice-endpoint",
-        "alice",
-        cached_models=["visible-model"],
-    )
-    endpoint.hidden_models = "{not-json"
-    rows = [endpoint]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
-
-    endpoints = _call_models_route(
-        monkeypatch,
-        rows,
-        _request(api_token=False, current_user="alice"),
-    )
-
-    assert len(endpoints) == 1
-    returned = endpoints[0]
-    assert returned["name"] == "alice-endpoint"
-    assert returned["models"] == ["visible-model"]
-    assert "api_key" not in returned
-    assert "headers" not in returned
-    assert "base_url" not in returned
-
-
-def test_models_route_filters_disabled_and_non_llm_endpoints(monkeypatch):
-    rows = [
-        _ep(1, "enabled-llm", "alice", is_enabled=True, model_type="llm"),
-        _ep(2, "legacy-null-type", "alice", is_enabled=True, model_type=None),
-        _ep(3, "disabled-llm", "alice", is_enabled=False, model_type="llm"),
-        _ep(4, "image-endpoint", "alice", is_enabled=True, model_type="image"),
+@pytest.mark.parametrize(
+    "allowed",
+    [
+        ["allowed-model"],
+        ["pmr_allowed"],
+    ],
+)
+def test_models_route_enforces_model_or_stable_route_allowlist(monkeypatch, allowed):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "alice")
+    routes = [
+        _route("pcn_alice", "pmr_allowed", "allowed-model", label="Provider"),
+        _route("pcn_alice", "pmr_denied", "denied-model", label="Provider"),
     ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
 
-    endpoints = _call_models_route(
+    endpoints, _ = _call_models_route(
         monkeypatch,
-        rows,
-        _request(api_token=False, current_user="alice"),
+        _request(
+            api_token=False,
+            current_user="alice",
+            privileges={
+                "allowed_models_restricted": True,
+                "allowed_models": allowed,
+            },
+        ),
+        own=routes,
     )
 
-    assert _endpoint_names(endpoints) == ["enabled-llm", "legacy-null-type"]
+    assert endpoints[0]["models"] == ["allowed-model"]
 
 
-def test_models_route_returns_built_chat_url(monkeypatch):
-    rows = [
-        _ep(1, "alice-endpoint", "alice", base_url="https://raw.example/v1"),
-    ]
-    monkeypatch.setattr(companion_routes, "get_current_user", lambda request: "alice")
+def test_models_route_block_all_models_returns_empty_catalogue(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "alice")
+    route = _route("pcn_alice", "pmr_alice", "model-1", label="Provider")
 
-    endpoints = _call_models_route(
+    endpoints, _ = _call_models_route(
         monkeypatch,
-        rows,
-        _request(api_token=False, current_user="alice"),
+        _request(
+            api_token=False,
+            current_user="alice",
+            privileges={"block_all_models": True},
+        ),
+        own=[route],
     )
 
-    assert endpoints[0]["endpoint_url"] == "https://raw.example/v1/chat/completions"
-    assert endpoints[0]["endpoint_url"] != "https://raw.example/v1"
+    assert endpoints == []
+
+
+def test_models_route_fails_closed_when_normalized_catalogue_fails(monkeypatch):
+    monkeypatch.setattr(companion_routes, "get_current_user", lambda _request: "alice")
+    monkeypatch.setattr(
+        companion_routes,
+        "list_chat_routes",
+        lambda _owner: (_ for _ in ()).throw(RuntimeError("private failure")),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        _models_route()(_request(api_token=False, current_user="alice"))
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "Provider catalogue is unavailable"
+
+
+def test_companion_source_has_no_legacy_provider_authority():
+    source = (ROOT / "companion" / "routes.py").read_text(encoding="utf-8")
+
+    assert "ModelEndpoint" not in source
+    assert "endpoint_resolver" not in source
+    assert "base_url" not in source
+    assert "api_key" not in source

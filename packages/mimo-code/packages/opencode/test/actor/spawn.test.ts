@@ -1,7 +1,7 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { FetchHttpClient } from "effect/unstable/http"
 import { afterEach, describe, expect } from "bun:test"
-import { Deferred, Effect, Layer } from "effect"
+import { Deferred, Effect, Fiber, Layer } from "effect"
 import { and, eq } from "drizzle-orm"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { Bus } from "../../src/bus"
@@ -27,13 +27,13 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Goal } from "../../src/session/goal"
-import { TaskGateState } from "../../src/task/gate-state"
 import { SessionStatus } from "../../src/session/status"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Snapshot } from "../../src/snapshot"
 import { ToolRegistry } from "../../src/tool"
 import { Truncate } from "../../src/tool"
+import { ActorTool } from "../../src/tool/actor"
 import { ActorRegistry } from "../../src/actor/registry"
 import { ActorWaiter } from "../../src/actor/waiter"
 import { Actor } from "../../src/actor/spawn"
@@ -49,7 +49,7 @@ import { Auth } from "../../src/auth"
 import { Database } from "../../src/storage"
 import { MessageTable } from "../../src/session/session.sql"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { Instance } from "../../src/project/instance"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Ripgrep } from "../../src/file/ripgrep"
@@ -59,6 +59,9 @@ import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { reply } from "../lib/llm-server"
 import { Inbox } from "../../src/inbox"
+import { InboxTable } from "../../src/inbox/inbox.sql"
+import { inboxServiceRef } from "../../src/inbox/inbox-ref"
+import { Flag } from "../../src/flag/flag"
 
 afterEach(async () => {
   await Instance.disposeAll()
@@ -120,7 +123,7 @@ const status = SessionStatus.layer.pipe(Layer.provideMerge(Bus.layer))
 const run = SessionRunState.layer.pipe(Layer.provide(status))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
 
-function makeLayer() {
+function makeLayer(runLayer: Layer.Layer<SessionRunState.Service> = run) {
   const deps = Layer.mergeAll(
     Session.defaultLayer,
     Snapshot.defaultLayer,
@@ -141,6 +144,7 @@ function makeLayer() {
   const todo = Todo.layer.pipe(Layer.provideMerge(deps))
   const checkpoint = SessionCheckpoint.defaultLayer
   const taskRegistry = ActorRegistry.defaultLayer
+  const taskStore = TaskRegistry.defaultLayer
   const taskWaiter = ActorWaiter.defaultLayer
   const team = Team.defaultLayer
   const registry = ToolRegistry.layer.pipe(
@@ -150,12 +154,17 @@ function makeLayer() {
     Layer.provide(Ripgrep.defaultLayer),
     Layer.provide(Format.defaultLayer),
     Layer.provide(taskRegistry),
-    Layer.provide(taskWaiter),
+    // ActorTool resolves its waiter when init() runs, so preserve this
+    // service in the outer fixture alongside the registry wiring.
+    Layer.provideMerge(taskWaiter),
     Layer.provide(team),
-    Layer.provide(checkpoint),
+    // Keep the checkpoint service in the test environment as well as wiring it
+    // into ToolRegistry: ActorTool resolves it when init() runs, after the
+    // registry layer has already been built.
+    Layer.provideMerge(checkpoint),
     Layer.provide(Memory.defaultLayer),
     Layer.provide(History.defaultLayer),
-    Layer.provide(TaskRegistry.defaultLayer),
+    Layer.provide(taskStore),
     Layer.provide(SchedulerDefaultLayer),
     Layer.provide(Auth.defaultLayer),
     Layer.provideMerge(todo),
@@ -167,14 +176,13 @@ function makeLayer() {
   const prune = SessionPrune.layer.pipe(Layer.provide(checkpoint), Layer.provideMerge(deps))
   const prompt = SessionPrompt.layer.pipe(
     Layer.provide(Goal.defaultLayer),
-    Layer.provide(TaskGateState.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(summary),
     Layer.provide(checkpoint),
     Layer.provide(SessionCompaction.defaultLayer),
     Layer.provide(team),
     Layer.provide(taskRegistry),
-    Layer.provideMerge(run),
+    Layer.provideMerge(runLayer),
     Layer.provideMerge(prune),
     Layer.provideMerge(proc),
     Layer.provideMerge(registry),
@@ -186,18 +194,234 @@ function makeLayer() {
   )
   return Layer.mergeAll(
     TestLLMServer.layer,
+    taskStore,
     Actor.layer.pipe(
       Layer.provideMerge(prompt),
       Layer.provide(Worktree.defaultLayer),
       Layer.provideMerge(taskRegistry),
-      Layer.provide(TaskRegistry.defaultLayer),
+      Layer.provide(taskStore),
     Layer.provide(SchedulerDefaultLayer),
       Layer.provide(Inbox.defaultLayer),
     ),
   ).pipe(Layer.provide(summary))
 }
 
-const it = testEffect(makeLayer())
+const postStopGate: { target?: string; held?: Deferred.Deferred<void>; release?: Deferred.Deferred<void> } = {}
+const cancelGate: { target?: string; entered?: Deferred.Deferred<void>; release?: Deferred.Deferred<void> } = {}
+
+function makeGenerationGateLayer() {
+  const ensureRunningCounts = new Map<string, number>()
+  const baseRun = SessionRunState.layer.pipe(Layer.provide(status))
+  const gatedRun = Layer.effect(
+    SessionRunState.Service,
+    Effect.gen(function* () {
+      const base = yield* SessionRunState.Service
+      return SessionRunState.Service.of({
+        assertNotBusy: base.assertNotBusy,
+        cancel: base.cancel,
+        cancelActor: (sessionID, actorID) =>
+          cancelGate.target === `${sessionID}:${actorID}` && cancelGate.release
+            ? Effect.gen(function* () {
+                if (cancelGate.entered) yield* Deferred.succeed(cancelGate.entered, undefined)
+                yield* Deferred.await(cancelGate.release!)
+                yield* base.cancelActor(sessionID, actorID)
+              })
+            : base.cancelActor(sessionID, actorID),
+        startShell: base.startShell,
+        start: base.start,
+        startAndWait: base.startAndWait,
+        ensureRunning: (sessionID, actorID, onInterrupt, work) => {
+          const key = `${sessionID}:${actorID}`
+          const count = (ensureRunningCounts.get(key) ?? 0) + 1
+          ensureRunningCounts.set(key, count)
+          const started = base.ensureRunning(sessionID, actorID, onInterrupt, work)
+          return postStopGate.target === key && count === 2 && postStopGate.held && postStopGate.release
+            ? started.pipe(
+                Effect.ensuring(
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(postStopGate.held!, undefined).pipe(Effect.ignore)
+                    yield* Effect.uninterruptible(Deferred.await(postStopGate.release!))
+                  }),
+                ),
+              )
+            : started
+        },
+      })
+    }),
+  ).pipe(Layer.provide(baseRun))
+  return makeLayer(gatedRun)
+}
+
+const it = testEffect(makeGenerationGateLayer())
+
+describe("Actor execution generation retirement", () => {
+  it.live("holds same-ID resume until the settled postStop runner is released", () =>
+    Effect.gen(function* () {
+      const held = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      postStopGate.held = held
+      postStopGate.release = release
+      yield* Effect.addFinalizer(() =>
+        postStopGate.release
+          ? Deferred.succeed(postStopGate.release, undefined).pipe(
+              Effect.ignore,
+              Effect.ensuring(
+                Effect.sync(() => {
+                  postStopGate.target = undefined
+                  postStopGate.held = undefined
+                  postStopGate.release = undefined
+                }),
+              ),
+            )
+          : Effect.sync(() => {
+              postStopGate.target = undefined
+              postStopGate.held = undefined
+            }),
+      )
+      return yield* provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const actor = yield* Actor.Service
+          const session = yield* Session.Service
+          const registry = yield* ActorRegistry.Service
+          const tasks = yield* TaskRegistry.Service
+          const parent = yield* session.create({ title: "postStop generation gate" })
+          const task = yield* tasks.create({ session_id: parent.id, summary: "already done" })
+          yield* tasks.done({ session_id: parent.id, id: task.id })
+          yield* llm.text("first")
+          yield* llm.text("postStop")
+
+          const first = yield* actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "general",
+            task: "first generation",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+            task_id: task.id,
+          })
+          postStopGate.target = `${parent.id}:${first.actorID}`
+          yield* llm.wait(2)
+          const firstOutcome = yield* Deferred.await(first.outcome)
+          expect(firstOutcome.status).toBe("success")
+          const firstRow = yield* registry.get(parent.id, first.actorID)
+          expect(firstRow?.status).toBe("idle")
+          yield* Deferred.await(held)
+
+          yield* llm.text("second")
+          const resume = yield* Effect.forkChild(
+            actor.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              actorID: first.actorID,
+              agentType: "explore",
+              task: "second generation",
+              context: "none",
+              tools: ["read"],
+              background: false,
+              model: ref,
+            }),
+          )
+          yield* Effect.sleep("100 millis")
+          const parked = yield* registry.get(parent.id, first.actorID)
+          expect(parked?.executionRevision).toBe(firstRow?.executionRevision)
+          expect(yield* llm.calls).toBe(2)
+
+          yield* Deferred.succeed(release, undefined)
+          const second = yield* Fiber.join(resume)
+          expect((yield* Deferred.await(second.outcome)).status).toBe("success")
+          const finalRow = yield* registry.get(parent.id, first.actorID)
+          expect(finalRow?.executionRevision).toBeGreaterThan(firstRow?.executionRevision ?? 0)
+          expect(yield* llm.calls).toBe(3)
+        }),
+        { git: true, config: providerCfg },
+      )
+    }),
+  )
+
+  it.live("keeps same-ID resume behind timed-out cancellation cleanup", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      cancelGate.target = undefined
+      cancelGate.entered = entered
+      cancelGate.release = release
+      yield* Effect.addFinalizer(() =>
+        (cancelGate.release
+          ? Deferred.succeed(cancelGate.release, undefined).pipe(Effect.ignore)
+          : Effect.void).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              cancelGate.target = undefined
+              cancelGate.entered = undefined
+              cancelGate.release = undefined
+            }),
+          ),
+        ),
+      )
+      return yield* provideTmpdirServer(
+        Effect.fnUntraced(function* ({ llm }) {
+          const actor = yield* Actor.Service
+          const session = yield* Session.Service
+          const registry = yield* ActorRegistry.Service
+          const parent = yield* session.create({ title: "cancel cleanup gate" })
+          yield* llm.hang
+          const first = yield* actor.spawn({
+            mode: "subagent",
+            sessionID: parent.id,
+            agentType: "build",
+            task: "cancel me",
+            context: "none",
+            tools: ["read"],
+            background: true,
+            model: ref,
+          })
+          cancelGate.target = `${parent.id}:${first.actorID}`
+          yield* llm.wait(1)
+          const firstRow = yield* registry.get(parent.id, first.actorID)
+
+          const cancelFiber = yield* Effect.forkChild(
+            actor.cancel(parent.id, first.actorID, "forced").pipe(Effect.timeout("50 millis"), Effect.exit),
+          )
+          yield* Deferred.await(entered)
+          const timed = yield* Fiber.join(cancelFiber)
+          expect(timed._tag).toBe("Failure")
+          const afterCancel = yield* registry.get(parent.id, first.actorID)
+          expect(afterCancel?.status).toBe("idle")
+          expect(afterCancel?.lastOutcome).toBe("cancelled")
+
+          yield* llm.text("resumed after cleanup")
+          const resume = yield* Effect.forkChild(
+            actor.spawn({
+              mode: "subagent",
+              sessionID: parent.id,
+              actorID: first.actorID,
+              agentType: "explore",
+              task: "resume after cancellation",
+              context: "none",
+              tools: ["read"],
+              background: false,
+              model: ref,
+            }),
+          )
+          yield* Effect.sleep("100 millis")
+          const parked = yield* registry.get(parent.id, first.actorID)
+          expect(parked?.executionRevision).toBe(firstRow?.executionRevision)
+          expect(yield* llm.calls).toBe(1)
+
+          yield* Deferred.succeed(release, undefined)
+          const second = yield* Fiber.join(resume)
+          expect((yield* Deferred.await(second.outcome)).status).toBe("success")
+          const finalRow = yield* registry.get(parent.id, first.actorID)
+          expect(finalRow?.executionRevision).toBeGreaterThan(firstRow?.executionRevision ?? 0)
+          expect(yield* llm.calls).toBe(2)
+        }),
+        { git: true, config: providerCfg },
+      )
+    }),
+  )
+})
 
 const ref = {
   providerID: ProviderID.make("test"),
@@ -251,6 +475,137 @@ function providerCfg(url: string) {
   }
 }
 
+function gptProviderCfg(url: string) {
+  const config = providerCfg(url)
+  return {
+    ...config,
+    provider: {
+      ...config.provider,
+      "gpt-test": {
+        ...config.provider.test,
+        id: "gpt-test",
+        name: "GPT Test",
+        models: {
+          "gpt-5.4": {
+            ...config.provider.test.models["test-model"],
+            id: "deployment-primary",
+            name: "GPT-5.4",
+          },
+        },
+      },
+    },
+  }
+}
+
+function actorToolContext(sessionID: SessionID, messageID: MessageID, hostContext: Record<string, string>) {
+  return {
+    sessionID,
+    messageID,
+    agent: "build",
+    abort: new AbortController().signal,
+    extra: { bypassAgentCheck: true, hostContext },
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  }
+}
+
+describe("ActorTool durable host binding", () => {
+  it.live("resumes through the real Actor registry/spawn path without rebinding a child", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const sessions = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const parent = yield* sessions.create({
+          title: "host binding parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const messageID = MessageID.ascending()
+        yield* sessions.updateMessage({
+          id: messageID,
+          sessionID: parent.id,
+          role: "assistant",
+          time: { created: Date.now() },
+          agent: "build",
+          model: ref,
+        } as unknown as MessageV2.Info)
+
+        const tool = yield* ActorTool
+        const def = yield* tool.init()
+        const contextA = { accountID: "account-a", chatID: "chat-a", workspaceID: "workspace-a", cwd: "/workspace/a" }
+        const contextB = { accountID: "account-b", chatID: "chat-b", workspaceID: "workspace-b", cwd: "/workspace/b" }
+
+        yield* llm.text("first successful turn")
+        const first = yield* def.execute(
+          {
+            operation: {
+              action: "run",
+              subagent_type: "general",
+              description: "durable child",
+              prompt: "first prompt",
+              model: "test/test-model",
+            },
+          },
+          actorToolContext(parent.id, messageID, contextA),
+        )
+        const actorID = String(first.metadata.actorId)
+        const storedAfterFirst = yield* registry.get(parent.id, actorID)
+        expect(storedAfterFirst?.hostContext).toEqual(contextA)
+        expect(storedAfterFirst?.turnCount).toBeGreaterThanOrEqual(1)
+        expect(storedAfterFirst?.executionRevision).toBeGreaterThan(0)
+
+        yield* llm.text("second successful turn")
+        const second = yield* def.execute(
+          {
+            operation: {
+              action: "run",
+              subagent_type: "general",
+              description: "resume must retain A",
+              prompt: "second prompt",
+              actor_id: actorID,
+            },
+          },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        const storedAfterSecond = yield* registry.get(parent.id, actorID)
+        expect(storedAfterSecond?.hostContext).toEqual(contextA)
+        expect(storedAfterSecond?.turnCount).toBeGreaterThanOrEqual(2)
+        expect(storedAfterSecond?.executionRevision).toBeGreaterThan(storedAfterFirst?.executionRevision ?? 0)
+        expect(second.metadata.hostContext).toEqual(contextA)
+
+        const status = yield* def.execute(
+          { operation: { action: "status", actor_id: actorID } },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(JSON.parse(status.output).host_context).toEqual(contextA)
+
+        const cancel = yield* def.execute(
+          { operation: { action: "cancel", actor_id: actorID } },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(JSON.parse(cancel.output).host_context).toEqual(contextA)
+
+        yield* llm.text("sibling successful turn")
+        const sibling = yield* def.execute(
+          {
+            operation: {
+              action: "run",
+              subagent_type: "general",
+              description: "new sibling inherits B",
+              prompt: "sibling prompt",
+              model: "test/test-model",
+            },
+          },
+          actorToolContext(parent.id, messageID, contextB),
+        )
+        expect(sibling.metadata.hostContext).toEqual(contextB)
+      }),
+      { git: true, config: providerCfg },
+    ) as any,
+    30000,
+  )
+})
+
 describe("Actor.spawn peer mode", () => {
   it.live("creates a new sessionID, registers actor with mode=peer", () =>
     provideTmpdirServer(
@@ -288,9 +643,288 @@ describe("Actor.spawn peer mode", () => {
       { git: true, config: providerCfg },
     ),
   )
+
+  // T42: a freshly-created peer is addressable the instant spawn returns —
+  // spawnPeer registers the receiver/actor-registry row (session_id === actor_id
+  // === child.id, mode "peer") SYNCHRONOUSLY before spawn resolves, so Inbox.send's
+  // ESRCH pre-check (reg.get) resolves even against a turnCount-0, never-run child.
+  // Guards the T43 --topic reuse prerequisite. LLM is hung so the child's first
+  // turn never runs: the row can ONLY come from spawn-time registration.
+  it.live("send to a just-created, never-run peer (turnCount 0) does NOT ESRCH and enqueues", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const reg = yield* ActorRegistry.Service
+        const inbox = inboxServiceRef.current!
+
+        const parent = yield* session.create({
+          title: "T42 parent",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        // Hang so the child's spawn turn never completes — the receiver row must
+        // exist purely from spawn-time registration, not first-turn arming.
+        yield* llm.hang
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "peer task",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+
+        // Row present at spawn: pending, zero turns (never ran).
+        const row = yield* reg.get(result.sessionID, result.actorID)
+        expect(row?.mode).toBe("peer")
+        expect(row?.turnCount).toBe(0)
+        expect(row?.status).toBe("pending")
+
+        // Both addressing forms resolve without ESRCH and enqueue a durable row.
+        const sent = yield* inbox
+          .send({
+            receiverSessionID: result.sessionID,
+            receiverActorID: result.actorID,
+            senderSessionID: parent.id,
+            senderActorID: "main",
+            content: "relayed while never-run",
+          })
+          .pipe(Effect.exit)
+        expect(sent._tag).toBe("Success")
+        if (sent._tag === "Success") expect(sent.value.inboxID).toBeTruthy()
+
+        yield* actor.cancel(result.sessionID, result.actorID, "forced")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("cancelling a pending peer prevents its first model turn", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const reg = yield* ActorRegistry.Service
+        const parent = yield* session.create({ title: "pending cancel" })
+        yield* llm.hang
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "must not start",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+        yield* actor.cancel(result.sessionID, result.actorID, "forced")
+        const outcome = yield* Deferred.await(result.outcome)
+        const row = yield* reg.get(result.sessionID, result.actorID)
+        expect(outcome.status).toBe("cancelled")
+        expect(row?.status).toBe("idle")
+        expect(row?.turnCount).toBe(0)
+        expect(row?.lastOutcome).toBe("cancelled")
+        expect(yield* llm.calls).toBe(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("foreground peer waits for its deferred launcher and outcome", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "foreground peer" })
+        yield* llm.text("finished")
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "finish now",
+          context: "none",
+          tools: ["read"],
+          background: false,
+          model: ref,
+        })
+        const outcome = yield* Deferred.await(result.outcome)
+        expect(outcome.status).toBe("success")
+        expect(yield* llm.calls).toBeGreaterThan(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("background peer remains pending at return, then launches and completes", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const reg = yield* ActorRegistry.Service
+        const parent = yield* session.create({ title: "background peer handoff" })
+        yield* llm.text("background result")
+
+        const result = yield* actor.spawn({
+          mode: "peer",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "run after spawn returns",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+
+        // The deferred launcher keeps the receiver addressable without starting
+        // model/task work before the caller observes the new actor.
+        const parked = yield* reg.get(result.sessionID, result.actorID)
+        expect(parked?.status).toBe("pending")
+        expect(parked?.turnCount).toBe(0)
+
+        const outcome = yield* Deferred.await(result.outcome).pipe(Effect.timeout("10 seconds"))
+        expect(outcome.status).toBe("success")
+        expect(yield* llm.calls).toBeGreaterThan(0)
+        const finished = yield* reg.get(result.sessionID, result.actorID)
+        expect(finished?.status).toBe("idle")
+        expect(finished?.turnCount).toBeGreaterThan(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
 })
 
 describe("Actor.spawn subagent mode", () => {
+  it.live("exposes GPT orchestration and read tools to read-only GPT subagents", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "GPT subagent tools" })
+
+        yield* llm.text("done")
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "explore",
+          task: "verify tools",
+          context: "none",
+          tools: "INHERIT",
+          background: false,
+          model: { providerID: ProviderID.make("gpt-test"), modelID: ModelID.make("gpt-5.4") },
+        })
+        yield* Deferred.await(result.outcome)
+
+        const request = (yield* llm.hits).find(
+          (hit) =>
+            Array.isArray(hit.body.tools) &&
+            hit.body.tools.some(
+              (tool) => (tool as { function?: { name?: string } }).function?.name === "view_image",
+            ),
+        )
+        const names = (request?.body.tools as Array<{ function?: { name?: string } }> | undefined)?.map(
+          (tool) => tool.function?.name,
+        )
+        expect(names).toContain("exec")
+        expect(names).toContain("view_image")
+        expect(names).not.toContain("apply_patch")
+        expect(names).not.toContain("read")
+        expect(names).not.toContain("edit")
+        expect(names).not.toContain("write")
+        expect(
+          (request?.body.messages as Array<{ role?: string; content?: string }> | undefined)
+            ?.filter((message) => message.role === "system")
+            .map((message) => message.content)
+            .join("\n"),
+        ).toContain("Use `exec` as the main composition surface")
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+    30000,
+  )
+
+  it.live("exposes the full GPT-specific tool set to general GPT subagents", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "General GPT subagent tools" })
+
+        yield* llm.text("done")
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "general",
+          task: "verify tools",
+          context: "none",
+          tools: "INHERIT",
+          background: false,
+          model: { providerID: ProviderID.make("gpt-test"), modelID: ModelID.make("gpt-5.4") },
+        })
+        yield* Deferred.await(result.outcome)
+
+        const request = (yield* llm.hits).find(
+          (hit) =>
+            Array.isArray(hit.body.tools) &&
+            hit.body.tools.some(
+              (tool) => (tool as { function?: { name?: string } }).function?.name === "view_image",
+            ),
+        )
+        const names = (request?.body.tools as Array<{ function?: { name?: string } }> | undefined)?.map(
+          (tool) => tool.function?.name,
+        )
+        expect(names).toContain("exec")
+        expect(names).toContain("apply_patch")
+        expect(names).toContain("view_image")
+        expect(names).not.toContain("read")
+        expect(names).not.toContain("edit")
+        expect(names).not.toContain("write")
+      }),
+      { git: true, config: gptProviderCfg },
+    ),
+    30000,
+  )
+
+  it.live("keeps the legacy tool set for non-GPT subagents", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({ title: "General non-GPT subagent tools" })
+
+        yield* llm.text("done")
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "general",
+          task: "verify tools",
+          context: "none",
+          tools: "INHERIT",
+          background: false,
+          model: ref,
+        })
+        yield* Deferred.await(result.outcome)
+
+        const request = (yield* llm.hits).find((hit) => Array.isArray(hit.body.tools))
+        const names = (request?.body.tools as Array<{ function?: { name?: string } }> | undefined)?.map(
+          (tool) => tool.function?.name,
+        )
+        expect(names).toContain("read")
+        expect(names).toContain("edit")
+        expect(names).toContain("write")
+        expect(names).not.toContain("exec")
+        expect(names).not.toContain("apply_patch")
+        expect(names).not.toContain("view_image")
+      }),
+      { git: true, config: providerCfg },
+    ),
+    30000,
+  )
+
   it.live("does NOT create new session, allocates <type>-<n> actorID", () =>
     provideTmpdirServer(
       Effect.fnUntraced(function* ({ llm }) {
@@ -418,6 +1052,51 @@ describe("Actor.cancel", () => {
         const row = yield* reg.get(result.sessionID, result.actorID)
         expect(row?.status).toBe("idle")
         expect(row?.lastOutcome).toBe("cancelled")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("completion and forced cancel emit one terminal parent notification", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({
+          title: "terminal race",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        // The result may win before cancel or cancellation may win while the
+        // turn is active; either way the durable claim must leave one row.
+        yield* llm.text("race result")
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "race task",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+        })
+        yield* Effect.all(
+          [actor.cancel(result.sessionID, result.actorID, "forced"), Deferred.await(result.outcome)],
+          { concurrency: "unbounded" },
+        )
+        const rows = Database.use((db) =>
+          db
+            .select()
+            .from(InboxTable)
+            .where(
+              and(
+                eq(InboxTable.receiver_session_id, parent.id),
+                eq(InboxTable.receiver_actor_id, "main"),
+                eq(InboxTable.type, "actor_notification"),
+              ),
+            )
+            .all(),
+        )
+        expect(rows).toHaveLength(1)
       }),
       { git: true, config: providerCfg },
     ),
@@ -890,13 +1569,45 @@ describe("Actor.spawn structured output (P3)", () => {
       { git: true, config: providerCfg },
     ),
   )
+
+  it.live("exhausted checkpoint-writer invalid output produces a failed actor outcome", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({
+          title: "invalid actor output",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        yield* llm.push(
+          ...Array.from({ length: Flag.MIMOCODE_INVALID_OUTPUT_CONTINUATION_LIMIT + 1 }, () => reply().stop()),
+        )
+
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "checkpoint-writer",
+          task: "return a result",
+          context: "none",
+          tools: ["read"],
+          background: false,
+          model: ref,
+        })
+
+        const outcome = yield* Deferred.await(result.outcome)
+        expect(outcome.status).toBe("failure")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
 })
 
 describe("Actor.spawn onActorID pre-registration (MR104 #2)", () => {
   // The workflow runtime needs the child's actorID in its reclaim set BEFORE the
   // background work fiber detaches, otherwise a cancel that races an in-flight
-  // spawn leaves an orphan. spawn exposes onActorID: fired synchronously inside
-  // the spawn Effect, right after register(), before forkWork detaches. Proof:
+  // spawn leaves an orphan. spawn exposes onActorID after forkWork parks and
+  // registers its outer fiber, before the start gate opens. Proof:
   // by the time spawn RESOLVES to the caller, the callback has already run AND
   // carries the SAME actorID the registry was populated with — so any consumer
   // (the workflow) is guaranteed to know the id the instant the actor exists.
@@ -935,6 +1646,43 @@ describe("Actor.spawn onActorID pre-registration (MR104 #2)", () => {
         expect(row?.actorID).toBe(result.actorID)
 
         yield* actor.cancel(result.sessionID, result.actorID, "forced")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("reclaim during the parked callback window interrupts the outer fiber", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const parent = yield* session.create({
+          title: "parked reclaim",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* llm.hang
+        const callbackID = yield* Deferred.make<string>()
+        const reclaim = yield* Effect.forkChild(
+          Deferred.await(callbackID).pipe(Effect.flatMap((actorID) => actor.cancel(parent.id, actorID, "forced"))),
+        )
+        const result = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "build",
+          task: "must not start",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+          onActorID: (actorID) => Effect.runSync(Deferred.succeed(callbackID, actorID)),
+        })
+        yield* Fiber.join(reclaim)
+        const outcome = yield* Deferred.await(result.outcome)
+        expect(outcome.status).toBe("cancelled")
+        expect(yield* llm.calls).toBe(0)
+        const row = yield* ActorRegistry.Service.use((reg) => reg.get(parent.id, result.actorID))
+        expect(row?.status).toBe("idle")
+        expect(row?.lastOutcome).toBe("cancelled")
       }),
       { git: true, config: providerCfg },
     ),

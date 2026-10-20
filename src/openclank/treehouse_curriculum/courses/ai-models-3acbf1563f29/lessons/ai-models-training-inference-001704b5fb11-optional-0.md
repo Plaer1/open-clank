@@ -1,0 +1,1 @@
+Keep evaluation examples separate from training when measuring generalization. Repeatedly tuning against the same test examples can make that test less informative. A realistic check also asks whether deployment inputs differ from the training data.

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["lxml>=4.9"]
+# ///
 """Annotate an exploded `.docx` directory tree with a review comment.
 
 Alternate implementation notes:
@@ -12,7 +16,7 @@ Alternate implementation notes:
       keeps its original formatting.
 
 Usage:
-    python annotate.py <exploded_dir> "comment text" [--author NAME] \
+    uv run annotate.py <exploded_dir> "comment text" [--author NAME] \
         [--anchor "text found in document.xml"]
 """
 from __future__ import annotations
@@ -27,7 +31,8 @@ from pathlib import Path
 try:
     from lxml import etree as _et
 except ImportError as exc:  # pragma: no cover
-    sys.stderr.write("annotate.py needs `lxml`. Install with: pip install lxml\n")
+    sys.stderr.write("annotate.py needs `lxml`. Run with `uv run annotate.py` (auto-installs) "
+                     "or: pip install lxml\n")
     raise
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

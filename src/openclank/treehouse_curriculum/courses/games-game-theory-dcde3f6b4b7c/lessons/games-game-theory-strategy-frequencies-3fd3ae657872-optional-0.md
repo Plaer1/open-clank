@@ -1,0 +1,1 @@
+1/2→3/5→27/35; 1/10→1/55; 2/5 stays2/5. Rare A meets mostly B and gets0; update is frequency-dependent. It is a toy population rule, not a universal player-learning law; zero denominator is undefined.

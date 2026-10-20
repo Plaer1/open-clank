@@ -25,7 +25,7 @@ import { state } from '../state.js';
  * Position the transform overlay canvas + size its backing bitmap.
  * Margin is the image-space slack each side so handles can render
  * outside the main canvas (matches _TRANSFORM_OVERLAY_MARGIN in
- * galleryEditor.js — kept as a parameter so this module has no
+ * imps.js — kept as a parameter so this module has no
  * dependency on a magic number defined elsewhere).
  */
 export function syncOverlay(margin) {

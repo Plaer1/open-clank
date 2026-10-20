@@ -1,0 +1,1 @@
+T(2)=4 and T(4)=12; leaf work4 plus two nonleaf levels of 4.

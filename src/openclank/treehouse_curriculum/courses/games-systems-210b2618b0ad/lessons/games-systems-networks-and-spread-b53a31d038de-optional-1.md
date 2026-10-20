@@ -1,0 +1,1 @@
+Freeze the old informed set before expanding its neighbors.

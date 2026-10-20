@@ -171,3 +171,20 @@ def test_admin_test_reminder_can_use_current_ui_overrides(monkeypatch):
             "reminder_webhook_payload_template": '{"content":"{{message}}"}',
         },
     }]
+
+
+def test_admin_ntfy_test_preserves_unsaved_integration_choice(monkeypatch):
+    endpoint, calls, _db = _endpoint(monkeypatch)
+    asyncio.run(endpoint(_Request({
+        "note_id": "test-ntfy-123",
+        "title": "Test Reminder",
+        "body": "Draft body",
+        "channel": "ntfy",
+        "ntfy_topic": "draft-topic",
+        "ntfy_integration_id": "ntfy-2",
+    }, user="admin", admins={"admin"})))
+    assert calls[0]["settings_override"] == {
+        "reminder_channel": "ntfy",
+        "reminder_ntfy_topic": "draft-topic",
+        "reminder_ntfy_integration_id": "ntfy-2",
+    }

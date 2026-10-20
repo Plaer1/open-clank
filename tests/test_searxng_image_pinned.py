@@ -7,12 +7,15 @@ Docker installs.
 Pin the SearXNG image to a known-good tag so a bad upstream `latest` can't block
 startup. This guards that the pin stays in place.
 """
+
+import pytest
 import re
 from pathlib import Path
 
 COMPOSE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_searxng_image_is_pinned_not_latest():
     text = COMPOSE.read_text(encoding="utf-8")
     m = re.search(r"image:\s*\S*searxng/searxng:(\S+)", text)

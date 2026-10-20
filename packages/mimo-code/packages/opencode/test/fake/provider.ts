@@ -73,6 +73,18 @@ export namespace ProviderTest {
           getLanguage: Effect.fn("TestProvider.getLanguage")(() =>
             Effect.die(new Error("ProviderTest.getLanguage not configured")),
           ),
+          getEmbedding: Effect.fn("TestProvider.getEmbedding")(() =>
+            Effect.die(new Error("ProviderTest.getEmbedding not configured")),
+          ),
+          getImage: Effect.fn("TestProvider.getImage")(() =>
+            Effect.die(new Error("ProviderTest.getImage not configured")),
+          ),
+          getSpeech: Effect.fn("TestProvider.getSpeech")(() =>
+            Effect.die(new Error("ProviderTest.getSpeech not configured")),
+          ),
+          getTranscription: Effect.fn("TestProvider.getTranscription")(() =>
+            Effect.die(new Error("ProviderTest.getTranscription not configured")),
+          ),
           closest: Effect.fn("TestProvider.closest")((providerID) =>
             Effect.succeed(providerID === row.id ? { providerID: row.id, modelID: mdl.id } : undefined),
           ),

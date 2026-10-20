@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-13  
 **Scope:** packages/opencode, packages/sdk, packages/plugin, packages/shared  
-**Source:** /home/e/sauce/ai/agents/mimo-code/
+**Source:** /path/to/
 
 ---
 
@@ -296,7 +296,7 @@ MiMoCode ships code in `packages/opencode/src/lsp/server.ts` that downloads gopl
 
 1. **Install `@mimo-ai/sdk` in Junction's dependency tree:**
    ```bash
-   cd /home/e/sauce/ai/bridges/openclaw_vscode
+   cd /path/to/openclaw_vscode
    npm install @mimo-ai/sdk
    ```
 

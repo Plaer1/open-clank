@@ -1,7 +1,7 @@
 """mcp_oauth.py — generic OAuth for remote (Streamable HTTP) MCP servers.
 
 Bridges the mcp SDK's OAuthClientProvider (RFC 9728 discovery, Dynamic Client
-Registration, authorization-code + PKCE, token refresh) to Odysseus's web
+Registration, authorization-code + PKCE, token refresh) to Open Clank's web
 callback route. Tokens and the dynamic registration persist per-server,
 encrypted, so the interactive flow runs only once.
 """
@@ -17,16 +17,32 @@ logger = logging.getLogger(__name__)
 
 # OAuth redirect URI registered with every authorization server via DCR. Loopback
 # is allowed for native/desktop clients (RFC 8252); remote users finish via the
-# paste-back flow. Deployments not reachable at http://localhost:7000 (custom
-# port, reverse proxy, or public domain) must set OAUTH_REDIRECT_BASE_URL (or
-# APP_PUBLIC_URL) to their externally reachable origin so the redirect lands back
-# on Odysseus. APP_PORT is intentionally not used: it is only the Docker host
-# port-map; the app always listens on 7000 inside the container.
-_REDIRECT_BASE = (
-    os.environ.get("OAUTH_REDIRECT_BASE_URL")
-    or os.environ.get("APP_PUBLIC_URL")
-    or "http://localhost:7000"
-).rstrip("/")
+# paste-back flow. Deployments not reachable at the derived loopback origin
+# (custom port, reverse proxy, or public domain) must set OAUTH_REDIRECT_BASE_URL
+# (or APP_PUBLIC_URL) to their externally reachable origin so the redirect lands
+# back on Open Clank. Only those configured values are trusted — never an
+# arbitrary forwarded origin/host header from the request.
+#
+# Native default is http://localhost:7777. When APP_PORT is set (native
+# bootstrap listen port) the callback honors it. APP_BIND is used only when it
+# names a concrete host; wildcards (0.0.0.0 / ::) stay loopback. Inside Docker
+# APP_PORT is only the host-side port map and is not in the container env, so
+# the container keeps the 7777 default that matches its listen port.
+def _configured_redirect_base() -> str:
+    configured = (
+        os.environ.get("OAUTH_REDIRECT_BASE_URL")
+        or os.environ.get("APP_PUBLIC_URL")
+    )
+    if configured:
+        return configured.rstrip("/")
+    host = (os.environ.get("APP_BIND") or "").strip()
+    if not host or host in ("0.0.0.0", "::", "[::]"):
+        host = "localhost"
+    port = os.environ.get("APP_PORT", "7777").strip() or "7777"
+    return f"http://{host}:{port}".rstrip("/")
+
+
+_REDIRECT_BASE = _configured_redirect_base()
 REDIRECT_URI = f"{_REDIRECT_BASE}/api/mcp/oauth/callback"
 
 # How long the background connect waits for the user to authorize before giving up.

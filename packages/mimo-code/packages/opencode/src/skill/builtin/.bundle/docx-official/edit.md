@@ -127,9 +127,9 @@ carries formatting you need to keep, run the `substitute()` helper over
 Use only when Workflow A cannot express the change (e.g. rewriting a `w:sdt` structured document tag, editing custom XML parts, splicing two documents together preserving numbering IDs).
 
 ```bash
-python scripts/explode.py template.docx exploded/
+uv run scripts/explode.py template.docx exploded/
 # … edit exploded/word/document.xml (or others) …
-python scripts/assemble.py exploded/ output.docx --sanity
+uv run scripts/assemble.py exploded/ output.docx --sanity
 ```
 
 `explode.py` pretty-prints every XML file so diffs are readable. `assemble.py` writes parts in the order declared by `[Content_Types].xml` with fixed mtimes, so a reassemble of an unchanged tree produces a byte-identical archive. Pass `--sanity` to run the required-parts and ZIP-integrity probes after writing.
@@ -202,10 +202,10 @@ Comments and revision marks live in separate XML parts. Three modes:
 Use the bundled script against an exploded directory:
 
 ```bash
-python scripts/explode.py template.docx exploded/
-python scripts/annotate.py exploded/ "Please double-check this figure." \
+uv run scripts/explode.py template.docx exploded/
+uv run scripts/annotate.py exploded/ "Please double-check this figure." \
     --author "Reviewer" --anchor '$4.2M'
-python scripts/assemble.py exploded/ commented.docx
+uv run scripts/assemble.py exploded/ commented.docx
 ```
 
 `annotate.py` wires up all three files that OOXML requires (`comments.xml`, the `.rels` entry, `[Content_Types].xml`) and inserts the anchor markers into `document.xml`. If the anchor string isn't found, it prints an XML snippet to paste in by hand.
@@ -235,7 +235,7 @@ if comments is not None:
 Use the bundled script — it walks the OOXML directly with `lxml` and needs no LibreOffice round-trip:
 
 ```bash
-python scripts/resolve_revisions.py reviewed.docx clean.docx
+uv run scripts/resolve_revisions.py reviewed.docx clean.docx
 ```
 
 Semantics: `<w:ins>` blocks are unwrapped (their content stays), `<w:del>` blocks are removed, formatting-change markers (`w:rPrChange`, `w:pPrChange`, …) are stripped, and paragraphs whose pilcrow is marked deleted are merged with the following paragraph — the same rules Word's *Accept All* applies.
@@ -251,7 +251,7 @@ soffice --headless --convert-to docx --outdir out/ reviewed.docx
 Word's error dialog rarely tells you what's wrong. Diagnose:
 
 ```bash
-python -c "
+uv run python -c "
 import zipfile, xml.etree.ElementTree as ET
 with zipfile.ZipFile('broken.docx') as z:
     for name in z.namelist():

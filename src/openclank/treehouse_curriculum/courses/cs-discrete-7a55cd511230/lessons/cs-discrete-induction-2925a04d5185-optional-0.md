@@ -1,0 +1,1 @@
+State the empty case and use both subtree hypotheses to account for all nodes exactly once.

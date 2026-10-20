@@ -1,0 +1,1 @@
+Defect is strictly dominant for each player; (Defect, Defect) is Nash with total 2, while mutual cooperation totals 6.

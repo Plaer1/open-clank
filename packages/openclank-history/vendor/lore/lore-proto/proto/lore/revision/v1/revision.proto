@@ -1,0 +1,229 @@
+syntax = "proto3";
+
+package lore.revision.v1;
+
+import "lore/model/v1/model.proto";
+
+// Baseline revision-graph service. Carries the minimal, stable set of
+// graph primitives — branch lifecycle, metadata CAS, revision listing.
+// Presentation helpers (describe / tree / diff) live separately on
+// lore.thin_client.v1.ThinClientService.
+service RevisionService {
+  // Create a new branch as a fork of an existing revision chain.
+  rpc BranchCreate     (BranchCreateRequest)      returns (BranchCreateResponse);
+  // Tombstone a live branch by id. Idempotent on already-tombstoned
+  // branches.
+  rpc BranchDelete     (BranchDeleteRequest)      returns (BranchDeleteResponse);
+  // Look up a branch by id (live or tombstoned) or by name (live only).
+  rpc BranchGet        (BranchGetRequest)         returns (BranchGetResponse);
+  // Stream all branches matching the optional filters.
+  rpc BranchList       (BranchListRequest)        returns (stream BranchListResponse);
+  // Set the tip of a branch to a specific revision. Supports force and
+  // fast-forward-merge semantics.
+  rpc BranchPush       (BranchPushRequest)        returns (BranchPushResponse);
+  // Cheap hash-only read of a branch's current metadata pointer.
+  rpc BranchMetadataGet(BranchMetadataGetRequest) returns (BranchMetadataGetResponse);
+  // Compare-and-swap update of a branch's metadata pointer. CAS miss is
+  // signalled in-band via the response, never as a non-OK gRPC status.
+  rpc BranchMetadataSet(BranchMetadataSetRequest) returns (BranchMetadataSetResponse);
+  // Page through a branch's revision history. Server picks page size.
+  rpc RevisionList     (RevisionListRequest)      returns (RevisionListResponse);
+}
+
+// Request to create a new branch. The caller must supply a fully-resolved
+// ancestry stack (no `number == 0` tip resolution is performed for
+// BranchCreate). The caller also pre-generates the branch `id` so that
+// retries are idempotent — a duplicate `id` already in use returns
+// ALREADY_EXISTS.
+message BranchCreateRequest {
+  // Caller-pre-generated branch id (typically a UUIDv7). Re-issuing the
+  // same id on retry yields ALREADY_EXISTS rather than creating a
+  // duplicate; this gives the RPC end-to-end retry idempotency.
+  bytes id = 1;
+  // Human-readable name for the new branch. Must not collide with any
+  // live branch (tombstoned names are free for reuse).
+  string name = 2;
+  // Identity to attribute as the branch creator. If unset, the server
+  // uses the authenticated JWT identity. If set, the caller must have
+  // permission to attribute branches to other identities.
+  optional string creator = 3;
+  // Free-form caller-defined tag for grouping or filtering. Server
+  // stores verbatim; empty string allowed.
+  string category = 4;
+  // Ancestry chain — parent-first, root-last. stack[0] is the
+  // immediate parent the new branch is forked from. Every entry's
+  // revision_signature must resolve to a known revision on its
+  // branch_id.
+  repeated lore.model.v1.BranchPoint stack = 5;
+}
+
+// Response containing the newly-created branch record.
+message BranchCreateResponse {
+  // Full Branch record including server-assigned `created` timestamp
+  // and the preserved stack.
+  lore.model.v1.Branch branch = 1;
+}
+
+// Request to tombstone a live branch by id. Names are not used here
+// because they may have been recycled after a prior delete.
+message BranchDeleteRequest {
+  // Branch id obtained from a prior BranchGet / BranchList.
+  bytes id = 1;
+}
+
+// Response carrying the post-delete branch record. The record's name
+// field is preserved even though the name → id mapping has been
+// erased.
+message BranchDeleteResponse {
+  // Tombstoned branch record (deleted = true).
+  lore.model.v1.Branch branch = 1;
+}
+
+// Request to look up a branch by id or by name.
+message BranchGetRequest {
+  // Lookup mode.
+  oneof query {
+    // Lookup by branch id — returns the branch live or tombstoned.
+    bytes id = 1;
+    // Lookup by branch name — returns the live branch with that name
+    // only. Tombstoned branches are not resolvable by name.
+    string name = 2;
+  }
+}
+
+// Response containing the resolved branch record.
+message BranchGetResponse {
+  // Branch record matching the lookup.
+  lore.model.v1.Branch branch = 1;
+}
+
+// Request to stream branches with optional filters.
+message BranchListRequest {
+  // If set, only branches whose `creator` field is an exact
+  // byte-for-byte case-sensitive match are emitted. If unset, no
+  // creator filter is applied.
+  optional string creator = 1;
+  // If true, tombstoned branches are emitted with `Branch.deleted =
+  // true`. Default false (only live branches emitted).
+  bool include_deleted = 2;
+}
+
+// One-per-stream-message response carrying a single branch record.
+message BranchListResponse {
+  // A branch matching the request's filters.
+  lore.model.v1.Branch branch = 1;
+}
+
+// Request to push a revision as a branch's new tip.
+message BranchPushRequest {
+  // Target branch id.
+  bytes id = 1;
+  // Content signature of the revision to push. Caller must ensure the
+  // revision and all data it references are present in CAS before
+  // calling.
+  bytes revision_signature = 2;
+  // When true, the server replaces the tip directly without checking
+  // whether the new tip descends from the current one. Wins over
+  // `fast_forward_merge` when both are set.
+  bool force = 3;
+  // When true and the new tip does not descend from the current tip,
+  // the server attempts a fast-forward merge. Mutually superseded by
+  // `force`.
+  bool fast_forward_merge = 4;
+}
+
+// Response describing the resulting branch tip after a push.
+message BranchPushResponse {
+  // Signature of the resulting tip (may equal the request's
+  // revision_signature, or a new merge revision in the
+  // fast-forward-merge case).
+  bytes revision_signature = 1;
+  // Per-branch number of the resulting tip.
+  uint64 revision_number = 2;
+  // True iff the server performed a fast-forward merge to land the
+  // push.
+  bool fast_forward_merged = 3;
+  // Optional human-readable diagnostic. Free-form; clients should not
+  // parse it.
+  optional string message = 4;
+}
+
+// Request for a cheap hash-only read of a branch's metadata pointer.
+message BranchMetadataGetRequest {
+  // Branch id.
+  bytes id = 1;
+}
+
+// Response carrying the current metadata hash.
+message BranchMetadataGetResponse {
+  // Current metadata pointer.
+  bytes metadata = 1;
+}
+
+// Request for a compare-and-swap update of a branch's metadata pointer.
+message BranchMetadataSetRequest {
+  // Branch id.
+  bytes id = 1;
+  // The metadata hash the caller expects to be currently set. The
+  // server compares this to the actual current value and only swaps
+  // on match.
+  bytes expected = 2;
+  // The metadata hash to install if the CAS succeeds.
+  bytes updated = 3;
+}
+
+// Response always returned with gRPC OK regardless of CAS hit or miss.
+// On a successful CAS, response.metadata == request.updated. On a CAS
+// miss, response.metadata reflects the unchanged prior value; the
+// caller compares response.metadata vs request.updated to detect the
+// miss and retry.
+message BranchMetadataSetResponse {
+  // The branch's current metadata pointer after the call.
+  bytes metadata = 1;
+}
+
+// Request to page through a branch's revision history. The start
+// anchor selects which revision the page is anchored at; both forms
+// resolve to the same concrete revision and walk that branch's
+// history.
+message RevisionListRequest {
+  // Start anchor for the page.
+  oneof start {
+    // Identifier-based anchor; `number == 0` resolves to the tip of
+    // the branch.
+    lore.model.v1.RevisionIdentifier identifier = 1;
+    // Signature-based anchor (typically a cursor returned by a
+    // previous response).
+    bytes signature = 2;
+  }
+}
+
+// Response carrying a page of revision items (newer-to-older within
+// the page) plus optional cursors for the next pages in either
+// direction.
+message RevisionListResponse {
+  // The page of revisions, newest-to-oldest. The revision identified by
+  // the request's `start` anchor is guaranteed to appear somewhere in
+  // the page, but is not necessarily items[0] — the server may align
+  // the page on a wider boundary (e.g. a cached segment) and return
+  // items both newer and older than the anchor. Server picks page size.
+  repeated lore.model.v1.RevisionItem items = 1;
+  // Cursor (signature) to feed back as `start.signature` to fetch
+  // the page of revisions newer than this one. Unset when no further
+  // newer revisions exist.
+  optional bytes signature_forward = 2;
+  // Cursor (signature) to feed back as `start.signature` to fetch
+  // the page of revisions older than this one. Unset when no further
+  // older revisions exist.
+  optional bytes signature_backward = 3;
+}
+
+// A service to receive requests forwarded on from another Lore Sever,
+// to perform an RPC on behalf of a client
+service ForwardedRevisionService {
+
+  rpc BranchCreate     (BranchCreateRequest)      returns (BranchCreateResponse);
+  rpc BranchDelete     (BranchDeleteRequest)      returns (BranchDeleteResponse);
+  rpc BranchGet        (BranchGetRequest)         returns (BranchGetResponse);
+  rpc BranchList       (BranchListRequest)        returns (stream BranchListResponse);
+}

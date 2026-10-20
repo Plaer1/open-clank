@@ -1,0 +1,1 @@
+The response preserves source and identifies frame/rig information that a flattened output may omit.

@@ -1,0 +1,1 @@
+Specify a counter/event, possible timing/contention effect, and uninstrumented comparison.

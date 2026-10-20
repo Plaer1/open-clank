@@ -1,0 +1,1 @@
+The answer treats appearance, collision and cost as separate representations with measurable checks.

@@ -2,10 +2,9 @@ import type { Hooks, PluginInput } from "@mimo-ai/plugin"
 import { Log } from "../util"
 import { Installation } from "../installation"
 import { InstallationVersion } from "../installation/version"
-import { OAUTH_DUMMY_KEY } from "../auth"
+import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import os from "os"
 import { setTimeout as sleep } from "node:timers/promises"
-import { createServer } from "http"
 
 const log = Log.create({ service: "plugin.codex" })
 
@@ -14,8 +13,22 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_BASE = "https://chatgpt.com/backend-api/codex"
 const CODEX_API_ENDPOINT = `${CODEX_API_BASE}/responses`
 const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
-const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+// Hard prompt capacity of the ChatGPT Codex backend for gpt-* models, lower than what
+// models.dev reports for the raw OpenAI API. OpenAI's Codex model registry declares
+// context_window = max_context_window = 372000 for the gpt-5.6 variants
+// (openai/codex#31860 quotes the served catalog), and a direct Codex request with
+// 350,317 input tokens completes (can1357/oh-my-pi#5705), so 372K is capacity rather
+// than a billing boundary.
+//
+// Not to be confused with 272K: OpenAI prices prompts above 272K input at 2x input /
+// 1.5x output for the whole request, and Codex's bundled metadata was lowered to 272000
+// (openai/codex#33972) to keep default sessions under that line. That is a spending
+// policy, not a capacity limit, so it belongs in `compaction.max_context` — see the
+// Compaction section of the config docs.
+//
+// Applied as a clamp, so models whose real window is already smaller keep it.
+const CODEX_GPT_CONTEXT_CAP = 372_000
 
 type CodexModelCatalogEntry = {
   slug?: unknown
@@ -84,38 +97,6 @@ export function modelMatchesCodexEntitlement(
   return [...candidates].some((candidate) => candidate.length > 0 && entitledModels.has(candidate))
 }
 
-interface PkceCodes {
-  verifier: string
-  challenge: string
-}
-
-async function generatePKCE(): Promise<PkceCodes> {
-  const verifier = generateRandomString(43)
-  const encoder = new TextEncoder()
-  const data = encoder.encode(verifier)
-  const hash = await crypto.subtle.digest("SHA-256", data)
-  const challenge = base64UrlEncode(hash)
-  return { verifier, challenge }
-}
-
-function generateRandomString(length: number): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-  const bytes = crypto.getRandomValues(new Uint8Array(length))
-  return Array.from(bytes)
-    .map((b) => chars[b % chars.length])
-    .join("")
-}
-
-function base64UrlEncode(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer)
-  const binary = String.fromCharCode(...bytes)
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
-
-function generateState(): string {
-  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
-}
-
 export interface IdTokenClaims {
   chatgpt_account_id?: string
   organizations?: Array<{ id: string }>
@@ -156,22 +137,6 @@ export function extractAccountId(tokens: TokenResponse): string | undefined {
   return undefined
 }
 
-function buildAuthorizeUrl(redirectUri: string, pkce: PkceCodes, state: string): string {
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: CLIENT_ID,
-    redirect_uri: redirectUri,
-    scope: "openid profile email offline_access",
-    code_challenge: pkce.challenge,
-    code_challenge_method: "S256",
-    id_token_add_organizations: "true",
-    codex_cli_simplified_flow: "true",
-    state,
-    originator: "opencode",
-  })
-  return `${ISSUER}/oauth/authorize?${params.toString()}`
-}
-
 interface TokenResponse {
   id_token: string
   access_token: string
@@ -179,27 +144,10 @@ interface TokenResponse {
   expires_in?: number
 }
 
-async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
+async function refreshAccessToken(refreshToken: string, signal?: AbortSignal | null): Promise<TokenResponse> {
   const response = await fetch(`${ISSUER}/oauth/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: CLIENT_ID,
-      code_verifier: pkce.verifier,
-    }).toString(),
-  })
-  if (!response.ok) {
-    throw new Error(`Token exchange failed: ${response.status}`)
-  }
-  return response.json()
-}
-
-async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
-    method: "POST",
+    signal,
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "refresh_token",
@@ -213,220 +161,20 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
   return response.json()
 }
 
-const HTML_SUCCESS = `<!doctype html>
-<html>
-  <head>
-    <title>OpenCode - Codex Authorization Successful</title>
-    <style>
-      body {
-        font-family:
-          system-ui,
-          -apple-system,
-          sans-serif;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
-        margin: 0;
-        background: #131010;
-        color: #f1ecec;
-      }
-      .container {
-        text-align: center;
-        padding: 2rem;
-      }
-      h1 {
-        color: #f1ecec;
-        margin-bottom: 1rem;
-      }
-      p {
-        color: #b7b1b1;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h1>Authorization Successful</h1>
-      <p>You can close this window and return to OpenCode.</p>
-    </div>
-    <script>
-      setTimeout(() => window.close(), 2000)
-    </script>
-  </body>
-</html>`
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;")
-}
-
-const HTML_ERROR = (error: string) => `<!doctype html>
-<html>
-  <head>
-    <title>OpenCode - Codex Authorization Failed</title>
-    <style>
-      body {
-        font-family:
-          system-ui,
-          -apple-system,
-          sans-serif;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
-        margin: 0;
-        background: #131010;
-        color: #f1ecec;
-      }
-      .container {
-        text-align: center;
-        padding: 2rem;
-      }
-      h1 {
-        color: #fc533a;
-        margin-bottom: 1rem;
-      }
-      p {
-        color: #b7b1b1;
-      }
-      .error {
-        color: #ff917b;
-        font-family: monospace;
-        margin-top: 1rem;
-        padding: 1rem;
-        background: #3c140d;
-        border-radius: 0.5rem;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h1>Authorization Failed</h1>
-      <p>An error occurred during authorization.</p>
-      <div class="error">${escapeHtml(error)}</div>
-    </div>
-  </body>
-</html>`
-
-interface PendingOAuth {
-  pkce: PkceCodes
-  state: string
-  resolve: (tokens: TokenResponse) => void
-  reject: (error: Error) => void
-}
-
-let oauthServer: ReturnType<typeof createServer> | undefined
-let pendingOAuth: PendingOAuth | undefined
-
-async function startOAuthServer(): Promise<{ port: number; redirectUri: string }> {
-  if (oauthServer) {
-    return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
+/** Managed Open Clank refresh exchange. Persistence and concurrency fencing
+ * are deliberately owned by the ACP host lease, not this adapter. */
+export async function refreshCodexOAuthCredential(
+  credential: Auth.Oauth,
+  signal?: AbortSignal | null,
+): Promise<Auth.Oauth> {
+  const tokens = await refreshAccessToken(credential.refresh, signal)
+  return {
+    ...credential,
+    access: tokens.access_token,
+    refresh: tokens.refresh_token || credential.refresh,
+    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    accountId: extractAccountId(tokens) ?? credential.accountId,
   }
-
-  oauthServer = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${OAUTH_PORT}`)
-
-    if (url.pathname === "/auth/callback") {
-      const code = url.searchParams.get("code")
-      const state = url.searchParams.get("state")
-      const error = url.searchParams.get("error")
-      const errorDescription = url.searchParams.get("error_description")
-
-      if (error) {
-        const errorMsg = errorDescription || error
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(200, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!code) {
-        const errorMsg = "Missing authorization code"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      if (!pendingOAuth || state !== pendingOAuth.state) {
-        const errorMsg = "Invalid state - potential CSRF attack"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      const current = pendingOAuth
-      pendingOAuth = undefined
-
-      exchangeCodeForTokens(code, `http://localhost:${OAUTH_PORT}/auth/callback`, current.pkce)
-        .then((tokens) => current.resolve(tokens))
-        .catch((err) => current.reject(err))
-
-      res.writeHead(200, { "Content-Type": "text/html" })
-      res.end(HTML_SUCCESS)
-      return
-    }
-
-    if (url.pathname === "/cancel") {
-      pendingOAuth?.reject(new Error("Login cancelled"))
-      pendingOAuth = undefined
-      res.writeHead(200)
-      res.end("Login cancelled")
-      return
-    }
-
-    res.writeHead(404)
-    res.end("Not found")
-  })
-
-  await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(OAUTH_PORT, () => {
-      log.info("codex oauth server started", { port: OAUTH_PORT })
-      resolve()
-    })
-    oauthServer!.on("error", reject)
-  })
-
-  return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
-}
-
-function stopOAuthServer() {
-  if (oauthServer) {
-    oauthServer.close(() => {
-      log.info("codex oauth server stopped")
-    })
-    oauthServer = undefined
-  }
-}
-
-function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResponse> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        if (pendingOAuth) {
-          pendingOAuth = undefined
-          reject(new Error("OAuth callback timeout - authorization took too long"))
-        }
-      },
-      5 * 60 * 1000,
-    ) // 5 minute timeout
-
-    pendingOAuth = {
-      pkce,
-      state,
-      resolve: (tokens) => {
-        clearTimeout(timeout)
-        resolve(tokens)
-      },
-      reject: (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      },
-    }
-  })
 }
 
 export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
@@ -435,7 +183,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
       provider: "openai",
       async loader(getAuth, provider) {
         const auth = await getAuth()
-        if (auth.type !== "oauth") return {}
+        if (!auth || auth.type !== "oauth" || !provider) return {}
 
         // The account's live Codex catalog is the entitlement authority.
         // Never replace it with a source-code allowlist or a model-name
@@ -450,11 +198,24 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         }
 
         // Zero out costs for Codex (included with ChatGPT subscription)
-        for (const model of Object.values(provider.models)) {
+        for (const [modelID, model] of Object.entries(provider.models)) {
           model.cost = {
             input: 0,
             output: 0,
             cache: { read: 0, write: 0 },
+          }
+          // The Codex backend accepts a smaller prompt than the raw OpenAI API for
+          // gpt-* models. Clamp, never raise: models whose real window is already
+          // below the cap (gpt-4o at 128K) must keep it, and limit.context === 0 is
+          // the sentinel that disables overflow handling entirely.
+          // limit.input is what Overflow.usable() reads when present, so it must be
+          // clamped too — but only when the catalog already publishes it. Introducing
+          // one would switch usable() to the input branch and drop the output reserve.
+          // The v1 SDK model type predates limit.input; the runtime object carries it.
+          const limit = model.limit as { context: number; output: number; input?: number }
+          if (modelID.startsWith("gpt-") && limit.context > 0) {
+            limit.context = Math.min(limit.context, CODEX_GPT_CONTEXT_CAP)
+            if (limit.input) limit.input = Math.min(limit.input, CODEX_GPT_CONTEXT_CAP)
           }
         }
 
@@ -475,7 +236,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             }
 
             const currentAuth = await getAuth()
-            if (currentAuth.type !== "oauth") return fetch(requestInput, init)
+            if (!currentAuth || currentAuth.type !== "oauth") return fetch(requestInput, init)
 
             // Cast to include accountId field
             const authWithAccount = currentAuth as typeof currentAuth & { accountId?: string }
@@ -483,7 +244,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             // Check if token needs refresh
             if (!currentAuth.access || currentAuth.expires < Date.now()) {
               log.info("refreshing codex access token")
-              const tokens = await refreshAccessToken(currentAuth.refresh)
+              const tokens = await refreshAccessToken(currentAuth.refresh, init?.signal)
               const newAccountId = extractAccountId(tokens) || authWithAccount.accountId
               await input.client.auth.set({
                 path: { id: "openai" },
@@ -542,37 +303,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
       },
       methods: [
         {
-          label: "ChatGPT Pro/Plus (browser)",
-          type: "oauth",
-          authorize: async () => {
-            const { redirectUri } = await startOAuthServer()
-            const pkce = await generatePKCE()
-            const state = generateState()
-            const authUrl = buildAuthorizeUrl(redirectUri, pkce, state)
-
-            const callbackPromise = waitForOAuthCallback(pkce, state)
-
-            return {
-              url: authUrl,
-              instructions: "Complete authorization in your browser. This window will close automatically.",
-              method: "auto" as const,
-              callback: async () => {
-                const tokens = await callbackPromise
-                stopOAuthServer()
-                const accountId = extractAccountId(tokens)
-                return {
-                  type: "success" as const,
-                  refresh: tokens.refresh_token,
-                  access: tokens.access_token,
-                  expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
-                  accountId,
-                }
-              },
-            }
-          },
-        },
-        {
-          label: "ChatGPT Pro/Plus (headless)",
+          label: "ChatGPT Pro/Plus (browser device login)",
           type: "oauth",
           authorize: async () => {
             const deviceResponse = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
@@ -591,25 +322,48 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
               user_code: string
               interval: string
             }
+            const userCode = deviceData.user_code
+            if (typeof userCode !== "string" || !/^[A-Za-z0-9-]{4,64}$/.test(userCode)) {
+              throw new Error("Provider device authorization returned an invalid user code")
+            }
             const interval = Math.max(parseInt(deviceData.interval) || 5, 1) * 1000
 
-            return {
+            const authorization = {
               url: `${ISSUER}/codex/device`,
-              instructions: `Enter code: ${deviceData.user_code}`,
+              instructions: "Enter the sign-in code on the provider website.",
+              userCode,
               method: "auto" as const,
-              async callback() {
-                while (true) {
-                  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "User-Agent": `opencode/${InstallationVersion}`,
-                    },
-                    body: JSON.stringify({
-                      device_auth_id: deviceData.device_auth_id,
-                      user_code: deviceData.user_code,
-                    }),
-                  })
+              async callback(_code?: string, signal?: AbortSignal) {
+                const waitForPoll = async () => {
+                  if (signal?.aborted) return false
+                  try {
+                    await sleep(interval + OAUTH_POLLING_SAFETY_MARGIN_MS, undefined, signal ? { signal } : undefined)
+                  } catch {
+                    if (!signal?.aborted) throw new Error("Provider device authorization polling failed")
+                    return false
+                  }
+                  return !signal?.aborted
+                }
+                while (!signal?.aborted) {
+                  let response: Response
+                  try {
+                    response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                        "User-Agent": `opencode/${InstallationVersion}`,
+                      },
+                      signal,
+                      body: JSON.stringify({
+                        device_auth_id: deviceData.device_auth_id,
+                        user_code: userCode,
+                      }),
+                    })
+                  } catch {
+                    if (signal?.aborted) return { type: "failed" as const }
+                    if (!(await waitForPoll())) return { type: "failed" as const }
+                    continue
+                  }
 
                   if (response.ok) {
                     const data = (await response.json()) as {
@@ -620,6 +374,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                     const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
                       method: "POST",
                       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      signal,
                       body: new URLSearchParams({
                         grant_type: "authorization_code",
                         code: data.authorization_code,
@@ -644,14 +399,20 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                     }
                   }
 
-                  if (response.status !== 403 && response.status !== 404) {
+                  const retryable = response.status === 403
+                    || response.status === 404
+                    || [408, 425, 429].includes(response.status)
+                    || response.status >= 500
+                  if (!retryable) {
                     return { type: "failed" as const }
                   }
 
-                  await sleep(interval + OAUTH_POLLING_SAFETY_MARGIN_MS)
+                  if (!(await waitForPoll())) return { type: "failed" as const }
                 }
+                return { type: "failed" as const }
               },
             }
+            return authorization
           },
         },
         {

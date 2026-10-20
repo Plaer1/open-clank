@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-  Odysseus - native Windows launcher (no Docker).
+  Open Clank - native Windows launcher (no Docker).
 
   One command to: create a virtualenv, install dependencies, run first-time
   setup (prints an admin password on first run), and start the server.
@@ -8,13 +8,13 @@
 
   Usage:
     powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1
-    powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1 -Port 7000 -BindHost 127.0.0.1
+    powershell -ExecutionPolicy Bypass -File .\launch-windows.ps1 -Port 7777 -BindHost 127.0.0.1
 
   Tip: bind 127.0.0.1 (default) for local-only use. Use 0.0.0.0 only when you
   intentionally want other devices on your LAN to reach it.
 #>
 param(
-    [int]$Port = 7000,
+    [int]$Port = 7777,
     [string]$BindHost = "127.0.0.1"
 )
 
@@ -162,8 +162,8 @@ if (Test-Path $cudaBase) {
     }
 }
 
-# 7. Start the server (use `python -m uvicorn` - bare `uvicorn` may not be on PATH)
-Write-Step ("Starting Odysseus at http://{0}:{1}" -f $BindHost, $Port)
+# 7. Verify the managed engine, finish the provider cutover, and start the server.
+Write-Step ("Starting Open Clank at http://{0}:{1}" -f $BindHost, $Port)
 Write-Host "Press Ctrl+C to stop."
 Write-Host ""
-& $venvPy -m uvicorn app:app --host $BindHost --port $Port
+& $venvPy scripts/openclank_bootstrap.py serve --host $BindHost --port $Port

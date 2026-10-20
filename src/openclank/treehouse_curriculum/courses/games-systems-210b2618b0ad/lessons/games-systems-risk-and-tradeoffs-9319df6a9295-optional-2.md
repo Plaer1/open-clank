@@ -1,0 +1,1 @@
+A continuous linear resource model, an integer loadout selection and a delayed control problem have different feasible choices. Use Programming's objectives/tradeoffs and convexity units for canonical definitions. In game work, first state the decision variables, constraints, objective, uncertainty and time horizon; an optimizer cannot repair a wrong objective.

@@ -25,6 +25,7 @@ import { errorData } from "@/util/error"
 import { AppRuntime } from "@/effect/app-runtime"
 import { waitEvent } from "./util"
 import { WorkspaceContext } from "./workspace-context"
+import * as Truncate from "@/tool/truncate"
 
 export const Info = WorkspaceInfo.meta({
   ref: "Workspace",
@@ -112,7 +113,13 @@ export const create = fn(CreateInput, async (input) => {
   })
 
   const env = {
-    MIMOCODE_AUTH_CONTENT: JSON.stringify(await AppRuntime.runPromise(Auth.Service.use((auth) => auth.all()))),
+    ...(process.env.OPEN_CLANK_MANAGED === "1"
+      ? {}
+      : {
+          MIMOCODE_AUTH_CONTENT: JSON.stringify(
+            await AppRuntime.runPromise(Auth.Service.use((auth) => auth.all())),
+          ),
+        }),
     MIMOCODE_WORKSPACE_ID: config.id,
     MIMOCODE_EXPERIMENTAL_WORKSPACES: "true",
     OTEL_EXPORTER_OTLP_HEADERS: process.env.OTEL_EXPORTER_OTLP_HEADERS,
@@ -313,6 +320,13 @@ export const remove = fn(WorkspaceID.zod, async (id) => {
   const sessions = Database.use((db) =>
     db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.workspace_id, id)).all(),
   )
+  for (const session of sessions) {
+    await AppRuntime.runPromise(
+      Truncate.Service.use((svc) =>
+        svc.removeSession(session.id, process.env.OPEN_CLANK_OWNER ?? ""),
+      ),
+    )
+  }
   for (const session of sessions) {
     await AppRuntime.runPromise(Session.Service.use((svc) => svc.remove(session.id)))
   }

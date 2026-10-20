@@ -1,0 +1,1 @@
+A longer printed decimal does not create information missing from storage.

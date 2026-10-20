@@ -1,12 +1,29 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, mock, test } from "bun:test"
 import {
+  CodexAuthPlugin,
   parseJwtClaims,
   extractAccountIdFromClaims,
   extractAccountId,
   modelMatchesCodexEntitlement,
-  CodexAuthPlugin,
   type IdTokenClaims,
 } from "../../src/plugin/codex"
+import type { PluginInput } from "@mimo-ai/plugin"
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
+
+const fakeInput = {
+  client: {},
+  project: {},
+  worktree: "",
+  directory: "",
+  experimental_workspace: { register() {} },
+  serverUrl: new URL("http://localhost:4096"),
+  $: undefined,
+} as unknown as PluginInput
 
 function createTestJwt(payload: object): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -15,6 +32,100 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  describe("loader", () => {
+    test("returns no adapter when auth or provider is absent", async () => {
+      const hooks = await CodexAuthPlugin(fakeInput)
+
+      await expect(hooks.auth!.loader!(async () => undefined as any, { models: {} } as never)).resolves.toEqual({})
+      await expect(
+        hooks.auth!.loader!(
+          async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+          undefined as never,
+        ),
+      ).resolves.toEqual({})
+    })
+
+    test("clamps gpt context to the Codex cap without raising smaller windows", async () => {
+      const hooks = await CodexAuthPlugin(fakeInput)
+      const model = (modelID: string, limit: { context: number; input?: number }) =>
+        [modelID, { api: { id: modelID }, cost: {}, limit }] as const
+      const provider = {
+        models: Object.fromEntries([
+          model("gpt-5.6-sol", { context: 1_050_000, input: 922_000 }),
+          model("gpt-5.3-codex", { context: 400_000, input: 272_000 }),
+          model("gpt-4o", { context: 128_000 }),
+          model("gpt-image-1", { context: 0, input: 0 }),
+          model("o3", { context: 200_000 }),
+        ]),
+      }
+      globalThis.fetch = mock(() =>
+        Promise.resolve(
+          Response.json({
+            models: Object.keys(provider.models).map((slug) => ({ slug })),
+          }),
+        ),
+      ) as unknown as typeof fetch
+
+      await hooks.auth!.loader!(
+        async () => ({ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 }),
+        provider as never,
+      )
+
+      expect(Object.keys(provider.models)).toEqual(["gpt-5.6-sol", "gpt-5.3-codex", "gpt-4o", "gpt-image-1", "o3"])
+      expect(provider.models["gpt-5.6-sol"].limit).toEqual({ context: 372_000, input: 372_000 })
+      // 272K input cap is already below the Codex cap — it must survive untouched,
+      // otherwise we would raise the trigger above what the provider accepts.
+      expect(provider.models["gpt-5.3-codex"].limit).toEqual({ context: 372_000, input: 272_000 })
+      // Real window below the cap: never raised.
+      expect(provider.models["gpt-4o"].limit).toEqual({ context: 128_000 })
+      // context 0 is the "overflow handling disabled" sentinel — leave it alone.
+      expect(provider.models["gpt-image-1"].limit).toEqual({ context: 0, input: 0 })
+      // Non-gpt models keep catalog limits.
+      expect(provider.models.o3.limit).toEqual({ context: 200_000 })
+    })
+
+    test("forwards request cancellation while refreshing an expired token", async () => {
+      const signal = AbortSignal.timeout(25)
+      const signals: Array<AbortSignal | null | undefined> = []
+      globalThis.fetch = mock((_input, init) => {
+        signals.push(init?.signal)
+        return new Promise<Response>((_resolve, reject) => {
+          const requestSignal = init?.signal
+          if (requestSignal?.aborted) return reject(requestSignal.reason)
+          requestSignal?.addEventListener("abort", () => reject(requestSignal.reason), { once: true })
+        })
+      }) as unknown as typeof fetch
+      const hooks = await CodexAuthPlugin({
+        ...fakeInput,
+        client: { auth: { set: async () => undefined } },
+      } as unknown as PluginInput)
+      const options = await hooks.auth!.loader!(
+        async () => ({ type: "oauth", access: "", refresh: "refresh", expires: 0 }),
+        { models: {} } as never,
+      )
+
+      await expect(
+        options.fetch!("https://api.openai.com/v1/responses", {
+          signal,
+          headers: { authorization: "Bearer placeholder" },
+        }),
+      ).rejects.toThrow()
+      expect(signals).toContain(signal)
+    })
+  })
+
+  test("offers supported device login instead of an unproven public redirect", async () => {
+    const hooks = await CodexAuthPlugin({} as never)
+    expect(hooks.auth!.methods).toHaveLength(2)
+    expect(hooks.auth!.methods[0].label).toBe("ChatGPT Pro/Plus (browser device login)")
+    expect(hooks.auth!.methods[0].type).toBe("oauth")
+    expect(hooks.auth!.methods[1].type).toBe("api")
+    const source = await Bun.file(new URL("../../src/plugin/codex.ts", import.meta.url)).text()
+    expect(source).not.toContain("createServer")
+    expect(source).not.toContain("http://localhost")
+    expect(source).not.toContain("xdg-open")
+  })
+
   test("applies Codex request shaping to an endpoint-projected provider", async () => {
     const hooks = await CodexAuthPlugin({} as never)
     const input = {

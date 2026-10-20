@@ -1,0 +1,1 @@
+Do not apply one format's header layout or address arithmetic to every platform.

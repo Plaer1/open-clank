@@ -1,0 +1,1 @@
+Finite strings/program descriptions are countable; infinite binary sequences are not, by diagonalization. A reduction transforms instances of one problem to another while preserving answers. Reducing an undecidable problem to a target can establish the target's undecidability.

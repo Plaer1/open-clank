@@ -1,0 +1,1 @@
+At 1/4: C=4,D=16/3; deviation wins. At 1/2 both6. At 3/4: C=12,D=8; cooperate. Noise can trigger mistaken punishment; a known final round changes incentives. This compares stated policies, not all equilibria.

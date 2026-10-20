@@ -29,9 +29,11 @@ import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigCompose } from "./compose"
 import { ConfigFormatter } from "./formatter"
+import { MIMOCODE_GITIGNORE_ENTRIES } from "./gitignore"
 import { ConfigHistory } from "./history"
 import { ConfigLayout } from "./layout"
 import { ConfigLSP } from "./lsp"
+import { ConfigLLMServer } from "./llm-server"
 import { ConfigManaged } from "./managed"
 import { ConfigMCP } from "./mcp"
 import { ConfigModelID } from "./model-id"
@@ -92,21 +94,22 @@ const LogLevelRef = Schema.Any.annotate({ [ZodOverride]: Log.Level })
 
 const PositiveInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThan(0))
 const NonNegativeInt = Schema.Number.check(Schema.isInt()).check(Schema.isGreaterThanOrEqualTo(0))
+// Token count as a number or a shorthand string ("300K", "1.5M", "50%").
+const TokenQuantity = Schema.Union([NonNegativeInt, Schema.String])
 
 const InfoSchema = Schema.Struct({
   $schema: Schema.optional(Schema.String).annotate({
     description: "JSON schema reference for configuration validation",
   }),
   logLevel: Schema.optional(LogLevelRef).annotate({ description: "Log level" }),
-  env: Schema.optional(Schema.Record(Schema.String, Schema.String)).annotate({
-    description:
-      "Environment variables to inject into the mimocode process and its child processes (e.g. the bash tool). A variable already set in the real environment takes precedence — config values only apply when the variable is not already set. Supports {env:VAR} and {file:path} substitution.",
-  }),
   server: Schema.optional(ConfigServer.Server).annotate({
     description: "Server configuration for mimo serve and web commands",
   }),
+  llmServer: Schema.optional(ConfigLLMServer.LLMServer).annotate({
+    description: "Defaults for temporary local LLM server token lifetimes",
+  }),
   command: Schema.optional(Schema.Record(Schema.String, ConfigCommand.Info)).annotate({
-    description: "Command configuration, see https://opencode.ai/docs/commands",
+    description: "Command configuration, see https://mimo.xiaomi.com/mimocode/commands",
   }),
   skills: Schema.optional(ConfigSkills.Info).annotate({ description: "Additional skill folder paths" }),
   compose: Schema.optional(ConfigCompose.Info).annotate({ description: "Compose mode configuration" }),
@@ -196,7 +199,7 @@ const InfoSchema = Schema.Struct({
       }),
       [Schema.Record(Schema.String, AgentRef)],
     ),
-  ).annotate({ description: "Agent configuration, see https://opencode.ai/docs/agents" }),
+  ).annotate({ description: "Agent configuration, see https://mimo.xiaomi.com/mimocode/agents" }),
   provider: Schema.optional(Schema.Record(Schema.String, ConfigProvider.Info)).annotate({
     description: "Custom provider configurations and model overrides",
   }),
@@ -257,16 +260,24 @@ const InfoSchema = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      max_context: Schema.optional(Schema.Union([TokenQuantity, Schema.Record(Schema.String, TokenQuantity)])).annotate(
+        {
+          description:
+            'Compact earlier than the model window. A token count (300000), a shorthand string ("300K", "1M", "50%"), ' +
+            'or a map keyed by "<providerID>/<modelID>" with wildcards ("openai/gpt-5*"). Always clamped to the ' +
+            "model's real window — it can only lower the compaction trigger, never raise it. 0 means no budget.",
+        },
+      ),
     }),
   ),
   checkpoint: Schema.optional(
     Schema.Struct({
       thresholds: Schema.optional(Schema.Array(Schema.String)).annotate({
         description:
-          "Context fill thresholds that trigger checkpoint writes. Strings may be percentages (\"40%\"), absolute tokens (\"100K\", \"1.5M\"), or mixed (\"100K\", \"50%\"). Each threshold must be <= window - 20K reserved. Default: [\"40%\", \"60%\", \"80%\"].",
+          "Context fill thresholds that trigger checkpoint writes. Strings may be percentages (\"40%\"), absolute tokens (\"100K\", \"1.5M\"), or mixed (\"100K\", \"50%\"). Each threshold must be <= window minus reserved tokens. Defaults depend on the effective model window.",
       }),
       reserved: Schema.optional(NonNegativeInt).annotate({
-        description: "Token buffer reserved for checkpoint operations. Default: 20000.",
+        description: "Token buffer reserved for checkpoint operations. Default: 13000.",
       }),
       max_writer_failures: Schema.optional(PositiveInt).annotate({
         description:
@@ -338,6 +349,9 @@ const InfoSchema = Schema.Struct({
   ),
   memory: Schema.optional(
     Schema.Struct({
+      disable_write: Schema.optional(Schema.Boolean).annotate({
+        description: "Disable native memory/checkpoint writes while keeping memory reads available. Default: false.",
+      }),
       cc_index: Schema.optional(Schema.Boolean).annotate({
         description:
           "Index Claude Code memory (~/.claude/projects/<slug>/memory) and expose under scope='cc'. Default: false. Note: when enabled, every mimocode agent (build/explore/subagents) can search these memories via the builtin `memory` tool — including CC's `type: user` (your role/preferences) and `type: feedback` (your guidance) categories. CC originally writes them for future CC sessions; flipping this on widens the consumer set to mimocode agents on the same machine. Leave disabled (default) if you don't want personal context recallable from a prompt-injection-vulnerable agent.",
@@ -418,6 +432,22 @@ const InfoSchema = Schema.Struct({
       continue_loop_on_deny: Schema.optional(Schema.Boolean).annotate({
         description: "Continue the agent loop when a tool call is denied",
       }),
+      try_best: Schema.optional(
+        Schema.Struct({
+          edit_window: Schema.optional(PositiveInt).annotate({
+            description: "Recent edit events to compare (default 12).",
+          }),
+          edit_similarity: Schema.optional(Schema.Number).annotate({
+            description: "Jaccard threshold for near-identical edit detection (default 0.8).",
+          }),
+          edit_matches: Schema.optional(PositiveInt).annotate({
+            description: "Prior similar edits required before pausing (default 2).",
+          }),
+          action_streak: Schema.optional(PositiveInt).annotate({
+            description: "Consecutive edit or verify actions without progress before pausing (default 4).",
+          }),
+        }),
+      ).annotate({ description: "Try-best loop detector thresholds." }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in milliseconds for model context protocol (MCP) requests",
       }),
@@ -493,6 +523,72 @@ export type Info = z.output<typeof Info> & {
   mcp_origins?: Record<string, ConfigMCP.Origin>
 }
 
+/** Worker-generation workflow policy, shared by runtime enforcement and readback. */
+export function workflowPolicyFor(config: Info) {
+  return {
+    maxConcurrentAgents: Math.max(1, config.workflow?.maxConcurrentAgents ?? Math.min(16, 2 * (os.cpus().length || 4))),
+    maxDepth: config.workflow?.maxDepth ?? 8,
+    maxLifecycleAgents: config.workflow?.maxLifecycleAgents ?? 1000,
+    scriptDeadlineMs: config.workflow?.scriptDeadlineMs ?? 12 * 60 * 60 * 1000,
+  }
+}
+
+/** Resolve the selected managed profile from the same merged config used at admission. */
+export function withManagedModelSettings(config: Info, model: { providerID: string; id: string; options: Record<string, unknown> }): Info {
+  const selected = config.provider?.[model.providerID]
+  return withManagedAgentSettings(config, model.options["_openclankAgentSettings"] ?? selected?.models?.[model.id]?.options?.["_openclankAgentSettings"] ?? selected?.options?.["_openclankAgentSettings"])
+}
+
+/** Apply one immutable managed settings snapshot to an admitted turn. */
+export function withManagedAgentSettings(config: Info, raw: unknown): Info {
+  if (!isRecord(raw)) return config
+  const incoming = raw as Record<string, unknown>
+  const compaction = isRecord(incoming.compaction) ? incoming.compaction : undefined
+  const checkpoint = isRecord(incoming.checkpoint) ? incoming.checkpoint : undefined
+  const dream = isRecord(incoming.dream) ? incoming.dream : undefined
+  const distill = isRecord(incoming.distill) ? incoming.distill : undefined
+  const experimental = isRecord(incoming.experimental) ? incoming.experimental : undefined
+  if (!compaction && !checkpoint && !dream && !distill && !experimental) return config
+  const next: Info = { ...config }
+  if (compaction) {
+    next.compaction = {
+      ...(config.compaction ?? {}),
+      ...(typeof compaction.auto === "boolean" ? { auto: compaction.auto } : {}),
+      ...(typeof compaction.prune === "boolean" ? { prune: compaction.prune } : {}),
+      ...(typeof compaction.tail_turns === "number" && Number.isSafeInteger(compaction.tail_turns) && compaction.tail_turns >= 0 ? { tail_turns: compaction.tail_turns } : {}),
+      ...(typeof compaction.preserve_recent_tokens === "number" && Number.isSafeInteger(compaction.preserve_recent_tokens) && compaction.preserve_recent_tokens >= 0 ? { preserve_recent_tokens: compaction.preserve_recent_tokens } : {}),
+      ...(typeof compaction.reserved === "number" && Number.isSafeInteger(compaction.reserved) && compaction.reserved >= 0 ? { reserved: compaction.reserved } : {}),
+      ...(typeof compaction.max_context === "number" || typeof compaction.max_context === "string" || isRecord(compaction.max_context) ? { max_context: structuredClone(compaction.max_context) as NonNullable<Info["compaction"]>["max_context"] } : {}),
+    }
+  }
+  if (checkpoint) {
+    next.checkpoint = {
+      ...(config.checkpoint ?? {}),
+      ...(Array.isArray(checkpoint.thresholds) && checkpoint.thresholds.every((value) => typeof value === "string") ? { thresholds: [...checkpoint.thresholds] } : {}),
+      ...(typeof checkpoint.reserved === "number" && Number.isSafeInteger(checkpoint.reserved) && checkpoint.reserved >= 0 ? { reserved: checkpoint.reserved } : {}),
+      ...(typeof checkpoint.max_writer_failures === "number" && Number.isSafeInteger(checkpoint.max_writer_failures) && checkpoint.max_writer_failures > 0 ? { max_writer_failures: checkpoint.max_writer_failures } : {}),
+      ...(typeof checkpoint.fork === "boolean" ? { fork: checkpoint.fork } : {}),
+      ...(isRecord(checkpoint.push_caps) ? { push_caps: { ...config.checkpoint?.push_caps, ...structuredClone(checkpoint.push_caps) } } : {}),
+    }
+  }
+  for (const [key, section] of [["dream", dream], ["distill", distill]] as const) {
+    if (!section) continue
+    next[key] = {
+      ...config[key],
+      ...(typeof section.auto === "boolean" ? { auto: section.auto } : {}),
+      ...(typeof section.interval_days === "number" && Number.isSafeInteger(section.interval_days) && section.interval_days >= 0 ? { interval_days: section.interval_days } : {}),
+    }
+  }
+  if (experimental) {
+    next.experimental = {
+      ...config.experimental,
+      ...(typeof experimental.continue_loop_on_deny === "boolean" ? { continue_loop_on_deny: experimental.continue_loop_on_deny } : {}),
+      ...(isRecord(experimental.try_best) ? { try_best: { ...config.experimental?.try_best, ...structuredClone(experimental.try_best) } } : {}),
+    }
+  }
+  return next
+}
+
 type State = {
   config: Info
   directories: string[]
@@ -562,14 +658,6 @@ export const layer = Layer.effect(
     const accountSvc = yield* Account.Service
     const env = yield* Env.Service
     const npmSvc = yield* Npm.Service
-
-    // Keys injected by config `env`, mapped to the process.env value that
-    // existed before we first touched them (undefined = was unset). Lives in
-    // the layer closure so it survives instance disposal / config reload,
-    // matching process.env's lifetime. Lets a reload distinguish "set by the
-    // real environment" (defer) from "set by our own prior injection"
-    // (re-apply edits, restore on removal).
-    const injectedEnv = new Map<string, string | undefined>()
 
     const readConfigFile = Effect.fnUntraced(function* (filepath: string) {
       return yield* fs.readFileString(filepath).pipe(
@@ -676,7 +764,7 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore", ".cron-lock"].join("\n"),
+            MIMOCODE_GITIGNORE_ENTRIES.join("\n"),
           )
           .pipe(
             Effect.catchIf(
@@ -854,7 +942,10 @@ export const layer = Layer.effect(
               add: [
                 {
                   name: "@mimo-ai/plugin",
-                  version: InstallationLocal ? undefined : InstallationVersion,
+                  // Open Clank embeds its private engine version independently
+                  // of the published plugin SDK version. Do not ask npm for a
+                  // private engine version that cannot exist in the registry.
+                  version: InstallationLocal || process.env.OPEN_CLANK_MANAGED === "1" ? undefined : InstallationVersion,
                 },
               ],
             })
@@ -998,34 +1089,6 @@ export const layer = Layer.effect(
         }
         if (Flag.MIMOCODE_DISABLE_PRUNE) {
           result.compaction = { ...result.compaction, prune: false }
-        }
-
-        const nextEnv = result.env ?? {}
-        // Reconcile keys we injected on a previous load that are no longer in
-        // config (removed/renamed): restore their original value so a config
-        // edit + reload takes effect without a process restart.
-        for (const [key, original] of injectedEnv) {
-          if (key in nextEnv) continue
-          if (original === undefined) {
-            delete process.env[key]
-            yield* env.remove(key)
-          } else {
-            process.env[key] = original
-            yield* env.set(key, original)
-          }
-          injectedEnv.delete(key)
-        }
-        for (const [key, value] of Object.entries(nextEnv)) {
-          // Defer to the real environment: only inject when the variable is
-          // not already set by something other than our own prior injection.
-          // A caller's runtime env (CI, container, `FOO=bar mimo`) is more
-          // specific than a persisted config default and must win. Matches
-          // Claude Code, where the settings field applies only when the env
-          // var is not set.
-          if (!injectedEnv.has(key) && process.env[key] !== undefined) continue
-          if (!injectedEnv.has(key)) injectedEnv.set(key, process.env[key])
-          process.env[key] = value
-          yield* env.set(key, value)
         }
 
         return {

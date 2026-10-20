@@ -1,0 +1,1 @@
+The next string is ABAAB; the answer distinguishes a construction bias from a promised gameplay property.

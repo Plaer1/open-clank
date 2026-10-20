@@ -11,6 +11,7 @@ import { FileWatcher } from "../file/watcher"
 import { Instance } from "../project/instance"
 import { SessionCwd } from "./session-cwd"
 import { assertWriteAllowed, askEditUnlessMemory } from "./external-directory"
+import { assertProjectFilePolicy } from "./project-policy"
 import { assertFileRead } from "./read-state"
 import { trimDiff } from "./edit"
 
@@ -92,6 +93,12 @@ export const NotebookEditTool = Tool.define(
     return {
       description: DESCRIPTION,
       parameters: Parameters,
+      resources: (params: z.infer<typeof Parameters>, ctx: Tool.Context) => {
+        const notebookPath = path.isAbsolute(params.notebook_path)
+          ? params.notebook_path
+          : path.join(SessionCwd.get(ctx.sessionID), params.notebook_path)
+        return { reads: [notebookPath], writes: [notebookPath] }
+      },
       execute: (params: z.infer<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const editMode = params.edit_mode ?? "replace"
@@ -101,7 +108,7 @@ export const NotebookEditTool = Tool.define(
             throw new Error("notebook_path must point to a .ipynb file")
           }
 
-          const notebookPath = path.isAbsolute(params.notebook_path)
+          const requestedPath = path.isAbsolute(params.notebook_path)
             ? params.notebook_path
             : path.join(SessionCwd.get(ctx.sessionID), params.notebook_path)
 
@@ -115,13 +122,17 @@ export const NotebookEditTool = Tool.define(
             throw new Error('cell_type is required when edit_mode is "insert"')
           }
 
-          yield* assertWriteAllowed(ctx, notebookPath)
-          assertFileRead(ctx, notebookPath, "notebook_edit")
+          const notebookPath = (yield* assertWriteAllowed(ctx, requestedPath))!
+          const readFingerprint = assertFileRead(ctx, notebookPath, "notebook_edit")
 
           const exists = yield* fs.existsSafe(notebookPath)
           if (!exists) throw new Error(`Notebook not found: ${notebookPath}`)
 
-          const contentOld = yield* fs.readFileString(notebookPath)
+          const snapshot = yield* fs.readTextSnapshot(notebookPath)
+          if (readFingerprint && snapshot.fingerprint !== readFingerprint) {
+            throw new Error(`Notebook changed since it was read: ${notebookPath}`)
+          }
+          const contentOld = snapshot.text
           const notebook = ((): Notebook => {
             try {
               return JSON.parse(contentOld) as Notebook
@@ -203,14 +214,23 @@ export const NotebookEditTool = Tool.define(
           }
 
           const contentNew = JSON.stringify(notebook, null, 1) + (contentOld.endsWith("\n") ? "\n" : "")
+          const candidateContent = AppFileSystem.encodeText(snapshot, contentNew)
 
           const diff = trimDiff(createTwoFilesPatch(notebookPath, notebookPath, contentOld, contentNew))
+          yield* Effect.promise(() =>
+            assertProjectFilePolicy(ctx, [{ path: notebookPath, content: candidateContent }]),
+          )
           yield* askEditUnlessMemory(ctx, notebookPath, {
             patterns: [path.relative(Instance.worktree, notebookPath)],
             diff,
           })
 
-          yield* fs.writeWithDirs(notebookPath, contentNew)
+          yield* fs.atomicWrite({
+            path: notebookPath,
+            content: candidateContent,
+            expectedFingerprint: snapshot.fingerprint,
+            mode: snapshot.mode,
+          })
           yield* bus.publish(File.Event.Edited, { file: notebookPath })
           yield* bus.publish(FileWatcher.Event.Updated, { file: notebookPath, event: "change" })
 

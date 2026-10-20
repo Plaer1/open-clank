@@ -1,0 +1,1 @@
+State has 5 counters and the other player's turn; legal removal is 1 or 2; a terminal test detects zero after a legal move.

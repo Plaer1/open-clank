@@ -27,6 +27,8 @@ ALLOWED_SCOPES = {
     "memory:write",
     "cookbook:read",
     "cookbook:launch",
+    "providers:read",
+    "providers:write",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
@@ -69,6 +71,7 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
     ensure_before("memory:write", "memory:read")
     ensure_before("email:draft", "email:read")
     ensure_before("cookbook:launch", "cookbook:read")
+    ensure_before("providers:write", "providers:read")
 
     return normalized or [DEFAULT_SCOPES]
 
@@ -88,7 +91,11 @@ def setup_api_token_routes() -> APIRouter:
                     "owner": getattr(t, "owner", None),
                     "token_prefix": t.token_prefix,
                     "scopes": [s.strip() for s in (getattr(t, "scopes", "") or DEFAULT_SCOPES).split(",") if s.strip()],
+                    "client_kind": getattr(t, "client_kind", None) or "api",
+                    "device_label": getattr(t, "device_label", None),
                     "is_active": t.is_active,
+                    "expires_at": t.expires_at.isoformat() if getattr(t, "expires_at", None) else None,
+                    "revoked_at": t.revoked_at.isoformat() if getattr(t, "revoked_at", None) else None,
                     "last_used_at": t.last_used_at.isoformat() if t.last_used_at else None,
                     "created_at": t.created_at.isoformat() if t.created_at else None,
                 }

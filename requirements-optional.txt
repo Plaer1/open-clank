@@ -1,8 +1,5 @@
 # Optional dependencies — install only if you use the corresponding feature.
 # The app handles their absence gracefully (clear error message on first use).
-#
-# Note: chromadb-client + fastembed moved to requirements.txt — RAG, semantic
-# memory, and tool selection are core paths, so they ship by default now.
 
 # Local speech-to-text (microphone -> text) via faster-whisper, for the
 # "local" STT provider. Runs on CPU out of the box (CTranslate2 backend, no

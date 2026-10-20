@@ -1,0 +1,1 @@
+A Pareto-efficient outcome need not be fair, equal, or best under every objective.

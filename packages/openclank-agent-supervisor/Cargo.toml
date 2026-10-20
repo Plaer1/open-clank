@@ -1,0 +1,31 @@
+[package]
+name = "openclank-agent-supervisor"
+version = "0.1.0"
+edition = "2021"
+description = "Private Open Clank agent supervisor health and lifecycle daemon"
+license = "MIT"
+
+[features]
+default = ["tonic-transport"]
+tonic-transport = ["dep:tokio", "dep:tokio-stream", "dep:tonic", "dep:tonic-prost", "dep:prost"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "=0.22.1"
+sha2 = "0.10"
+thiserror = "2"
+portable-pty = "=0.9.0"
+nix = { version = "=0.31.3", features = ["process", "signal", "user"] }
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tokio-stream = { version = "=0.1.18", features = ["net"], optional = true }
+prost = { version = "=0.14.4", optional = true }
+tonic = { version = "=0.14.6", features = ["transport"], optional = true }
+tonic-prost = { version = "=0.14.6", optional = true }
+
+[build-dependencies]
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.6"
+
+[dev-dependencies]
+tempfile = "3"

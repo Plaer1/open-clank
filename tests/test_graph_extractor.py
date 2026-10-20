@@ -8,10 +8,6 @@ the capture admitted a candidate), and the rule that extraction failures
 never touch the captured record.
 """
 
-import sys
-import types
-from types import SimpleNamespace
-
 import pytest
 
 from services.memory.graph_extractor import (
@@ -93,8 +89,16 @@ class _Provider:
         self.capture_calls = []
         self.tool_calls = []
 
-    async def capture(self, user_text, assistant_text, *, owner=None, session_id=None):
-        self.capture_calls.append(user_text)
+    async def capture(
+        self,
+        user_text,
+        assistant_text,
+        *,
+        owner=None,
+        session_id=None,
+        capture_mode="candidate",
+    ):
+        self.capture_calls.append((user_text, capture_mode))
         return {"record_ids": self._record_ids}
 
     async def _call_tool(self, name, args):
@@ -103,13 +107,13 @@ class _Provider:
 
 
 def _stub_llm(monkeypatch, response):
-    llm_mod = types.ModuleType("src.llm_core")
-
-    async def fake_llm_call_async(url, model, messages, **kwargs):
+    async def fake_complete_text(**kwargs):
         return response
 
-    llm_mod.llm_call_async = fake_llm_call_async
-    monkeypatch.setitem(sys.modules, "src.llm_core", llm_mod)
+    monkeypatch.setattr(
+        "services.memory.graph_extractor._complete_text",
+        fake_complete_text,
+    )
 
 
 SAMPLE_RESPONSE = (
@@ -121,14 +125,29 @@ SAMPLE_RESPONSE = (
 
 @pytest.mark.asyncio
 async def test_accepted_capture_triggers_graph_upsert(monkeypatch):
-    _stub_llm(monkeypatch, SAMPLE_RESPONSE)
+    completion_calls = []
+
+    async def fake_complete_text(**kwargs):
+        completion_calls.append(kwargs)
+        return SAMPLE_RESPONSE
+
+    monkeypatch.setattr(
+        "services.memory.graph_extractor._complete_text",
+        fake_complete_text,
+    )
     provider = _Provider(record_ids=["raw_1", "m_123"])
     await capture_turn_and_enrich(
         provider, "ada works on loom", "Noted.",
         session_id="ses_g1", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
+        root_operation_id="root_graph_1",
     )
-    assert provider.capture_calls == ["ada works on loom"]
+    assert provider.capture_calls == [("ada works on loom", "candidate")]
+    assert completion_calls[0]["owner"] == "alice"
+    assert completion_calls[0]["purpose"] == "memory"
+    assert completion_calls[0]["root_operation_id"] == "root_graph_1"
+    assert "endpoint_url" not in completion_calls[0]
+    assert "headers" not in completion_calls[0]
     assert len(provider.tool_calls) == 1
     name, args = provider.tool_calls[0]
     assert name == "graph_upsert"
@@ -147,19 +166,19 @@ async def test_raw_only_capture_skips_enrichment(monkeypatch):
         session_id="ses_g2", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
     )
-    assert provider.capture_calls == ["just chatter"]
+    assert provider.capture_calls == [("just chatter", "candidate")]
     assert provider.tool_calls == []
 
 
 @pytest.mark.asyncio
 async def test_extraction_failure_never_touches_the_capture(monkeypatch):
-    llm_mod = types.ModuleType("src.llm_core")
-
     async def exploding(*a, **k):
         raise ConnectionError("task endpoint down")
 
-    llm_mod.llm_call_async = exploding
-    monkeypatch.setitem(sys.modules, "src.llm_core", llm_mod)
+    monkeypatch.setattr(
+        "services.memory.graph_extractor._complete_text",
+        exploding,
+    )
 
     provider = _Provider(record_ids=["m_1"])
     await capture_turn_and_enrich(
@@ -167,7 +186,7 @@ async def test_extraction_failure_never_touches_the_capture(monkeypatch):
         session_id="ses_g3", owner="alice",
         endpoint_url="http://task", model="task-model", headers={},
     )
-    assert provider.capture_calls == ["ada works on loom"]
+    assert provider.capture_calls == [("ada works on loom", "candidate")]
     assert provider.tool_calls == []
 
 

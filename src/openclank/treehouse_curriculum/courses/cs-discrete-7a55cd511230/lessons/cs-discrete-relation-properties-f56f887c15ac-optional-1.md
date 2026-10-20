@@ -1,0 +1,1 @@
+One symmetric pair of distinct elements breaks antisymmetry; loops do not.

@@ -1,0 +1,1 @@
+Do not transfer continuous feasible points into an integer/discrete model.

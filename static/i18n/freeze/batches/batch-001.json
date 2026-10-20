@@ -1,0 +1,269 @@
+{
+  "id": "batch-001",
+  "group": "auth",
+  "surface": "auth",
+  "entry_count": 21,
+  "character_count": 2007,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.confirm.password",
+      "source": "Confirm Password",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/login.html:42"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.don.t.have.an.account",
+      "source": "Don't have an account?",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/login.html:55"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.generate.secret",
+      "source": "Failed to generate secret",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:1023"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename.filesystem.access.state.value",
+      "source": "Failed to rename filesystem access state: {exc}",
+      "placeholders": [
+        "exc"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:2124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename.user.data",
+      "source": "Failed to rename user data",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:1823"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename.user.memory",
+      "source": "Failed to rename user memory",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:1664"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename.user.open.clank.agent.state.value",
+      "source": "Failed to rename user Open Clank agent state: {exc}",
+      "placeholders": [
+        "exc"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:2096"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.staging.rename.target.already.contains.state",
+      "source": "import staging rename target already contains state",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:1444"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.staging.source.remains.after.rename",
+      "source": "import staging source remains after rename",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:2210"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.staging.tombstone.already.contains.state",
+      "source": "import staging tombstone already contains state",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:2626"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.pending.oauth.flow.for.this.server",
+      "source": "No pending OAuth flow for this server",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/mcp_oauth.py:183"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.webhook.url.set.paste.the.full.discord.webhook.url",
+      "source": "No webhook URL set — paste the full Discord webhook URL into the Base URL field.",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:4242"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.lifecycle.is.unavailable",
+      "source": "Open Clank agent lifecycle is unavailable",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:676"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.connectivity.test",
+      "source": "Open Clank connectivity test",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:4245"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.login",
+      "source": "Open Clank — Login",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/login.html:7"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remember.me",
+      "source": "Remember me",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/login.html:27",
+        "static/login.html:28"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.setup.first",
+      "source": "Run setup first",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:912"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.show.password",
+      "source": "Show password",
+      "placeholders": [],
+      "kind": "html-attribute",
+      "status": "live",
+      "locations": [
+        "static/login.html:36",
+        "static/login.html:45"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.in",
+      "source": "Sign In",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/login.html:51"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sign.up",
+      "source": "Sign up",
+      "placeholders": [],
+      "kind": "html-text",
+      "status": "live",
+      "locations": [
+        "static/login.html:56"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.source.owner.remains.after.rename",
+      "source": "upload source owner remains after rename",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/auth_routes.py:2199"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

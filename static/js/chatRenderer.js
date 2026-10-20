@@ -1,3 +1,5 @@
+import { uiIcon } from './uiIcons.js';
+import { fileIcon } from './langIcons.js';
 // static/js/chatRenderer.js
 // Extracted from chat.js — message rendering, sources, images, metrics
 
@@ -12,11 +14,12 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
 import { normalizeAssistantTranscript } from './chatTranscript.js';
 
-const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
-const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
-const CHAT_ABOUT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-const COPY_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-const CHECK_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+const SEARCH_ICON = uiIcon("search", 14);
+const REPORT_ICON = uiIcon("document", 14);
+const CHAT_ABOUT_ICON = uiIcon("chat", 14);
+const COPY_ICON = uiIcon("copy", 12);
+const CHECK_ICON = uiIcon("check", 12, {"role":"success"});
+const PAPERCLIP_ICON = uiIcon("attachment", 12);
 
 /** Sanitize a URL for use in href — only allow http(s) and protocol-relative. */
 function _safeHref(url) {
@@ -63,15 +66,9 @@ function _makeActionBtn(className, title, text, handler) {
 
 // Attachment card helpers
 function _attachIcon(mimeOrName) {
-  const s = (mimeOrName || '').toLowerCase();
-  if (s.startsWith('image/') || /\.(png|jpg|jpeg|gif|webp|svg)$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
-  if (s.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|webm)$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
-  if (s === 'application/pdf' || /\.pdf$/i.test(s))
-    return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
-  // Default: generic document
-  return '<svg class="attach-card-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  const value = String(mimeOrName || '');
+  const mime = /^(?:application|audio|font|image|text|video)\//i.test(value) ? value : '';
+  return fileIcon({ name: mime ? '' : value, mimeType: mime }, 16, { className: 'attach-card-icon' });
 }
 function _formatSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -164,7 +161,7 @@ export function buildAttachCards(attachments) {
           ocrBtn.type = 'button';
           ocrBtn.className = 'attach-ocr-btn';
           ocrBtn.title = 'View / edit OCR text';
-          ocrBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg><span class="attach-ocr-label">Caption</span>';
+          ocrBtn.innerHTML = uiIcon("edit", 12) + "<span class=\"attach-ocr-label\">Caption</span>";
           ocrBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             _openVisionEditor(att, ocrBtn.closest('.msg'));
@@ -303,7 +300,7 @@ function _openVisionEditor(att, userMsgEl) {
   title.className = 'vision-editor-title';
   // Eye icon matches the one in Settings → Vision so users recognise where
   // this text originates.
-  title.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;flex-shrink:0"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span>Vision text</span>';
+  title.innerHTML = uiIcon("eye", 14, {"style":"opacity:0.7;flex-shrink:0"}) + "<span>Vision text</span>";
   panel.appendChild(title);
   const desc = document.createElement('div');
   desc.className = 'vision-editor-desc';
@@ -355,7 +352,7 @@ function _openVisionEditor(att, userMsgEl) {
   regenBtn.type = 'button';
   regenBtn.className = 'vision-editor-btn vision-editor-btn-primary';
   regenBtn.title = 'Save and regenerate the message';
-  regenBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.74 9.74 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span class="vision-btn-label">Regenerate message</span>';
+  regenBtn.innerHTML = uiIcon("refresh", 12) + "<span class=\"vision-btn-label\">Regenerate message</span>";
   regenBtn.disabled = true;
   regenBtn.addEventListener('click', async () => {
     regenBtn.disabled = true;
@@ -1022,7 +1019,7 @@ export function buildFindingsBox(findings, expanded) {
       + '<div class="finding-summary">' + summary + '</div>'
       + '</div>';
   }
-  var FINDINGS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>';
+  var FINDINGS_ICON = uiIcon("document", 14);
   var arrow = expanded ? 'down' : 'right';
   var expandedClass = expanded ? ' expanded' : '';
   return '<div class="sources-section">'
@@ -1046,7 +1043,7 @@ function _appendContinuePrompt(container) {
   wrap.className = 'continue-research-wrap';
   wrap.innerHTML =
     '<div class="continue-research-hint">'
-    + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>'
+    + uiIcon("search", 13)
     + '<span>Dig deeper? Activate Research again and type a follow-up question to continue this research.</span>'
     + '</div>';
   container.appendChild(wrap);
@@ -1198,7 +1195,7 @@ document.addEventListener('click', function(e) {
       } catch {}
     });
   } else if (kind === 'document') {
-    import('./document.js').then(mod => {
+    import('./document.js?v=20260722emailfastindex1').then(mod => {
       const open = mod.loadDocument
         || mod.openDocument
         || (mod.default && (mod.default.loadDocument || mod.default.openDocument));
@@ -1215,12 +1212,13 @@ document.addEventListener('click', function(e) {
       } catch (_) {}
     }).catch(() => {});
   } else if (kind === 'image') {
-    import('./gallery.js').then(mod => {
-      const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
-      if (open) open(id);
+    import('./imps.js').then((mod) => {
+      const open = mod.openEditor || (mod.default && mod.default.openEditor);
+      if (open) open(null, null, { w: 1024, h: 1024 }, 'Image');
+      uiModule.showToast?.('Open the image from Files to edit its original');
     }).catch(() => {});
   } else if (kind === 'email') {
-    import('./emailLibrary.js').then(mod => {
+    import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
       const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
       if (open) open({ uid: id });
     }).catch(() => {});
@@ -1255,6 +1253,9 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   var esc = uiModule.esc;
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-ai generated-image-wrap';
+  wrap.dataset.imageUrl = imageUrl || '';
+  wrap.dataset.imageKey = String(imageId || imageUrl || '');
+  if (imageId) wrap.dataset.imageId = imageId;
 
   const role = document.createElement('div');
   role.className = 'role';
@@ -1330,34 +1331,54 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   });
   actions.appendChild(dlBtn);
 
+  const reuseBtn = document.createElement('button');
+  reuseBtn.className = 'footer-copy-btn';
+  reuseBtn.type = 'button';
+  reuseBtn.title = 'Attach image to new prompt';
+  reuseBtn.innerHTML = PAPERCLIP_ICON;
+  reuseBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    reuseBtn.disabled = true;
+    try {
+      const resp = await fetch(safeImageUrl, { credentials: 'same-origin' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const ext = (blob.type || '').includes('jpeg') ? 'jpg'
+        : (blob.type || '').includes('webp') ? 'webp'
+        : (blob.type || '').includes('gif') ? 'gif'
+        : 'png';
+      const base = (prompt || 'generated-image').slice(0, 36).replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'generated-image';
+      const file = new File([blob], `${base}.${ext}`, { type: blob.type || 'image/png', lastModified: Date.now() });
+      const mod = await import('./fileHandler.js');
+      const addFiles = mod.addFiles || (mod.default && mod.default.addFiles);
+      if (!addFiles) throw new Error('attachment handler unavailable');
+      await addFiles([file], { skipCrop: true });
+      const input = document.getElementById('message');
+      if (input) input.focus();
+      reuseBtn.innerHTML = CHECK_ICON;
+      if (window.showToast) window.showToast('Image attached');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1400);
+    } catch (err) {
+      console.warn('Attach generated image failed', err);
+      reuseBtn.textContent = '\u2717';
+      if (window.showToast) window.showToast('Could not attach image');
+      setTimeout(() => { reuseBtn.innerHTML = PAPERCLIP_ICON; reuseBtn.disabled = false; }, 1600);
+    }
+  });
+  actions.appendChild(reuseBtn);
+
   const editBtn = document.createElement('button');
   editBtn.className = 'footer-copy-btn';
   editBtn.type = 'button';
   editBtn.title = 'Edit in image editor';
-  editBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+  editBtn.innerHTML = uiIcon("edit", 12);
   editBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
-      const [galleryMod, editorMod] = await Promise.all([
-        import('./gallery.js'),
-        import('./galleryEditor.js'),
-      ]);
-      // Ensure the Gallery modal is open so the editor has a container
-      // to render into; switch its tabs to the Edit tab.
-      galleryMod.default.openGallery();
-      const modal = document.getElementById('gallery-modal');
-      if (modal) {
-        modal.querySelectorAll('.gallery-tab').forEach(t => t.classList.remove('active'));
-        modal.querySelector('.gallery-tab[data-tab="editor"]')?.classList.add('active');
-      }
-      const imagesContainer = document.getElementById('gallery-images-container');
-      const albumsContainer = document.getElementById('gallery-albums-container');
-      if (imagesContainer) imagesContainer.style.display = 'none';
-      if (albumsContainer) albumsContainer.style.display = 'none';
-      const editorContainer = document.getElementById('gallery-editor-container');
-      if (editorContainer) editorContainer.style.display = 'flex';
+      // Imps owns image open, so mount the editor directly.
+      const editorMod = await import('./imps.js');
       const label = (prompt || '').trim().slice(0, 60) || 'Generated image';
-      editorMod.openEditor(imageUrl, null, null, label);
+      editorMod.openEditor(imageUrl, imageId || null, null, label);
     } catch (err) {
       console.error('[chat] open in editor failed', err);
     }
@@ -1365,29 +1386,29 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
   actions.appendChild(editBtn);
 
   if (imageId) {
-    const galleryBtn = document.createElement('button');
-    galleryBtn.className = 'footer-copy-btn footer-open-gallery-btn';
-    galleryBtn.type = 'button';
-    galleryBtn.title = 'Open in gallery';
-    galleryBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg><span>Open in gallery</span>';
-    galleryBtn.addEventListener('click', async (e) => {
+    const impsBtn = document.createElement('button');
+    impsBtn.className = 'footer-copy-btn footer-open-imps-btn';
+    impsBtn.type = 'button';
+    impsBtn.title = 'Open in Imps';
+    impsBtn.innerHTML = uiIcon("image", 12) + "<span>Open in Imps</span>";
+    impsBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        const mod = await import('./gallery.js');
-        const open = mod.openGalleryImage || (mod.default && mod.default.openGalleryImage);
-        if (open) open(imageId);
+        // Open this image in Imps.
+        const editorMod = await import('./imps.js');
+        editorMod.openEditor(imageUrl, imageId || null, null, (prompt || '').trim().slice(0, 60) || 'Generated image');
       } catch (err) {
-        console.error('[chat] open in gallery failed', err);
+        console.error('[chat] open in Imps failed', err);
       }
     });
-    actions.appendChild(galleryBtn);
+    actions.appendChild(impsBtn);
   }
 
   const delBtn = document.createElement('button');
   delBtn.className = 'footer-copy-btn footer-delete-btn';
   delBtn.type = 'button';
   delBtn.title = 'Delete image';
-  delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+  delBtn.innerHTML = uiIcon("trash", 12);
   delBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     const ok = await uiModule.styledConfirm('Delete this image?', {
@@ -1396,23 +1417,7 @@ export function buildImageBubble(imageUrl, prompt, model, size, quality, imageId
       danger: true,
     });
     if (!ok) return;
-    // If we have a gallery id, delete server-side; otherwise just remove
-    // the bubble from chat (e.g. external DALL-E url that wasn't saved).
-    if (imageId) {
-      try {
-        const res = await fetch(`/api/gallery/${encodeURIComponent(imageId)}`, {
-          method: 'DELETE', credentials: 'same-origin',
-        });
-        if (!res.ok && res.status !== 404) {
-          uiModule.showToast?.('Delete failed', 4000);
-          return;
-        }
-        window.dispatchEvent(new CustomEvent('gallery-refresh'));
-      } catch (_) {
-        uiModule.showToast?.('Delete failed', 4000);
-        return;
-      }
-    }
+    if (imageId) uiModule.showToast?.('The image remains in Files; remove it there.');
     wrap.remove();
   });
   actions.appendChild(delBtn);
@@ -1448,8 +1453,12 @@ export function hideWelcomeScreen() {
 export function showWelcomeScreen() {
   const ws = document.getElementById('welcome-screen');
   const cc = document.getElementById('chat-container');
+  const alreadyVisible = !!(ws && !ws.classList.contains('hidden'));
   if (ws) ws.classList.remove('hidden');
   if (cc) cc.classList.add('welcome-active');
+  if (alreadyVisible) {
+    return;
+  }
   // Entering the New Chat / welcome state: discard any stale draft left in the
   // composer from the previous session so the input starts empty (issue #1343).
   // Switching between existing sessions loads them directly and does NOT call
@@ -1633,7 +1642,7 @@ export function createMsgFooter(msgElement) {
     const parts = [];
     if (pinnedCount) parts.push(`${pinnedCount} pinned`);
     if (recalledCount) parts.push(`${recalledCount} recalled`);
-    pill.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:3px"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.8-3.5 6-.3.2-.5.5-.5.9V18h-6v-2.1c0-.4-.2-.7-.5-.9C6.3 13.8 5 11.5 5 9a7 7 0 0 1 7-7z"/><path d="M9 18h6v1a3 3 0 0 1-6 0v-1z"/><path d="M12 2v7"/><path d="M8.5 6.5L12 9l3.5-2.5"/></svg><span class="memory-used-pill-text">${parts.join(', ')}</span>`;
+    pill.innerHTML = `${uiIcon("memory", 12, {"style":"vertical-align:-2px;margin-right:3px"})}<span class="memory-used-pill-text">${parts.join(', ')}</span>`;
     pill.title = mems.map(m => `[${m.type}] ${m.text}`).join('\n');
 
     pill.addEventListener('click', (e) => {
@@ -2000,7 +2009,7 @@ export function displayMetrics(messageElement, metrics) {
           compactMsg.className = 'msg msg-ai';
           const compactRole = document.createElement('div');
           compactRole.className = 'role';
-          compactRole.textContent = window.__agentName || 'Odysseus';
+          compactRole.textContent = window.__agentName || 'Open Clank';
           const compactBody = document.createElement('div');
           compactBody.className = 'body';
           compactBody.innerHTML = 'Compacting context <span class="compact-wave">▁▂▃▅▂▁</span>';
@@ -2121,7 +2130,7 @@ function _renderMimoQuestionCard(aq, renderOptions) {
 
   const card = document.createElement('form');
   card.className = 'ask-user-card mimo-question-card';
-  card.setAttribute('aria-label', 'MiMo question');
+  card.setAttribute('aria-label', 'Open Clank agent question');
   const status = document.createElement('div');
   status.className = 'settings-save-status';
   status.setAttribute('role', 'status');
@@ -2152,7 +2161,7 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   close.type = 'button';
   close.className = 'modal-close ask-user-close';
   close.setAttribute('aria-label', 'Reject question');
-  close.textContent = '×';
+  close.innerHTML = uiIcon('close', 16); close.setAttribute('aria-label', close.getAttribute('aria-label') || close.title || 'Close');
   close.addEventListener('click', async () => {
     close.disabled = true;
     try { await send({ rejected: true }); }
@@ -2264,7 +2273,7 @@ export function renderAskUserCard(payload, options) {
   closeBtn.type = 'button';
   closeBtn.className = 'modal-close ask-user-close';
   closeBtn.setAttribute('aria-label', 'Dismiss question');
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 16); closeBtn.setAttribute('aria-label', closeBtn.getAttribute('aria-label') || closeBtn.title || 'Close');
   closeBtn.addEventListener('click', () => {
     card.remove();
     const input = uiModule.el('message');
@@ -2368,7 +2377,8 @@ export function renderAskUserCard(payload, options) {
 /**
  * Inline permission prompt (C1). The agent's turn is blocked server-side
  * until one of the three buttons answers the request — there is no timeout.
- * 'Always allow' persists a durable grant (subtree for file requests).
+ * Chat/workspace/always choices persist a grant at the selected lifetime;
+ * once is consumed only by this request.
  */
 export function renderPermissionCard(payload, sessionId) {
   const pq = payload || {};
@@ -2382,15 +2392,20 @@ export function renderPermissionCard(payload, sessionId) {
 
   const title = document.createElement('div');
   title.className = 'ask-user-question';
-  title.textContent = `Agent requests permission: ${pq.permission_type || 'unknown'}`;
+  title.textContent = pq.sudo_password
+    ? 'Approved command needs your sudo password'
+    : `Agent requests permission: ${pq.permission_type || 'unknown'}`;
   card.appendChild(title);
 
   const d = pq.detail || {};
-  const detailText = d.filepath || d.command || (Object.keys(d).length ? JSON.stringify(d) : '');
+  const detailText = d.filepath
+    || (d.command
+      ? [d.command, d.workdir ? `Working directory: ${d.workdir}` : ''].filter(Boolean).join('\n')
+      : (Object.keys(d).length ? JSON.stringify(d) : ''));
   if (detailText) {
     const detail = document.createElement('div');
     detail.className = 'permission-detail';
-    detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;margin:2px 0 8px;font-family:inherit;';
+    detail.style.cssText = 'font-size:12px;opacity:0.75;word-break:break-all;white-space:pre-wrap;margin:2px 0 8px;font-family:inherit;';
     detail.textContent = detailText;
     card.appendChild(detail);
   }
@@ -2407,11 +2422,12 @@ export function renderPermissionCard(payload, sessionId) {
     card.appendChild(done);
   };
 
-  const answer = async (optionId, label) => {
+  const answer = async (optionId, label, secret) => {
     list.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     const body = new FormData();
     body.append('request_id', pq.request_id);
     body.append('option_id', optionId);
+    if (secret) body.append('secret', secret);
     try {
       const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/permission`, {
         method: 'POST', body, credentials: 'same-origin',
@@ -2428,11 +2444,46 @@ export function renderPermissionCard(payload, sessionId) {
     }
   };
 
+  if (pq.sudo_password) {
+    // The exact command was already approved; this card only collects the
+    // password sudo needs. The value goes straight to the single-use server
+    // stash — it is never rendered back or persisted client-side.
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.className = 'styled-prompt-input ask-user-other-input';
+    input.placeholder = 'sudo password (never stored)';
+    input.autocomplete = 'off';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); answer('once', 'Submit password', input.value); }
+    });
+    list.appendChild(input);
+    [
+      { id: 'once', label: 'Submit password', withSecret: true },
+      { id: 'reject', label: 'Run without password', withSecret: false },
+    ].forEach((b) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'ask-user-option';
+      const labelText = document.createElement('span');
+      labelText.className = 'ask-user-option-label';
+      labelText.textContent = b.label;
+      row.appendChild(labelText);
+      row.addEventListener('click', () => answer(b.id, b.label, b.withSecret ? input.value : ''));
+      list.appendChild(row);
+    });
+    chatBox.appendChild(card);
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    try { input.focus(); } catch (_) {}
+    return card;
+  }
+
   const alwaysDesc = pq.always_pattern && pq.always_pattern !== '*'
     ? `${pq.always_pattern}/**`
     : `all “${pq.permission_type || 'unknown'}” requests`;
   [
     { id: 'once', label: 'Allow once', desc: '' },
+    { id: 'chat', label: 'Allow in this chat', desc: 'Until this chat is reset' },
+    { id: 'workspace', label: 'Allow in this workspace', desc: 'Shared by chats using this workspace' },
     { id: 'always', label: 'Always allow', desc: alwaysDesc },
     { id: 'reject', label: 'Reject', desc: '' },
   ].forEach((b) => {
@@ -2479,7 +2530,12 @@ export function renderActorAccounting(wrap, accounting) {
       const item = document.createElement('li');
       item.dataset.actorId = actor.id || '';
       if (actor.parent_id) item.dataset.parentActorId = actor.parent_id;
-      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}`;
+      const requested = actor.requested_model ? `requested ${actor.requested_model}` : '';
+      const effective = actor.effective_model && typeof actor.effective_model === 'object'
+        ? `used ${[actor.effective_model.provider_id, actor.effective_model.model_id].filter(Boolean).join('/')}`
+        : '';
+      const modelInfo = [requested, effective].filter(Boolean).join('; ');
+      item.textContent = `${actor.description || actor.agent || actor.id || 'Sub-agent'} — ${actor.status || 'unknown'}${modelInfo ? ` · ${modelInfo}` : ''}`;
       if (actor.parent_id) item.title = `Child of ${actor.parent_id}`;
       list.appendChild(item);
     }
@@ -2674,9 +2730,7 @@ export function addMessage(role, content, modelName, metadata) {
         if (metadata) displayMetrics(firstWrap, metadata);
       }
 
-      if (window.hljs) {
-        box.querySelectorAll('pre code:not(.hljs)').forEach(b => window.hljs.highlightElement(b));
-      }
+      if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(box);
       if (markdownModule.renderMermaid) markdownModule.renderMermaid(box);
       if (pendingAskUser) {
         // Session history is rendered oldest-to-newest.  A later user message
@@ -2719,7 +2773,7 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? (window.__agentName || 'Odysseus') : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? (window.__agentName || 'Open Clank') : modelRouteLabel(replyModels.requestedModel, resolvedModel);
     var _agentLabelKind = (role !== 'user' && (isSlash || isCompacted)) ? 'default' : '';
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
@@ -2969,7 +3023,7 @@ export function addMessage(role, content, modelName, metadata) {
         b.innerHTML = _renderVariant(sv);
         wrap.dataset.raw = sv.raw;
         wrap.dataset.variantIndex = String(newIdx);
-        if (window.hljs) wrap.querySelectorAll('pre code').forEach(bl => window.hljs.highlightElement(bl));
+        if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(wrap);
         tagLabel.textContent = _icons[sv.label] || '';
         tagLabel.className = 'variant-tag' + (sv.label === 'shorter' ? ' variant-tag-scissors' : '');
         numLeft.textContent = String(newIdx + 1);

@@ -12,8 +12,8 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   // Lock Turbopack's root to THIS project dir. Without it Next infers the
-  // workspace root from lockfiles and picks the parent dir (/home/e) because a
-  // stray /home/e/package-lock.json exists — which makes Turbopack scan/build
+  // workspace root from lockfiles and picks a parent directory because a
+  // stray package-lock.json exists there — which makes Turbopack scan/build
   // from the wrong root. __dirname is always this next.config.ts's directory.
   turbopack: {
     root: __dirname,

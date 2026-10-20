@@ -1,9 +1,4 @@
-"""Route-level owner-scope test for POST /api/presets/expand.
-
-`expand_character_prompt` resolves a model endpoint to run its LLM call. It must
-scope that lookup to the calling user, otherwise it can resolve another owner's
-ModelEndpoint (and its decrypted api_key) in a multi-user deployment. See #2283.
-"""
+"""Route-level owner scope for managed preset-prompt expansion."""
 
 import asyncio
 from types import SimpleNamespace
@@ -32,19 +27,17 @@ def _expand_endpoint():
 
 
 def _patch_model_pipeline(monkeypatch):
-    """Capture the owner passed to _resolve_model and stub the LLM call."""
+    """Capture the managed completion request."""
     seen = {}
 
-    def fake_resolve_model(spec, owner=None):
-        seen["spec"] = spec
-        seen["owner"] = owner
-        return ("http://endpoint.local/v1", "test-model", {})
-
-    async def fake_llm_call_async(url, model, messages, **kwargs):
+    async def fake_complete_text(**kwargs):
+        seen.update(kwargs)
         return "  expanded prompt  "
 
-    monkeypatch.setattr("src.ai_interaction._resolve_model", fake_resolve_model)
-    monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm_call_async)
+    monkeypatch.setattr(
+        "src.openclank.modality_facade.complete_text",
+        fake_complete_text,
+    )
     return seen
 
 
@@ -52,12 +45,19 @@ def test_expand_scopes_model_resolution_to_cookie_user(monkeypatch):
     seen = _patch_model_pipeline(monkeypatch)
     endpoint = _expand_endpoint()
 
-    req = _FakeRequest({"name": "Pirate", "prompt": "talks like a pirate", "model": "test-model"},
+    req = _FakeRequest({
+        "name": "Pirate",
+        "prompt": "talks like a pirate",
+        "model_route_id": "route-utility",
+    },
                        current_user="alice")
     result = asyncio.run(endpoint(req))
 
     assert seen["owner"] == "alice"
-    assert seen["spec"] == "test-model"
+    assert seen["purpose"] == "utility"
+    assert seen["model_route_id"] == "route-utility"
+    assert "url" not in seen
+    assert "headers" not in seen
     assert result == {"success": True, "prompt": "expanded prompt"}
 
 
@@ -67,7 +67,7 @@ def test_expand_attributes_bearer_token_to_its_owner(monkeypatch):
     seen = _patch_model_pipeline(monkeypatch)
     endpoint = _expand_endpoint()
 
-    req = _FakeRequest({"name": "Pirate", "model": ""},
+    req = _FakeRequest({"name": "Pirate"},
                        current_user="api", api_token=True, api_token_owner="bob")
     asyncio.run(endpoint(req))
 

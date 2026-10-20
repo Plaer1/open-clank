@@ -1,0 +1,1 @@
+Iterated reasoning can remove strategies that cannot be best responses to remaining possibilities. This is different from requiring one mutually consistent Nash profile. In the displayed table, strict dominance already removes Cooperate for each player. Do not transfer that conclusion to every cooperation game.

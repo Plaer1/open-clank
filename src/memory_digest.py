@@ -5,7 +5,7 @@ contents. The model pulls details through the memory search/recall tools
 when a listed topic matters. Size is bounded by the engine's item caps
 (≤5 pinned, ≤6 clusters, ≤5 recent) — no token counting here.
 
-Both hosts share this renderer: Odysseus injects the block through the
+Both hosts share this renderer: Open Clank injects the block through the
 chat preface, the bridge prepends it to mimo turns. DIGEST_SENTINEL marks
 the block so the receiving side can drop a duplicate if both paths ever
 cover the same turn.
@@ -21,6 +21,7 @@ render_split call and injected together, so the card sentinel dedups the
 pair.
 """
 
+import re
 from typing import Any, Dict, Optional, Tuple
 
 DIGEST_SENTINEL = "[Memory Index]"
@@ -159,11 +160,19 @@ def render_trusted_block(digest: Optional[Dict[str, Any]], prefs: Any) -> str:
     if questions:
         lines.append("Open questions the user wants answered:")
         for q in questions:
-            lines.append(f"- {str(q.get('content')).strip()}")
+            question_id = str(q.get("id") or "").strip()
+            id_label = (
+                f"`{question_id[:80]}` — "
+                if re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", question_id)
+                else ""
+            )
+            lines.append(f"- {id_label}{str(q.get('content')).strip()}")
         lines.append(
             "If the conversation naturally touches one of these, weave the "
-            "question in and listen for the answer. Never interrogate and "
-            "never force one into an unrelated exchange."
+            "question in and listen for the answer. If your own work finds an "
+            "answer, use the displayed memory ID and the answer text to resolve "
+            "that same memory block. Never interrogate and never force one into "
+            "an unrelated exchange."
         )
 
     if not lines:

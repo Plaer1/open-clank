@@ -26,7 +26,6 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRevert } from "../../src/session/revert"
 import { SessionRunState } from "../../src/session/run-state"
 import { Goal } from "../../src/session/goal"
-import { TaskGateState } from "../../src/task/gate-state"
 import { SessionStatus } from "../../src/session/status"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
@@ -163,7 +162,6 @@ function makeLayer() {
   const prune = SessionPrune.layer.pipe(Layer.provide(checkpoint), Layer.provideMerge(deps))
   const prompt = SessionPrompt.layer.pipe(
     Layer.provide(Goal.defaultLayer),
-    Layer.provide(TaskGateState.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(summary),
     Layer.provide(checkpoint),
@@ -527,6 +525,71 @@ describe("Actor.spawn completion gate (B)", () => {
         // Parsed header preserved, no downgrade, no incomplete-task list.
         expect(outcome.reportedStatus).toBe("success")
         expect(outcome.incompleteTasks).toBeUndefined()
+      }),
+      { git: true, config: providerCfg },
+    ),
+  )
+
+  it.live("retires a settled postStop before reusing the same actor revision", () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const actor = yield* Actor.Service
+        const session = yield* Session.Service
+        const registry = yield* ActorRegistry.Service
+        const tasks = yield* TaskRegistry.Service
+        const parent = yield* session.create({
+          title: "postStop actor reuse",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const task = yield* tasks.create({ session_id: parent.id, summary: "already finished" })
+        yield* tasks.done({ session_id: parent.id, id: task.id, event_summary: "fixture complete" })
+        const postStopRelease = yield* Deferred.make<void>()
+
+        // The second request is the built-in progress-checker postStop re-entry;
+        // it remains parked after the durable success has already been delivered.
+        yield* llm.text("first delivery")
+        yield* llm.hangUntil(postStopRelease)
+
+        const first = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          agentType: "general",
+          task: "finish the first execution",
+          context: "none",
+          tools: ["read"],
+          background: true,
+          model: ref,
+          task_id: task.id,
+        })
+        yield* llm.wait(2)
+        const firstOutcome = yield* Deferred.await(first.outcome).pipe(Effect.timeout("10 seconds"))
+        expect(firstOutcome.status).toBe("success")
+        const firstRow = yield* registry.get(parent.id, first.actorID)
+        expect(firstRow?.status).toBe("idle")
+        expect(firstRow?.executionRevision).toBeGreaterThan(0)
+
+        // Reuse is allowed while the old postStop fiber is still parked. The
+        // lane must retire that older fiber before beginning revision N+1.
+        yield* llm.text("second delivery")
+        yield* Deferred.succeed(postStopRelease, undefined)
+        const second = yield* actor.spawn({
+          mode: "subagent",
+          sessionID: parent.id,
+          actorID: first.actorID,
+          agentType: "explore",
+          task: "resume the same actor",
+          context: "none",
+          tools: ["read"],
+          background: false,
+          model: ref,
+        })
+        const secondOutcome = yield* Deferred.await(second.outcome).pipe(Effect.timeout("10 seconds"))
+        expect(secondOutcome.status).toBe("success")
+        const secondRow = yield* registry.get(parent.id, first.actorID)
+        expect(secondRow?.status).toBe("idle")
+        expect(secondRow?.executionRevision).toBeGreaterThan(firstRow?.executionRevision ?? 0)
+        expect(secondRow?.turnCount).toBeGreaterThan(firstRow?.turnCount ?? 0)
+        expect(yield* llm.calls).toBe(3)
       }),
       { git: true, config: providerCfg },
     ),

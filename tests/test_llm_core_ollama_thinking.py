@@ -59,7 +59,7 @@ def _capture_payload(monkeypatch, url, model):
     monkeypatch.setattr(llm_core, "get_context_length", lambda u, m: 32768)
 
     async def run():
-        return [c async for c in llm_core.stream_llm(
+        return [c async for c in llm_core._legacy_stream_llm(
             url, model, [{"role": "user", "content": "hi"}],
         )]
 

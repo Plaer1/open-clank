@@ -1,0 +1,6 @@
+{
+  "identifier": "main-window-no-native-api",
+  "description": "Admission WKWebView: no application commands and no plugin permissions.",
+  "windows": ["main"],
+  "permissions": []
+}

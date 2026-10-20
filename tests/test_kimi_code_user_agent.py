@@ -33,7 +33,7 @@ def test_kimi_access_denial_is_not_retried_under_another_identity(monkeypatch):
     monkeypatch.setattr(llm_core, "_get_cached_response", lambda key: None)
 
     with pytest.raises(HTTPException):
-        llm_core.llm_call(
+        llm_core._legacy_llm_call(
             KIMI_CHAT_URL,
             "kimi-for-coding",
             [{"role": "user", "content": "hi"}],

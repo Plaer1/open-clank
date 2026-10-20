@@ -1,0 +1,1 @@
+Absence of a failure so far is not a proof of eventual success.

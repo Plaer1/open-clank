@@ -1,0 +1,1 @@
+'Last rule always wins' ignores importance, layers, origin, and specificity.

@@ -7,8 +7,15 @@
  *
  * Not meant to be run directly — use preview.ts to start/stop.
  *
+ * SCOPE: for the MiMoCode CLI only. GUI hosts embedding MiMoCode via
+ * the SDK should use their own native preview mechanism instead.
+ *
+ * PATHS: this script sits in the skill's bundle directory, not
+ * necessarily in your cwd. Invoke via the absolute path
+ * (<SKILL_DIR>/scripts/preview_server.ts).
+ *
  * Usage:
- *   bun run scripts/preview_server.ts output.pptx --port 4200
+ *   bun run <SKILL_DIR>/scripts/preview_server.ts /path/to/output.pptx --port 4200
  */
 import { watch } from "node:fs"
 import { resolve, basename, dirname } from "node:path"
@@ -23,7 +30,7 @@ const { values, positionals } = parseArgs({
 
 const source = positionals[0]
 if (!source) {
-  console.error("Usage: bun run preview_server.ts <file.pptx> [--port N]")
+  console.error("Usage: bun run <SKILL_DIR>/scripts/preview_server.ts /path/to/file.pptx [--port N]")
   process.exit(2)
 }
 

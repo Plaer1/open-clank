@@ -1,0 +1,675 @@
+{
+  "schema": 1,
+  "policy": "non-overlapping catalog writes; one batch owns each key exactly once",
+  "batch_count": 83,
+  "entry_count": 9622,
+  "min_entries": 150,
+  "max_entries": 300,
+  "complex_prose_max": 40,
+  "batches": [
+    {
+      "id": "batch-001",
+      "group": "auth",
+      "surface": "auth",
+      "entry_count": 21,
+      "character_count": 2007,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-002",
+      "group": "award",
+      "surface": "award",
+      "entry_count": 74,
+      "character_count": 6633,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-003",
+      "group": "chat",
+      "surface": "chat",
+      "entry_count": 241,
+      "character_count": 17882,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-004",
+      "group": "chat",
+      "surface": "chat",
+      "entry_count": 29,
+      "character_count": 1900,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-005",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 169,
+      "character_count": 17967,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-006",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 138,
+      "character_count": 17938,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-007",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 163,
+      "character_count": 17981,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-008",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 183,
+      "character_count": 17967,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-009",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 157,
+      "character_count": 17960,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-010",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 161,
+      "character_count": 17969,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-011",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 161,
+      "character_count": 17866,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-012",
+      "group": "compatibility",
+      "surface": "compatibility",
+      "entry_count": 74,
+      "character_count": 10562,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-013",
+      "group": "cookbook",
+      "surface": "cookbook",
+      "entry_count": 195,
+      "character_count": 17834,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-014",
+      "group": "cookbook",
+      "surface": "cookbook",
+      "entry_count": 201,
+      "character_count": 17999,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-015",
+      "group": "cookbook",
+      "surface": "cookbook",
+      "entry_count": 188,
+      "character_count": 17966,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-016",
+      "group": "cookbook",
+      "surface": "cookbook",
+      "entry_count": 177,
+      "character_count": 17987,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-017",
+      "group": "cookbook",
+      "surface": "cookbook",
+      "entry_count": 63,
+      "character_count": 6556,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-018",
+      "group": "docs",
+      "surface": "docs",
+      "entry_count": 246,
+      "character_count": 17960,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-019",
+      "group": "docs",
+      "surface": "docs",
+      "entry_count": 263,
+      "character_count": 17932,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-020",
+      "group": "docs",
+      "surface": "docs",
+      "entry_count": 258,
+      "character_count": 17996,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-021",
+      "group": "docs",
+      "surface": "docs",
+      "entry_count": 161,
+      "character_count": 11283,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-022",
+      "group": "docs.openclank-docs-accounts-models",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1669,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-023",
+      "group": "docs.openclank-docs-chat-workspaces",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1727,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-024",
+      "group": "docs.openclank-docs-editor",
+      "surface": "docs",
+      "entry_count": 1,
+      "character_count": 2046,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-025",
+      "group": "docs.openclank-docs-files-imps",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1695,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-026",
+      "group": "docs.openclank-docs-formatting-demo",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1518,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-027",
+      "group": "docs.openclank-docs-getting-work-done",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1748,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-028",
+      "group": "docs.openclank-docs-graph",
+      "surface": "docs",
+      "entry_count": 1,
+      "character_count": 1637,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-029",
+      "group": "docs.openclank-docs-home",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1597,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-030",
+      "group": "docs.openclank-docs-limits",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1983,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-031",
+      "group": "docs.openclank-docs-memory-lore",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1666,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-032",
+      "group": "docs.openclank-docs-recovery",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1599,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-033",
+      "group": "docs.openclank-docs-settings-themes",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 2239,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-034",
+      "group": "docs.openclank-docs-tasks",
+      "surface": "docs",
+      "entry_count": 2,
+      "character_count": 1525,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-035",
+      "group": "editor",
+      "surface": "editor",
+      "entry_count": 234,
+      "character_count": 17969,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-036",
+      "group": "editor",
+      "surface": "editor",
+      "entry_count": 239,
+      "character_count": 17993,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-037",
+      "group": "editor",
+      "surface": "editor",
+      "entry_count": 195,
+      "character_count": 15105,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-038",
+      "group": "email",
+      "surface": "email",
+      "entry_count": 253,
+      "character_count": 17952,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-039",
+      "group": "email",
+      "surface": "email",
+      "entry_count": 69,
+      "character_count": 4610,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-040",
+      "group": "files",
+      "surface": "files",
+      "entry_count": 186,
+      "character_count": 15170,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-041",
+      "group": "graph",
+      "surface": "graph",
+      "entry_count": 13,
+      "character_count": 851,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-042",
+      "group": "html-shell",
+      "surface": "html-shell",
+      "entry_count": 228,
+      "character_count": 17921,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-043",
+      "group": "html-shell",
+      "surface": "html-shell",
+      "entry_count": 229,
+      "character_count": 17959,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-044",
+      "group": "html-shell",
+      "surface": "html-shell",
+      "entry_count": 219,
+      "character_count": 17975,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-045",
+      "group": "html-shell",
+      "surface": "html-shell",
+      "entry_count": 51,
+      "character_count": 4680,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-046",
+      "group": "imps",
+      "surface": "imps",
+      "entry_count": 180,
+      "character_count": 13477,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-047",
+      "group": "memory",
+      "surface": "memory",
+      "entry_count": 213,
+      "character_count": 17981,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-048",
+      "group": "memory",
+      "surface": "memory",
+      "entry_count": 16,
+      "character_count": 1509,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-049",
+      "group": "providers",
+      "surface": "providers",
+      "entry_count": 219,
+      "character_count": 17996,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-050",
+      "group": "providers",
+      "surface": "providers",
+      "entry_count": 8,
+      "character_count": 630,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-051",
+      "group": "server",
+      "surface": "server",
+      "entry_count": 157,
+      "character_count": 17975,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-052",
+      "group": "server",
+      "surface": "server",
+      "entry_count": 49,
+      "character_count": 5790,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-053",
+      "group": "settings",
+      "surface": "settings",
+      "entry_count": 219,
+      "character_count": 17980,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-054",
+      "group": "settings",
+      "surface": "settings",
+      "entry_count": 215,
+      "character_count": 17974,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-055",
+      "group": "settings",
+      "surface": "settings",
+      "entry_count": 191,
+      "character_count": 17845,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-056",
+      "group": "settings",
+      "surface": "settings",
+      "entry_count": 40,
+      "character_count": 5017,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-057",
+      "group": "tasks",
+      "surface": "tasks",
+      "entry_count": 243,
+      "character_count": 17995,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-058",
+      "group": "tasks",
+      "surface": "tasks",
+      "entry_count": 152,
+      "character_count": 11376,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-059",
+      "group": "themes",
+      "surface": "themes",
+      "entry_count": 60,
+      "character_count": 4061,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-060",
+      "group": "treehouse",
+      "surface": "treehouse",
+      "entry_count": 201,
+      "character_count": 17962,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-061",
+      "group": "treehouse",
+      "surface": "treehouse",
+      "entry_count": 201,
+      "character_count": 17998,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-062",
+      "group": "treehouse",
+      "surface": "treehouse",
+      "entry_count": 76,
+      "character_count": 7113,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-063",
+      "group": "treehouse.class",
+      "surface": "treehouse",
+      "entry_count": 15,
+      "character_count": 3050,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-064",
+      "group": "treehouse.lesson.house-collaborate",
+      "surface": "treehouse",
+      "entry_count": 40,
+      "character_count": 9889,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-065",
+      "group": "treehouse.lesson.house-collaborate",
+      "surface": "treehouse",
+      "entry_count": 2,
+      "character_count": 410,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-066",
+      "group": "treehouse.lesson.house-connections",
+      "surface": "treehouse",
+      "entry_count": 40,
+      "character_count": 8312,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-067",
+      "group": "treehouse.lesson.house-connections",
+      "surface": "treehouse",
+      "entry_count": 10,
+      "character_count": 2376,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-068",
+      "group": "treehouse.lesson.house-documents",
+      "surface": "treehouse",
+      "entry_count": 40,
+      "character_count": 9166,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-069",
+      "group": "treehouse.lesson.house-documents",
+      "surface": "treehouse",
+      "entry_count": 14,
+      "character_count": 2757,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-070",
+      "group": "treehouse.lesson.house-making",
+      "surface": "treehouse",
+      "entry_count": 40,
+      "character_count": 8740,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-071",
+      "group": "treehouse.lesson.house-making",
+      "surface": "treehouse",
+      "entry_count": 6,
+      "character_count": 933,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-072",
+      "group": "treehouse.lesson.house-stewardship",
+      "surface": "treehouse",
+      "entry_count": 40,
+      "character_count": 10679,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-073",
+      "group": "treehouse.lesson.house-stewardship",
+      "surface": "treehouse",
+      "entry_count": 6,
+      "character_count": 1028,
+      "complexity": "prose"
+    },
+    {
+      "id": "batch-074",
+      "group": "treehouse.manifest",
+      "surface": "treehouse",
+      "entry_count": 1,
+      "character_count": 151,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-075",
+      "group": "treehouse.section",
+      "surface": "treehouse",
+      "entry_count": 4,
+      "character_count": 486,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-076",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 244,
+      "character_count": 17946,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-077",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 218,
+      "character_count": 17983,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-078",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 236,
+      "character_count": 17998,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-079",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 229,
+      "character_count": 17890,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-080",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 243,
+      "character_count": 17962,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-081",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 243,
+      "character_count": 17841,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-082",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 242,
+      "character_count": 17935,
+      "complexity": "mixed"
+    },
+    {
+      "id": "batch-083",
+      "group": "ui-misc",
+      "surface": "ui-misc",
+      "entry_count": 6,
+      "character_count": 758,
+      "complexity": "mixed"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+The route obeys movement and gate conditions, and the flag changes one observable consequence.

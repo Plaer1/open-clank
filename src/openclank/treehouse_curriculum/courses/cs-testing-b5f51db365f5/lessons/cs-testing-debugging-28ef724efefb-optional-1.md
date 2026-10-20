@@ -1,0 +1,1 @@
+Replacing 0 with another guessed constant still fails for values below that constant.

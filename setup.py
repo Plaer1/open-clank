@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Odysseus — first-time setup script.
+"""Open Clank — first-time setup script.
 
 Creates data directories, initializes the database, and sets up an
 initial admin user. Safe to re-run (skips what already exists).
@@ -7,15 +7,19 @@ initial admin user. Safe to re-run (skips what already exists).
 
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
+import tempfile
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 from src.constants import (
     DATA_DIR, AUTH_FILE, UPLOAD_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR,
-    TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR, CHROMA_DIR,
+    TTS_CACHE_DIR, GENERATED_IMAGES_DIR, DEEP_RESEARCH_DIR,
     RAG_DIR, MEMORY_VECTORS_DIR, PASSWORD_MIN_LENGTH,
 )
 from core.auth import RESERVED_USERNAMES
@@ -28,7 +32,6 @@ DIRS = [
     TTS_CACHE_DIR,
     GENERATED_IMAGES_DIR,
     DEEP_RESEARCH_DIR,
-    CHROMA_DIR,
     RAG_DIR,
     MEMORY_VECTORS_DIR,
     os.path.join(BASE_DIR, "logs"),
@@ -42,12 +45,12 @@ def create_dirs():
 
 
 def init_database():
-    """Create all SQLAlchemy tables."""
+    """Initialize or validate the current schema through its canonical authority."""
     sys.path.insert(0, BASE_DIR)
     os.environ.setdefault("DATABASE_URL", f"sqlite:///{os.path.join(DATA_DIR, 'app.db')}")
 
-    from core.database import Base, engine
-    Base.metadata.create_all(bind=engine)
+    from core.database import init_db
+    init_db()
     print("  [ok] Database initialized")
 
 
@@ -94,22 +97,21 @@ def create_default_admin():
         return "exists"
 
     try:
-        import bcrypt
-        import json
+        from core.auth import AuthManager
 
         # Priority: env vars > interactive prompt > random password
-        username = os.getenv("ODYSSEUS_ADMIN_USER", "").strip().lower()
-        password = os.getenv("ODYSSEUS_ADMIN_PASSWORD", "").strip()
+        username = (os.getenv("OPEN_CLANK_ADMIN_USER") or os.getenv("ODYSSEUS_ADMIN_USER") or "").strip().lower()
+        password = (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD") or "").strip()
 
         if username and password:
             # Both provided via env — validate before using
             if username in RESERVED_USERNAMES:
-                print(f"  [error] ODYSSEUS_ADMIN_USER '{username}' is a reserved username")
+                print(f"  [error] OPEN_CLANK_ADMIN_USER '{username}' is a reserved username")
                 return "failed"
             if len(password) < PASSWORD_MIN_LENGTH:
-                print(f"  [error] ODYSSEUS_ADMIN_PASSWORD must be at least {PASSWORD_MIN_LENGTH} characters")
+                print(f"  [error] OPEN_CLANK_ADMIN_PASSWORD must be at least {PASSWORD_MIN_LENGTH} characters")
                 return "failed"
-        elif sys.stdin.isatty() and not os.getenv("ODYSSEUS_SKIP_ADMIN_PROMPT"):
+        elif sys.stdin.isatty() and not (os.getenv("OPEN_CLANK_SKIP_ADMIN_PROMPT") or os.getenv("ODYSSEUS_SKIP_ADMIN_PROMPT")):
             # Interactive terminal — ask the user
             username, password = _prompt_admin_credentials()
         else:
@@ -118,25 +120,17 @@ def create_default_admin():
             password = password or __import__("secrets").token_urlsafe(18)
 
         username = username or "admin"
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        auth_data = {
-            "users": {
-                username: {
-                    "password_hash": hashed,
-                    "is_admin": True,
-                }
-            }
-        }
-        with open(auth_path, "w", encoding="utf-8") as f:
-            json.dump(auth_data, f, indent=2)
+        if not AuthManager(auth_path).setup(username, password):
+            print("  [error] Initial admin account could not be created")
+            return "failed"
 
-        if sys.stdin.isatty() and not os.getenv("ODYSSEUS_ADMIN_PASSWORD"):
+        if sys.stdin.isatty() and not (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")):
             print(f"  [ok] Admin account created ({username})")
         else:
             print(f"  [ok] Initial admin user created ({username})")
-            if not os.getenv("ODYSSEUS_ADMIN_PASSWORD"):
+            if not (os.getenv("OPEN_CLANK_ADMIN_PASSWORD") or os.getenv("ODYSSEUS_ADMIN_PASSWORD")):
                 print(f"        Temporary password: {password}")
-                print(f"        ** Change it after first login. Set ODYSSEUS_ADMIN_PASSWORD to choose your own. **")
+                print(f"        ** Change it after first login. Set OPEN_CLANK_ADMIN_PASSWORD to choose your own. **")
         return "created"
     except ImportError as e:
         if "incompatible architecture" in str(e).lower():
@@ -164,7 +158,7 @@ def create_env():
         import shutil
         shutil.copy2(example_path, env_path)
         print("  [ok] .env created from .env.example")
-        print("        ** Edit .env with your LLM host and API keys **")
+        print("        Configure model providers after login; .env is for app/integration settings only")
     else:
         print("  [warn] .env.example not found — create .env manually")
 
@@ -236,10 +230,106 @@ def check_arch():
     sys.exit(1)
 
 
-def main():
-    print("\n=== Odysseus Setup ===\n")
+def install_public_command(script_dir=None):
+    """Install the one public, profile-aware ``openclank`` entrypoint.
 
-    # Load .env so pre-seeded ODYSSEUS_ADMIN_USER / ODYSSEUS_ADMIN_PASSWORD (and
+    Source installs are intentionally not a second provider/engine package.
+    The launcher only enters this checkout's Open Clank CLI using the exact
+    Python interpreter that ran setup.  Private engine payloads stay beneath
+    libexec and are never installed as public ``mimo``/``odysseus`` commands.
+    """
+
+    target_dir = Path(script_dir or sysconfig.get_path("scripts")).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    python = str(Path(sys.executable).resolve())
+    command = str((Path(BASE_DIR) / "scripts" / "openclank").resolve())
+    if not Path(command).is_file():
+        raise RuntimeError("public Open Clank launcher source is missing")
+
+    if os.name == "nt":
+        target = target_dir / "openclank.cmd"
+        payload = f'@echo off\r\n"{python}" "{command}" %*\r\n'.encode("utf-8")
+        mode = 0o644
+    else:
+        target = target_dir / "openclank"
+        payload = (
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(python)} {shlex.quote(command)} \"$@\"\n"
+        ).encode("utf-8")
+        mode = 0o755
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        dir=str(target_dir),
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f"  [ok] Public command installed: {target}")
+    return target
+
+
+def ensure_managed_engine():
+    """Verify a packaged engine or build the exact vendored source."""
+    from src.constants import APP_VERSION
+    from src.openclank.engine_build import ensure_engine_ready
+
+    result = ensure_engine_ready(BASE_DIR, version=APP_VERSION)
+    print(f"  [ok] Managed engine verified: {result.binary}")
+
+
+def ensure_native_workers():
+    """Build the source workers selected by the host platform before first run."""
+    cargo = shutil.which("cargo")
+    if not cargo:
+        raise RuntimeError(
+            "Source setup requires Rust Cargo and platform C/C++ build tools; "
+            "install the prerequisites in docs/setup.md and rerun setup"
+        )
+    root = Path(BASE_DIR)
+    builds = [
+        (root / "mcp_servers/frankenmemory", ("fm-mcp",)),
+        (root / "packages/openclank-history", ("openclank-history-service",)),
+    ]
+    if sys.platform in {"darwin", "win32"}:
+        thumbnail = "odysseus-quicklook-helper" if sys.platform == "darwin" else "odysseus-shell-thumbnail-helper"
+        builds.append((root / "packages/odysseus-files", ("odysseus-files-service", thumbnail)))
+    else:
+        print("  [warn] Linux source support remains unqualified; native Files is not built")
+    suffix = ".exe" if os.name == "nt" else ""
+    for crate, binaries in builds:
+        command = [cargo, "build", "--locked", "--release", "--manifest-path", str(crate / "Cargo.toml"),
+                   "--target-dir", str(crate / "target")]
+        for binary in binaries:
+            command.extend(("--bin", binary))
+        subprocess.run(command, cwd=root, check=True)
+        for binary in binaries:
+            artifact = crate / "target/release" / (binary + suffix)
+            if not artifact.is_file() or (os.name != "nt" and not os.access(artifact, os.X_OK)):
+                raise RuntimeError(f"Native worker build did not produce {binary}")
+            print(f"  [ok] Native worker built: {binary}")
+
+
+def validate_existing_provider_store():
+    """Validate existing provider state; setup never upgrades an installation."""
+    from src.openclank.provider_startup import PROVIDER_ENV_AUTHORITIES, validate_provider_store
+    configured = sorted(name for name in PROVIDER_ENV_AUTHORITIES if str(os.environ.get(name) or "").strip())
+    if configured:
+        raise RuntimeError("retired provider environment settings are configured: " + ", ".join(configured))
+    validate_provider_store(DATA_DIR)
+
+
+def main():
+    print("\n=== Open Clank Setup ===\n")
+
+    # Load .env so pre-seeded Open Clank variables and legacy aliases (and
     # other deployment vars) are honored on native installs, not just when they
     # are exported in the shell. Mirrors app.py: encoding="utf-8-sig" tolerates a
     # UTF-8 BOM in a Notepad-saved .env. load_dotenv does not override already
@@ -252,23 +342,32 @@ def main():
     # Silicon under an x86/Rosetta Python) before importing anything native.
     check_arch()
 
-    print("1. Creating directories...")
+    print("1. Verifying managed engine...")
+    ensure_managed_engine()
+
+    print("\n1b. Building native workspace workers...")
+    ensure_native_workers()
+
+    print("\n2. Creating directories...")
     create_dirs()
 
-    print("\n2. Environment file...")
+    print("\n3. Environment file...")
     create_env()
 
-    print("\n3. Checking dependencies...")
+    print("\n4. Checking dependencies...")
     check_deps()
 
-    print("\n4. Initializing database...")
+    print("\n5. Validating existing provider store...")
+    validate_existing_provider_store()
+
+    print("\n6. Initializing database...")
     try:
         init_database()
     except Exception as e:
         print(f"  [warn] Database init failed: {e}")
         print("         This is OK if dependencies aren't installed yet.")
 
-    print("\n5. Creating initial admin...")
+    print("\n7. Creating initial admin...")
 
     admin_status = "failed"
 
@@ -278,13 +377,16 @@ def main():
         print(f"  [warn] Admin creation failed: {e}")
         admin_status = "failed"
 
+    print("\n8. Installing openclank command...")
+    install_public_command()
+
     print("\n=== Setup complete ===")
     # start-macos.sh launches the server itself (on its own port) right after
     # this, so suppress the manual hint there to avoid a contradictory URL.
-    if not os.getenv("ODYSSEUS_SKIP_RUN_HINT"):
+    if not (os.getenv("OPEN_CLANK_SKIP_RUN_HINT") or os.getenv("ODYSSEUS_SKIP_RUN_HINT")):
         print(f"\nStart the server with:")
-        print(f"  python -m uvicorn app:app --host 127.0.0.1 --port 7000")
-        print(f"\nThen open http://localhost:7000")
+        print(f"  python scripts/openclank_bootstrap.py serve --host 127.0.0.1 --port 7777")
+        print(f"\nThen open http://localhost:7777")
 
     # Cleaned, action-focused final instruction strings
     if admin_status == "created":

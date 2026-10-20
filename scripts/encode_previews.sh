@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Encode a source screen-recording (.mkv) into web-optimized preview clips for
-# the landing page: docs/<name>.webm (VP9) + docs/<name>.mp4 (H.264).
+# Encode a source screen-recording (.mkv) into local preview media:
+# docs/<name>.webm (VP9) + docs/<name>.mp4 (H.264).
 #
 #   ./encode_previews.sh <input> <name> [max_secs]
 #

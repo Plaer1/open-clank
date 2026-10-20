@@ -7,7 +7,22 @@ UI chatter the user never meant as conversation, so ``get_context_messages``
 display. See issue #2634.
 """
 
-from core.models import Session, ChatMessage
+import pytest
+
+from core.models import (
+    Session,
+    ChatMessage,
+    get_session_manager_instance,
+    set_session_manager_instance,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_global_session_manager():
+    previous = get_session_manager_instance()
+    set_session_manager_instance(None)
+    yield
+    set_session_manager_instance(previous)
 
 
 def _session_with_slash():

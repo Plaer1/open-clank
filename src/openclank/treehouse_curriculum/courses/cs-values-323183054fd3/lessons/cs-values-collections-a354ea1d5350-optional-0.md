@@ -1,0 +1,1 @@
+Results: 3, 2, 2, 5, 2. Errors: TypeError, KeyError, IndexError. Assigning existing key ada replaces its value with 7. Use list, dictionary, set and tuple for the four workloads respectively.

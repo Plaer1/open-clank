@@ -1,0 +1,1 @@
+The same event has one gameplay mutation, presentation-only effects and an explicit duplicate-effect policy.

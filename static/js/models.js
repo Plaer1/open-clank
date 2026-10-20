@@ -12,13 +12,24 @@ import spinnerModule from './spinner.js';
 import { modelColor } from './chatRenderer.js';
 import { providerLogo } from './providers.js';
 import { sortModelIds } from './modelSort.js';
-import { catalogEntries } from './modelCatalog.js';
+import {
+  catalogEntries,
+  modelChoiceKey,
+  modelStateKey,
+  resolveStoredModelChoices,
+} from './modelCatalog.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
 
 let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
 let _lastFetchTime = 0;
 let _fetchInflight = null;
 let _fetchSeq = 0;
+let _authListenerBound = false;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
 const COLLAPSE_KEY = 'odysseus-models-collapsed';
 const FAVORITES_KEY = 'odysseus-model-favorites';
@@ -27,51 +38,67 @@ const SORT_KEY = 'odysseus-model-sort';
 
 export function init(apiBase) {
   API_BASE = apiBase;
+  if (!_authListenerBound) {
+    _authListenerBound = true;
+    document.addEventListener('openclank:auth-user-ready', () => {
+      refreshModels(true).catch(() => {});
+    });
+    // The auth probe can finish before this module binds its listener on a
+    // fast local load. bindModelStateOwner leaves this replayable marker.
+    if (globalThis.__openClankAuthenticatedUser) {
+      refreshModels(true).catch(() => {});
+    }
+  }
 }
 
 // ── Collapse state persistence ──
 function _loadCollapsed() {
-  return Storage.getJSON(COLLAPSE_KEY, {});
+  return Storage.getJSON(modelStateKey(COLLAPSE_KEY), {});
 }
 function _saveCollapsed(state) {
-  Storage.setJSON(COLLAPSE_KEY, state);
+  Storage.setJSON(modelStateKey(COLLAPSE_KEY), state);
 }
 
 // ── Favorites persistence ──
 function _loadFavorites() {
-  return Storage.getJSON(FAVORITES_KEY, []);
+  return Storage.getJSON(modelStateKey(FAVORITES_KEY), []);
 }
 function _saveFavorites(list) {
-  Storage.setJSON(FAVORITES_KEY, list);
+  Storage.setJSON(modelStateKey(FAVORITES_KEY), list);
 }
-function _isFavorite(mid) {
-  return _loadFavorites().includes(mid);
+function _isFavorite(mid, endpointId, url) {
+  return _loadFavorites().includes(modelChoiceKey(mid, endpointId, url));
 }
-function _toggleFavorite(mid) {
+function _toggleFavorite(mid, endpointId, url) {
+  const key = modelChoiceKey(mid, endpointId, url);
   const favs = _loadFavorites();
-  const idx = favs.indexOf(mid);
+  const idx = favs.indexOf(key);
   if (idx >= 0) favs.splice(idx, 1);
-  else favs.push(mid);
+  else {
+    const legacy = favs.indexOf(mid);
+    if (legacy >= 0) favs.splice(legacy, 1);
+    favs.push(key);
+  }
   _saveFavorites(favs);
   return idx < 0; // returns true if now favorited
 }
 
 // ── Usage tracking ──
 function _loadUsage() {
-  return Storage.getJSON(USAGE_KEY, {});
+  return Storage.getJSON(modelStateKey(USAGE_KEY), {});
 }
 function _trackUsage(mid) {
   const usage = _loadUsage();
   if (!usage[mid]) usage[mid] = { count: 0, last: 0 };
   usage[mid].count++;
   usage[mid].last = Date.now();
-  Storage.setJSON(USAGE_KEY, usage);
+  Storage.setJSON(modelStateKey(USAGE_KEY), usage);
 }
 function _getSortMode() {
-  return Storage.get(SORT_KEY, '');
+  return Storage.get(modelStateKey(SORT_KEY), '');
 }
 function _setSortMode(mode) {
-  Storage.set(SORT_KEY, mode);
+  Storage.set(modelStateKey(SORT_KEY), mode);
 }
 
 /**
@@ -89,9 +116,11 @@ function _startChat(url, mid, endpointId) {
 }
 
 function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
+  const choiceKey = modelChoiceKey(mid, endpointId, url);
   const row = document.createElement('div');
   row.className = 'models-row' + (offline ? ' models-row-offline' : '');
-  row.setAttribute('data-model-id', mid);
+  row.setAttribute('data-model-id', choiceKey);
+  row.setAttribute('data-model-mid', mid);
   if (modelType === 'image') row.setAttribute('data-model-type', 'image');
 
   const handle = document.createElement('span');
@@ -105,16 +134,16 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   const _favColor = modelColor(mid);
   const _logo = providerLogo(mid);
   if (_logo) {
-    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn provider-logo' + (_isFavorite(mid, endpointId, url) ? ' active' : '');
     fav.innerHTML = _logo;
     fav.style.opacity = '0.4';
   } else {
-    fav.className = 'model-fav-btn' + (_isFavorite(mid) ? ' active' : '');
+    fav.className = 'model-fav-btn' + (_isFavorite(mid, endpointId, url) ? ' active' : '');
   }
   fav.title = 'Toggle favorite';
   fav.addEventListener('click', (e) => {
     e.stopPropagation();
-    const nowFav = _toggleFavorite(mid);
+    const nowFav = _toggleFavorite(mid, endpointId, url);
     fav.classList.toggle('active', nowFav);
     uiModule.showToast(nowFav ? 'Favorited' : 'Unfavorited');
     refreshModels();
@@ -165,24 +194,36 @@ function _buildModelRow(mid, url, displayName, endpointId, offline, modelType) {
   return row;
 }
 
-export async function refreshModels(force = false) {
+export async function refreshModels(force = false, opts = {}) {
   const box = document.getElementById('models');
+  const cacheOnly = !!(opts && opts.cacheOnly);
+  const hasCache = _cachedItems.length > 0;
 
   // Skip network fetch if cache is fresh and not forced — still re-render UI
+  // Cache-only is used for cheap picker/settings opens, but it must not turn a
+  // cold page load into an empty model list. If nothing has been fetched in this
+  // tab yet, do one normal load.
   const now = Date.now();
-  const needsFetch = force || _cachedItems.length === 0 || (now - _lastFetchTime) >= _FETCH_CACHE_TTL;
+  const needsFetch = !(cacheOnly && hasCache) && (force || _cachedItems.length === 0 || (now - _lastFetchTime) >= _FETCH_CACHE_TTL);
 
-  if (box) box.innerHTML = '';
+  const hadRenderedRows = !!(box && box.children && box.children.length);
+  if (box && (!needsFetch || !hadRenderedRows)) box.innerHTML = '';
   if (needsFetch) {
     let _loadingSpinner = null;
+    let request = _fetchInflight;
+    let fetchError = null;
     if (box) {
-      _loadingSpinner = spinnerModule.create('', 'right', 'wave');
-      box.appendChild(_loadingSpinner.createElement());
-      _loadingSpinner.start();
+      if (hadRenderedRows) {
+        box.classList.add('models-refreshing');
+      } else {
+        _loadingSpinner = spinnerModule.create('', 'right', 'wave');
+        box.appendChild(_loadingSpinner.createElement());
+        _loadingSpinner.start();
+      }
     }
     try {
-      if (force) _fetchInflight = null;
-      if (!_fetchInflight) {
+      if (force) request = null;
+      if (!request) {
         // Pass ?refresh=true on forced refreshes so the BACKEND's 30s
         // per-user cache also gets bypassed. Without this, `force=true`
         // only clears the frontend cache and the same stale list comes
@@ -191,27 +232,40 @@ export async function refreshModels(force = false) {
         // even though the endpoint is in the DB and online.)
         const _seq = ++_fetchSeq;
         const _url = `${API_BASE}/api/models` + (force ? '?refresh=true' : '?background=false');
-        _fetchInflight = fetch(_url, { credentials: 'same-origin' })
-          .then(async (res) => {
+        request = {
+          seq: _seq,
+          promise: fetch(_url, { credentials: 'same-origin' }).then(async (res) => {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            return { data, seq: _seq };
-          })
-          .finally(() => { _fetchInflight = null; });
+            return res.json();
+          }),
+        };
+        _fetchInflight = request;
       }
-      const { data, seq } = await _fetchInflight;
-      if (seq < _fetchSeq) return;
+      const data = await request.promise;
+      if (request.seq !== _fetchSeq) return;
       _lastFetchTime = Date.now();
       _cachedItems = data.items || [];
     } catch (e) {
+      if (request && request.seq !== _fetchSeq) return;
+      fetchError = e;
       console.error(e);
-      if (box) box.textContent = '(scan failed)';
-      return;
+      if (!_cachedItems.length) {
+        if (box) box.textContent = '(scan failed)';
+        return;
+      }
     } finally {
+      if (_fetchInflight === request) _fetchInflight = null;
       try { _loadingSpinner && _loadingSpinner.stop && _loadingSpinner.stop(); } catch (_) {}
-      if (box) box.innerHTML = '';
+      if (box && request && request.seq === _fetchSeq && (!fetchError || _cachedItems.length)) {
+        box.innerHTML = '';
+      }
     }
   }
+  try {
+    document.dispatchEvent(new CustomEvent('openclank:model-catalog-updated', {
+      detail: { items: _cachedItems },
+    }));
+  } catch (_) {}
   if (!box) return;
   try {
 
@@ -225,14 +279,22 @@ export async function refreshModels(force = false) {
     if (_cachedItems && _cachedItems.length > 0) {
       _cachedItems.forEach(item => {
         const cat = item.category === 'local' ? 'local' : 'api';
-        const epName = item.endpoint_name || 'Unknown';
+        const provider = providerDisplayName(item.provider_display_name || item.provider);
+        const sharedSecondary = sharedSecondaryLabel({
+          label: item.share_label,
+          owner: item.shared_by,
+        });
+        const epName = item.shared === true
+          ? [sharedProviderLabel(provider), sharedSecondary].filter(Boolean).join(' · ')
+          : (item.endpoint_name || 'Unknown');
+        const epGroup = `${item.endpoint_id || item.url || epName}\u001f${epName}`;
         const isOffline = !!item.offline;
-        if (!groups[cat][epName]) groups[cat][epName] = [];
-        if (!extraGroups[cat][epName]) extraGroups[cat][epName] = [];
+        if (!groups[cat][epGroup]) groups[cat][epGroup] = [];
+        if (!extraGroups[cat][epGroup]) extraGroups[cat][epGroup] = [];
         const epModelType = item.model_type || 'llm';
         catalogEntries(item).forEach(entry => {
           const target = entry.extra ? extraGroups : groups;
-          target[cat][epName].push({
+          target[cat][epGroup].push({
             mid: entry.mid, url: item.url,
             displayName: entry.displayName,
             endpointId: item.endpoint_id || null,
@@ -244,14 +306,16 @@ export async function refreshModels(force = false) {
     }
 
     // ── Render Favorites section on top ──
-    const favs = _loadFavorites();
+    const allChoices = Object.values(groups.local).flat().concat(Object.values(groups.api).flat());
+    const favs = resolveStoredModelChoices(_loadFavorites(), allChoices);
+    _saveFavorites(favs);
     if (favs.length > 0) {
       const favModels = [];
       // Collect favorited models from all groups (keep them in originals too)
       for (const cat of ['local', 'api']) {
-        for (const [epName, epModels] of Object.entries(groups[cat])) {
+        for (const epModels of Object.values(groups[cat])) {
           for (const m of epModels) {
-            if (favs.includes(m.mid)) {
+            if (favs.includes(modelChoiceKey(m))) {
               favModels.push(m);
             }
           }
@@ -268,7 +332,7 @@ export async function refreshModels(force = false) {
         const usage = _loadUsage();
         favModels.sort((a, b) => ((usage[b.mid] || {}).count || 0) - ((usage[a.mid] || {}).count || 0));
       } else {
-        favModels.sort((a, b) => favs.indexOf(a.mid) - favs.indexOf(b.mid));
+        favModels.sort((a, b) => favs.indexOf(modelChoiceKey(a)) - favs.indexOf(modelChoiceKey(b)));
       }
 
       if (favModels.length > 0) {
@@ -306,11 +370,18 @@ export async function refreshModels(force = false) {
       }
     }
 
-    const localCount = Object.values(groups.local).reduce((s, a) => s + a.length, 0);
-    const apiCount = Object.values(groups.api).reduce((s, a) => s + a.length, 0);
+    const sourceGroups = { local: {}, api: {} };
+    for (const cat of ['local', 'api']) {
+      Object.entries(groups[cat]).forEach(([groupKey, models]) => {
+        const remaining = models.filter(model => !favs.includes(modelChoiceKey(model)));
+        if (remaining.length) sourceGroups[cat][groupKey] = remaining;
+      });
+    }
+    const localCount = Object.values(sourceGroups.local).reduce((s, a) => s + a.length, 0);
+    const apiCount = Object.values(sourceGroups.api).reduce((s, a) => s + a.length, 0);
     const hasMultipleCategories = localCount > 0 && apiCount > 0;
     const needsGrouping = hasMultipleCategories ||
-      Object.keys(groups.local).length > 1 || Object.keys(groups.api).length > 1;
+      Object.keys(sourceGroups.local).length > 1 || Object.keys(sourceGroups.api).length > 1;
 
     const categoryOrder = [
       { key: 'local', label: 'Local' },
@@ -318,7 +389,7 @@ export async function refreshModels(force = false) {
     ];
 
     categoryOrder.forEach(({ key, label }) => {
-      const endpoints = groups[key];
+      const endpoints = sourceGroups[key];
       const models = Object.values(endpoints).flat();
       if (models.length === 0) return;
 
@@ -359,13 +430,16 @@ export async function refreshModels(force = false) {
 
       // --- Endpoint sub-groups ---
       const extraEndpoints = extraGroups[key];
-      Object.entries(endpoints).forEach(([epName, epModels]) => {
-        const epExtra = extraEndpoints[epName] || [];
+      Object.entries(endpoints).forEach(([groupKey, epModels]) => {
+        const splitAt = groupKey.indexOf('\u001f');
+        const endpointKey = splitAt >= 0 ? groupKey.slice(0, splitAt) : groupKey;
+        const epName = splitAt >= 0 ? groupKey.slice(splitAt + 1) : groupKey;
+        const epExtra = extraEndpoints[groupKey] || [];
         const totalCount = epModels.length + epExtra.length;
         const isOfflineEndpoint = epModels.length > 0 && epModels[0].offline;
 
         if (multiEndpoints) {
-          const epKey = 'ep:' + key + ':' + epName;
+          const epKey = 'ep:' + key + ':' + endpointKey;
           const epCollapsed = collapseState[epKey] === true;
 
           const sub = document.createElement('div');
@@ -458,22 +532,26 @@ export async function refreshModels(force = false) {
 
     // Restore saved drag order for flat list before enabling drag-sort
     if (!needsGrouping) {
-      const savedModelOrder = Storage.getJSON('models-order', []);
+      const savedModelOrder = Storage.getJSON(modelStateKey('models-order'), []);
       if (savedModelOrder.length) {
         const rowMap = new Map();
-        box.querySelectorAll('.models-row').forEach(r => {
-          const mid = r.dataset.modelId;
-          if (mid) rowMap.set(mid, r);
-        });
-        const ordered = [];
-        savedModelOrder.forEach(mid => {
-          if (rowMap.has(mid)) {
-            ordered.push(rowMap.get(mid));
-            rowMap.delete(mid);
+        const rows = Array.from(box.querySelectorAll('.models-row'));
+        rows.forEach(r => {
+          if (r.dataset.modelId) rowMap.set(r.dataset.modelId, r);
+          if (r.dataset.modelMid && !rowMap.has(r.dataset.modelMid)) {
+            rowMap.set(r.dataset.modelMid, r);
           }
         });
-        // Append remaining rows not in saved order
-        rowMap.forEach(r => ordered.push(r));
+        const ordered = [];
+        const used = new Set();
+        savedModelOrder.forEach(key => {
+          const row = rowMap.get(key);
+          if (row && !used.has(row)) {
+            ordered.push(row);
+            used.add(row);
+          }
+        });
+        rows.forEach(row => { if (!used.has(row)) ordered.push(row); });
         ordered.forEach(r => box.appendChild(r));
       }
     }
@@ -484,7 +562,7 @@ export async function refreshModels(force = false) {
         // Flat list — sort the whole #models container
         dragSortModule.enable('models', '.models-row', {
           handleSelector: '.item-drag-handle',
-          storageKey: 'models-order',
+          storageKey: modelStateKey('models-order'),
         });
       } else {
         // Grouped — enable sort within each group container
@@ -569,7 +647,7 @@ export async function refreshModels(force = false) {
       const welcomeSub = document.getElementById('welcome-sub');
       if (welcomeSub) welcomeSub.innerHTML = 'Type <span class="setup-trigger-link" style="color:var(--accent,var(--red));font-weight:600;cursor:pointer;text-decoration:underline;" title="Click to launch setup">/setup</span> to get started.';
       const welcomeTip = document.getElementById('welcome-tip');
-      if (welcomeTip) welcomeTip.textContent = 'Type /setup, then choose Local models or API.';
+      if (welcomeTip) welcomeTip.textContent = 'Type /setup to add a subscription account, API provider, or local model.';
     } else {
       // Configured installs should feel ready, not stuck in onboarding.
       const welcomeSub = document.getElementById('welcome-sub');
@@ -599,9 +677,7 @@ export async function refreshModels(force = false) {
   }
 }
 
-/**
- * Refresh and display OpenAI providers
- */
+/** Refresh the optional OpenAI-family selector from the unified route catalog. */
 export async function refreshProviders() {
   const sel = document.getElementById('openai-model');
   if (!sel) return; // Exit if element doesn't exist
@@ -609,24 +685,29 @@ export async function refreshProviders() {
   sel.innerHTML = '<option disabled>Loading providers…</option>';
 
   try {
-    const res = await fetch(`${API_BASE}/api/providers`);
-    const data = await res.json();
-    const openai = (data.providers || []).find(p => p.provider === 'openai');
+    const [connectionsRes, modelsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/v1/providers/connections`, { credentials: 'same-origin' }),
+      fetch(`${API_BASE}/api/v1/providers/models`, { credentials: 'same-origin' }),
+    ]);
+    if (!connectionsRes.ok || !modelsRes.ok) throw new Error('Provider catalog unavailable');
+    const connections = (await connectionsRes.json()).connections || [];
+    const routes = (await modelsRes.json()).models || [];
+    const connectionIds = new Set(connections.filter(item => item.family_id === 'openai' && item.enabled !== false).map(item => item.id));
+    const models = routes.filter(item => connectionIds.has(item.connection_id) && item.enabled !== false);
 
     sel.innerHTML = '';
 
-    if (openai) {
-      const models = (openai.items?.[0]?.models) || [];
-      sortModelIds(models).forEach(m => {
+    if (models.length) {
+      models.sort((left, right) => String(left.display_name || left.model_id).localeCompare(String(right.display_name || right.model_id))).forEach(model => {
         const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
+        opt.value = model.id;
+        opt.textContent = model.display_name || model.model_id;
         sel.appendChild(opt);
       });
     } else {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = '(OPENAI_API_KEY not set on server)';
+      opt.textContent = '(No enabled OpenAI model route)';
       sel.appendChild(opt);
     }
   } catch (e) {

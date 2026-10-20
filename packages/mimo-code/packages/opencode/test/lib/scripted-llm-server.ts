@@ -13,6 +13,8 @@
  */
 
 export interface LLMCapture {
+  /** Model identifier sent to the OpenAI-compatible endpoint */
+  model: string
   /** Raw messages array from the OpenAI-compatible request body */
   messages: Array<{ role: string; content: unknown }>
 }
@@ -22,6 +24,7 @@ type ScriptedResponse = {
   lines: string[]
   /** HTTP status to return (default: 200) */
   status?: number
+  beforeReply?: () => Promise<unknown>
 }
 
 function sseChunk(delta: Record<string, unknown>, finishReason?: string): string {
@@ -66,6 +69,16 @@ export function reasoningStopResponse(reasoning: string): string[] {
     sseChunk({ role: "assistant" }),
     sseChunk({ reasoning_content: reasoning }),
     sseChunk({}, "stop"),
+    "data: [DONE]\n\n",
+  ]
+}
+
+/** Build SSE lines for reasoning-only output that exhausted the output token budget */
+export function reasoningLengthResponse(reasoning: string): string[] {
+  return [
+    sseChunk({ role: "assistant" }),
+    sseChunk({ reasoning_content: reasoning }),
+    sseChunk({}, "length"),
     "data: [DONE]\n\n",
   ]
 }
@@ -213,11 +226,12 @@ export function startScriptedLLMServer(responses: ScriptedResponse[]): ScriptedL
         return new Response("not found", { status: 404 })
       }
 
-      const body = (await req.json()) as { messages: Array<{ role: string; content: unknown }> }
-      captures.push({ messages: body.messages })
+      const body = (await req.json()) as { model: string; messages: Array<{ role: string; content: unknown }> }
+      captures.push({ model: body.model, messages: body.messages })
 
       const response = responses[Math.min(callIdx, responses.length - 1)]
       callIdx++
+      await response.beforeReply?.()
 
       const lines = response.lines
       const encoder = new TextEncoder()

@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import mcp_servers.memory_server as memory_server
 from src.memory import MemoryManager
@@ -148,3 +149,83 @@ def test_mcp_memory_preserves_ownerless_local_behavior(monkeypatch, tmp_path):
     delete_text = _tool_text({"action": "delete", "memory_id": legacy["id"][:8]})
     assert delete_text.startswith("Memory deleted:")
     assert all(entry["id"] != legacy["id"] for entry in manager.load_all())
+
+
+def test_memory_server_environment_cannot_select_legacy_vector(monkeypatch, tmp_path):
+    import src.app_initializer as app_initializer
+    import src.constants as constants
+    import src.frankenmemory_provider as provider_module
+    import src.memory_vector as memory_vector
+
+    created = []
+
+    class _Provider:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+
+    def _legacy_vector(*_args, **_kwargs):
+        raise AssertionError("legacy MemoryVectorStore must never be instantiated")
+
+    monkeypatch.setenv("MEMORY_PROVIDER", "legacy")
+    monkeypatch.setattr(app_initializer, "prepare_frankenmemory_database", lambda: "db-id")
+    monkeypatch.setattr(constants, "FM_DB_PATH", str(tmp_path / "frankenmemory.db"))
+    monkeypatch.setattr(provider_module, "FrankenmemoryProvider", _Provider)
+    monkeypatch.setattr(memory_vector, "MemoryVectorStore", _legacy_vector)
+    monkeypatch.setattr(memory_server, "_memory_manager", None)
+    monkeypatch.setattr(memory_server, "_memory_vector", None)
+    monkeypatch.setattr(memory_server, "_memory_provider", None)
+    monkeypatch.setattr(memory_server, "_initialization_error", None)
+    monkeypatch.setattr(memory_server, "_initialized", False)
+
+    memory_server._ensure_init()
+
+    assert created and memory_server._memory_provider is not None
+    assert memory_server._memory_vector is None
+    source = Path(memory_server.__file__).read_text(encoding="utf-8")
+    assert "MEMORY_PROVIDER" not in source
+    assert "MemoryVectorStore" not in source
+
+
+def test_memory_server_fails_closed_when_frankenmemory_is_unavailable(monkeypatch):
+    monkeypatch.setattr(memory_server, "_ensure_init", lambda: None)
+    monkeypatch.setattr(memory_server, "_memory_provider", None)
+    monkeypatch.setattr(memory_server, "_memory_manager", None)
+    monkeypatch.setattr(memory_server, "_initialization_error", "fm-mcp missing")
+
+    assert _tool_text({"action": "list"}) == (
+        "Error: Frankenmemory provider not available: fm-mcp missing"
+    )
+
+
+def test_memory_server_init_retries_after_transient_failure(monkeypatch, tmp_path):
+    import src.app_initializer as app_initializer
+    import src.constants as constants
+    import src.frankenmemory_provider as provider_module
+
+    attempts = []
+
+    def _prepare():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("transient database preparation failure")
+        return "db-id"
+
+    class _Provider:
+        def __init__(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(app_initializer, "prepare_frankenmemory_database", _prepare)
+    monkeypatch.setattr(constants, "FM_DB_PATH", str(tmp_path / "frankenmemory.db"))
+    monkeypatch.setattr(provider_module, "FrankenmemoryProvider", _Provider)
+    monkeypatch.setattr(memory_server, "_memory_provider", None)
+    monkeypatch.setattr(memory_server, "_initialization_error", None)
+    monkeypatch.setattr(memory_server, "_initialized", False)
+
+    memory_server._ensure_init()
+    assert memory_server._memory_provider is None
+    assert "transient" in memory_server._initialization_error
+
+    memory_server._ensure_init()
+    assert len(attempts) == 2
+    assert memory_server._memory_provider is not None
+    assert memory_server._initialization_error is None

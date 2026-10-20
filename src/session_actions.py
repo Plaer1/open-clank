@@ -71,8 +71,7 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
     Returns a human-readable summary of what was done.
     """
     from core.database import SessionLocal, Session as DbSession, ChatMessage as DbMsg
-    from src.llm_core import llm_call_async
-    from src.task_endpoint import resolve_task_endpoint
+    from src.openclank.modality_facade import complete_text
 
     db = SessionLocal()
     try:
@@ -168,10 +167,6 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         if skip_llm:
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions (folder sort skipped)."
 
-        url, model, headers = resolve_task_endpoint(owner=owner or None)
-        if not url:
-            return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
-
         names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
         prompt = (
             "You are a session organizer. Group these chat sessions into folders by topic.\n\n"
@@ -188,9 +183,19 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         try:
             # 16384 (was 4096): large folder JSON + reasoning-model thinking
             # overflowed 4096 and truncated the JSON, so it never parsed.
-            raw = await llm_call_async(url, model, [{"role": "user", "content": prompt}],
-                                       temperature=0.3, max_tokens=16384, headers=headers, timeout=120,
-                                       owner=owner or None)
+            import hashlib
+
+            raw = await complete_text(
+                owner=owner or "local-installation",
+                purpose="utility",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_output_tokens=16384,
+                idempotency_key=(
+                    "session-action-sort-"
+                    + hashlib.sha256(names_text.encode("utf-8")).hexdigest()[:32]
+                ),
+            )
         except Exception as e:
             logger.warning(f"Auto-sort LLM call failed: {e}")
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Folder sort skipped (model unreachable)."

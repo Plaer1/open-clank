@@ -1,0 +1,1 @@
+A test without an expected result cannot distinguish correct behavior from a crash-free run.

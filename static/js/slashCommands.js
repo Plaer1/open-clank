@@ -9,6 +9,7 @@ window.cancelActiveTour = function cancelActiveTour() {
   document.body?.classList.remove('tour-active');
 };
 
+import { buildCommandCatalog, resolveCatalogCommand, filterCommandCatalog } from './commandCatalog.js';
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
@@ -16,12 +17,11 @@ import modelsModule from './models.js';
 import chatRenderer from './chatRenderer.js';
 import spinnerModule from './spinner.js';
 import themeModule from './theme.js';
-import documentModule from './document.js';
+import documentModule from './document.js?v=20260722emailfastindex1';
 import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
 import { EVAL_PROMPTS } from './compare/index.js';
-import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -287,8 +287,14 @@ function _setupProviderPrompt() {
 // -----------------------------------------------------------------------
 
 /** Persist a message to the current session (fire-and-forget) */
-function _persistMsg(role, content, metadata) {
-  const sid = sessionModule.getCurrentSessionId();
+async function _persistMsg(role, content, metadata) {
+  let sid = sessionModule.getCurrentSessionId();
+  if (!sid && sessionModule.hasPendingChat?.()) {
+    try {
+      await sessionModule.materializePendingSession?.();
+      sid = sessionModule.getCurrentSessionId();
+    } catch (_) {}
+  }
   if (!sid || !content) return;
   const payload = { role, content };
   if (metadata) payload.metadata = metadata;
@@ -300,12 +306,13 @@ function _persistMsg(role, content, metadata) {
 }
 
 function slashReply(text) {
+  _hideWelcomeScreen();
   const chatBox = document.getElementById('chat-history');
   const div = document.createElement('div');
   div.className = 'msg msg-ai';
   const role = document.createElement('div');
   role.className = 'role';
-  role.textContent = window.__agentName || 'Odysseus';
+  role.textContent = window.__agentName || 'Open Clank';
   div.appendChild(role);
   const body = document.createElement('div');
   body.className = 'body';
@@ -331,6 +338,7 @@ function slashReply(text) {
 }
 
 let _skillCatalogCache = { at: 0, items: [] };
+let _skillCatalogError = '';
 let _mimoStateCache = { sid: '', at: 0, state: { available: false } };
 
 async function _loadSkillSlashCatalog(force = false) {
@@ -342,17 +350,20 @@ async function _loadSkillSlashCatalog(force = false) {
     const data = await res.json();
     const items = Array.isArray(data.skills) ? data.skills : [];
     _skillCatalogCache = { at: now, items };
+    _skillCatalogError = '';
     return items;
-  } catch {
-    return _skillCatalogCache.items || [];
+  } catch (error) {
+    _skillCatalogError = error.message || 'Skill catalog unavailable';
+    _skillCatalogCache = { at: 0, items: [] };
+    return [];
   }
 }
 
-export async function loadMimoControlState(force = false) {
+export async function loadMimoControlState(force = false, uncached = false) {
   const sid = sessionModule.getCurrentSessionId();
-  if (!sid) return { available: false };
+  if (!sid) return { available: false, reason: 'No active session', scope: 'session' };
   const now = Date.now();
-  if (!force && _mimoStateCache.sid === sid && now - _mimoStateCache.at < 5000) {
+  if (!force && !uncached && _mimoStateCache.sid === sid && now - _mimoStateCache.at < 5000) {
     return _mimoStateCache.state;
   }
   try {
@@ -361,11 +372,11 @@ export async function loadMimoControlState(force = false) {
       credentials: 'same-origin'
     });
     const state = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(state.detail || 'MiMo state is unavailable');
+    if (!res.ok) throw new Error(state.detail || 'Open Clank agent state is unavailable');
     _mimoStateCache = { sid, at: now, state };
     return state;
-  } catch {
-    const state = { available: false };
+  } catch (error) {
+    const state = { available: false, reason: error.message || 'Native state unavailable' };
     _mimoStateCache = { sid, at: now, state };
     return state;
   }
@@ -381,55 +392,33 @@ async function _setMimoConfig(configId, value) {
     body: JSON.stringify({ config_id: configId, value })
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || `MiMo rejected ${configId}`);
+  if (!res.ok) throw new Error(data.detail || `Open Clank agent rejected ${configId}`);
   const state = { available: true, ...data };
   _mimoStateCache = { sid, at: Date.now(), state };
   return state;
 }
 
 export async function refreshMimoModeControl(force = false) {
-  const select = document.getElementById('mimo-mode-select');
-  if (!select) return;
-  const state = await loadMimoControlState(force);
-  const modes = state.modes?.availableModes || [];
-  if (!state.available || !modes.length) {
-    select.classList.add('hidden');
-    select.replaceChildren();
-    return;
-  }
-  const selected = state.desired?.mode || state.current?.mode || state.modes?.currentModeId;
-  select.replaceChildren(...modes.map(mode => {
-    const option = document.createElement('option');
-    option.value = mode.id;
-    option.textContent = mode.name || mode.id;
-    option.title = mode.description || '';
-    option.selected = mode.id === selected;
-    return option;
-  }));
-  select.classList.remove('hidden');
-  select.onchange = async () => {
-    const previous = selected;
-    select.disabled = true;
-    try {
-      await _setMimoConfig('mode', select.value);
-      uiModule.showToast(`MiMo mode: ${select.options[select.selectedIndex]?.textContent || select.value}`);
-      document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
-    } catch (error) {
-      select.value = previous;
-      uiModule.showError(error.message);
-    } finally {
-      select.disabled = false;
-    }
-  };
+  // Provider-native mode negotiation is headless.  The only public mode
+  // authority is the Open Clank Chat/Plan/Agent picker in app.js; this helper
+  // remains as a compatibility refresh for callers that also need negotiated
+  // commands/models, but it must never render or mutate a second selector.
+  return loadMimoControlState(force);
 }
 
 function _submitComposedMessage(text) {
   const msgInput = document.getElementById('message');
   const form = document.getElementById('chat-form');
   if (!msgInput || !form) return false;
+  const sourceSessionId = sessionModule.getCurrentSessionId();
+  const sourceDraft = msgInput.value;
   // The slash handler and app-level form debounce must both release before
   // sending the pinned prompt, otherwise the follow-up submit is dropped.
   setTimeout(() => {
+    if (sourceSessionId !== sessionModule.getCurrentSessionId() || (msgInput.value && msgInput.value !== sourceDraft)) {
+      uiModule.showToast('Chat or draft changed; the command prompt was not submitted.', 2400);
+      return;
+    }
     msgInput.value = text;
     msgInput.dispatchEvent(new Event('input', { bubbles: true }));
     form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
@@ -444,6 +433,10 @@ async function _invokeSkillByName(name, requestText, ctx) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ request: requestText || '' })
   });
+  if (ctx && ctx.sid !== sessionModule.getCurrentSessionId()) {
+    uiModule.showToast('Chat changed; the skill prompt was not submitted.', 2400);
+    return true;
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => null);
     slashReply(ctx?.esc ? ctx.esc(err?.detail || 'Skill is not available') : 'Skill is not available');
@@ -500,7 +493,7 @@ function typewriterReply(text, options = {}) {
     div.className = 'msg msg-ai';
     const role = document.createElement('div');
     role.className = 'role';
-    role.textContent = window.__agentName || 'Odysseus';
+    role.textContent = window.__agentName || 'Open Clank';
     div.appendChild(role);
     const body = document.createElement('div');
     body.className = 'body';
@@ -540,7 +533,7 @@ function typewriterBlocksReply(blocks, options = {}) {
     div.className = 'msg msg-ai';
     const role = document.createElement('div');
     role.className = 'role';
-    role.textContent = window.__agentName || 'Odysseus';
+    role.textContent = window.__agentName || 'Open Clank';
     div.appendChild(role);
     const body = document.createElement('div');
     body.className = 'body';
@@ -717,222 +710,26 @@ function detectProvider(input) {
   return null;
 }
 
-function setupChatUrlForEndpoint(detected) {
-  const base = (detected.base_url || '').replace(/\/+$/, '');
-  if (detected.name === 'Anthropic') return base.replace(/\/v1$/, '') + '/v1/messages';
-  if (base.includes('ollama.com')) return 'https://ollama.com/api/chat';
-  return base + '/chat/completions';
-}
-
-async function connectDetectedSetupEndpoint(detected) {
-  const providerLabel = detected.name || 'custom endpoint';
-  const chatBox = document.getElementById('chat-history');
-  const spinnerDiv = document.createElement('div');
-  spinnerDiv.className = 'msg msg-ai';
-  const spinnerRole = document.createElement('div');
-  spinnerRole.className = 'role';
-  spinnerRole.textContent = window.__agentName || 'Odysseus';
-  spinnerDiv.appendChild(spinnerRole);
-  const spinnerBody = document.createElement('div');
-  spinnerBody.className = 'body';
-  spinnerDiv.appendChild(spinnerBody);
-  chatBox.appendChild(spinnerDiv);
-  const setupSpinner = spinnerModule.create(`Detected ${providerLabel}. Connecting`, 'right', 'wave');
-  spinnerBody.appendChild(setupSpinner.createElement());
-  setupSpinner.start(150);
-  uiModule.scrollHistory();
-
-  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/i.test(detected.base_url);
-
-  try {
-    const fd = new FormData();
-    fd.append('base_url', detected.base_url);
-    if (detected.api_key) fd.append('api_key', detected.api_key);
-    if (detected.name) fd.append('name', detected.name);
-    fd.append('require_models', 'true');
-    if (!isLocal) fd.append('skip_probe', 'true');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
-    const res = await fetch(`${API_BASE}/api/model-endpoints`, { method: 'POST', body: fd, credentials: 'same-origin', signal: controller.signal });
-    clearTimeout(timer);
-    const data = await res.json();
-
-    if (!res.ok) {
-      setupSpinner.destroy();
-      spinnerDiv.remove();
-      setupMode = 'endpoint-provider-first';
-      await typewriterReply(`Endpoint was not saved: ${data.detail || 'connection failed'}`);
-      return;
-    }
-
-    const count = (data.models || []).length;
-    if (count > 0) {
-      setupSpinner.destroy();
-      spinnerDiv.remove();
-      await typewriterReply(`Found ${count} model${count > 1 ? 's' : ''} on ${providerLabel}. Starting a chat...`);
-      if (modelsModule) await modelsModule.refreshModels(true);
-      const firstModel = data.models[0];
-      const chatUrl = setupChatUrlForEndpoint(detected);
-      if (sessionModule) {
-        await sessionModule.createDirectChat(chatUrl, firstModel, data.id);
-      }
-      await typewriterReply("You're all set. Type /tour for a walkthrough, or /setup endpoint to add another endpoint or key.");
-      _clearSetupGuideMessages();
-      return;
-    }
-
-    setupSpinner.destroy();
-    spinnerDiv.remove();
-    setupMode = 'endpoint-provider-first';
-    await typewriterReply("Endpoint saved, but no models were found. Check the provider, key, or service status, then try /setup endpoint again.");
-    if (modelsModule) modelsModule.refreshModels(true);
-  } catch {
-    setupSpinner.destroy();
-    spinnerDiv.remove();
-    setupMode = 'endpoint-provider-first';
-    await typewriterReply("Endpoint setup failed before it could finish. Check the provider, key, or service status, then try /setup endpoint again.");
-  }
-}
-
 /**
- * Handle setup mode input — user pasted an API key or URL.
+ * Compatibility entrypoint for tabs that entered the retired chat setup flow.
+ * Discard any pasted value without rendering or transmitting it, then send the
+ * user to the write-only managed provider control plane.
  */
 async function handleSetupInput(input) {
-  // Show masked user bubble (don't display raw key)
-  const isUrl = /^https?:\/\//i.test(input) || /^(\d{1,3}\.){1,3}\d{1,3}/i.test(input) || /^localhost/i.test(input);
-  _showSetupUserBubble(input, isUrl);
-
-  const paired = _extractSetupProviderCredential(input);
-  if (paired && paired.provider) {
-    if (paired.credential) {
-      await connectDetectedSetupEndpoint({
-        base_url: paired.provider.url,
-        api_key: paired.credential,
-        name: paired.provider.name,
-      });
-    } else {
-      pendingSetupProvider = paired.provider;
-      setupMode = 'endpoint-key-for-provider';
-      await _setupReply(`Paste your ${paired.provider.name} API key now.`);
-    }
-    return;
-  }
-
-  const detected = detectProvider(input);
-  if (!detected) {
-    setupMode = false;
-    await typewriterReply("Unrecognised format. Type /setup endpoint to try again.");
-    return;
-  }
-  if (detected.ambiguous) {
-    pendingSetupApiKey = detected.api_key;
-    setupMode = 'endpoint-provider';
-    await _setupProviderPrompt();
-    return;
-  }
-
-  await connectDetectedSetupEndpoint(detected);
+  void input;
+  setupMode = false;
+  pendingSetupApiKey = '';
+  pendingSetupProvider = null;
+  settingsModule.open('services');
+  await _setupReply('Provider settings opened. Add connections and accounts there; credentials are write-only and never stored in chat.');
+  return true;
 }
 
-/**
- * Handle setup wizard sub-modes (endpoint, theme, features).
- */
 async function handleSetupWizard(mode, input) {
-  if (mode === 'endpoint-provider-first') {
-    const detected = detectProvider(input);
-    if (detected && !detected.ambiguous) {
-      await handleSetupInput(input);
-      return;
-    }
-    if (detected?.ambiguous) {
-      pendingSetupApiKey = detected.api_key;
-      setupMode = 'endpoint-provider';
-      _showSetupUserBubble(input, false);
-      await _setupProviderPrompt();
-      return;
-    }
-    const deviceAuthProvider = _setupDeviceAuthProviderFromInput(input);
-    if (deviceAuthProvider) {
-      _addMessage('user', input);
-      setupMode = false;
-      await _setupProviderDeviceFlow(deviceAuthProvider);
-      return;
-    }
-    const paired = _extractSetupProviderCredential(input);
-    const provider = paired?.provider || _setupProviderFromInput(input);
-    if (!provider) {
-      _addMessage('user', input);
-      setupMode = false;
-      await _setupReply('Provider not recognised. Try ' + SETUP_PROVIDER_HINT + '. Type /setup endpoint to try again.');
-      return;
-    }
-    if (paired?.credential) {
-      _showSetupUserBubble(input, false);
-      await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: paired.credential, name: provider.name });
-      return;
-    }
-    _addMessage('user', provider.name);
-    pendingSetupProvider = provider;
-    setupMode = 'endpoint-key-for-provider';
-    await _setupReply(`Paste your ${provider.name} API key.`);
-    return;
+  if (String(mode || '').startsWith('endpoint')) {
+    return handleSetupInput(input);
   }
-
-  if (mode === 'endpoint-key-for-provider') {
-    const provider = pendingSetupProvider;
-    pendingSetupProvider = null;
-    if (!provider) {
-      await _setupReply('No provider selected. Type /setup endpoint and choose a provider again.');
-      return;
-    }
-    _showSetupUserBubble(input, /^https?:\/\//i.test(input));
-    const paired = _extractSetupProviderCredential(input);
-    const credential = paired?.credential || input.trim();
-    await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: credential, name: provider.name });
-    return;
-  }
-
-  if (mode === 'endpoint-provider') {
-    const raw = input.trim();
-    const key = pendingSetupApiKey;
-    pendingSetupApiKey = '';
-    _addMessage('user', input);
-
-    // User may have re-typed "provider key" together (matching the
-    // original /setup prompt's example). Honor the freshly-pasted
-    // key in that case — _setupProviderFromInput strips whitespace
-    // and would otherwise see "deepseeksk-..." and bail.
-    const paired = _extractSetupProviderCredential(raw);
-    if (paired?.provider) {
-      const credential = paired.credential || key;
-      if (!credential) {
-        await typewriterReply('No API key found. Type /setup endpoint and paste the key again.');
-        return;
-      }
-      await connectDetectedSetupEndpoint({ base_url: paired.provider.url, api_key: credential, name: paired.provider.name });
-      return;
-    }
-
-    if (!key) {
-      await typewriterReply('No pending API key. Type /setup endpoint and paste the key again.');
-      return;
-    }
-    let provider = _setupProviderFromInput(raw);
-    if (!provider && /^https?:\/\//i.test(raw)) {
-      provider = { name: '', url: raw };
-    }
-    if (!provider) {
-      pendingSetupApiKey = '';
-      setupMode = false;
-      await typewriterReply('Provider not recognised. Try ' + SETUP_PROVIDER_HINT + '. Type /setup endpoint to try again.');
-      return;
-    }
-    await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: key, name: provider.name });
-    return;
-  }
-
   _addMessage('user', input);
-
   if (mode === 'theme') {
     const name = input.trim().toLowerCase();
     const tm = themeModule;
@@ -947,9 +744,8 @@ async function handleSetupWizard(mode, input) {
     } else {
       slashReply(`Unknown theme "${name}". Try /theme to see available themes.`);
     }
-    return;
+    return true;
   }
-
   if (mode === 'features') {
     const name = input.trim().toLowerCase();
     try {
@@ -966,11 +762,13 @@ async function handleSetupWizard(mode, input) {
       } else {
         await typewriterReply(`Unknown feature "${name}". Available: ${Object.keys(features).join(', ')}`);
       }
-    } catch { await typewriterReply('Could not update features.'); }
-    return;
+    } catch (_) {
+      await typewriterReply('Could not update features.');
+    }
+    return true;
   }
-
   await typewriterReply("I didn't understand that. Try /setup to see options.");
+  return true;
 }
 
 function _syncToggleUI(name, state) {
@@ -1337,7 +1135,7 @@ async function _cmdWorkspace(args, ctx) {
     // folder, sensitive dir, filesystem root).
     workspaceModule.vetAndSetWorkspace(rest).then(({ ok, path }) => {
       if (ok) slashReply(`Workspace set: <code>${uiModule.esc(path)}</code>`);
-      else slashReply(`Not a usable workspace folder: <code>${uiModule.esc(rest)}</code>. It must be an existing directory, not a filesystem root or sensitive path.`);
+      else slashReply(`Not a usable workspace folder on the Odysseus backend: <code>${uiModule.esc(rest)}</code>. If Odysseus is running in Docker, use the container path, usually <code>/app</code>, or use <code>/workspace pick</code>.`);
     });
     return true;
   }
@@ -1412,7 +1210,7 @@ async function _cmdToggleSidebar(args, ctx) {
 async function _cmdOpen(args, ctx) {
   const target = (args[0] || '').trim().toLowerCase();
   if (!target) {
-    slashReply('Open what? Try /open Cookbook, /open Settings, /open Gallery, /open Notes, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
+    slashReply('Open what? Try /open Usage, /open Cookbook, /open Settings, /open Gallery, /open Editor, /open Clanker Tasks, /open Library, /open Research, or /open Compare.');
     return true;
   }
   const clickFirst = (...ids) => {
@@ -1423,6 +1221,11 @@ async function _cmdOpen(args, ctx) {
     return false;
   };
   try {
+    if (target === 'usage' || target === 'stats') {
+      if (typeof window.__openStatsUsage === 'function') window.__openStatsUsage();
+      else clickFirst('tool-usage-btn');
+      return true;
+    }
     if (target === 'cookbook' || target === 'cook') {
       if (cookbookModule && typeof cookbookModule.open === 'function') await cookbookModule.open({ tab: 'Download' });
       else clickFirst('tool-cookbook-btn', 'rail-cookbook');
@@ -1433,14 +1236,16 @@ async function _cmdOpen(args, ctx) {
       else clickFirst('user-bar-settings', 'rail-settings');
       return true;
     }
+    if (['library', 'documents', 'docs', 'archive'].includes(target)) {
+      const files = await import('./files.js');
+      await files.openLibraryCollection(target === 'archive' ? 'archive' : 'documents');
+      return true;
+    }
     const targets = {
-      gallery: ['tool-gallery-btn', 'rail-gallery'],
+      files: ['tool-files-btn'],
+      gallery: ['tool-files-btn'],
       notes: ['tool-notes-btn', 'rail-notes'],
       tasks: ['tool-tasks-btn', 'rail-tasks'],
-      library: ['tool-library-btn', 'rail-archive'],
-      documents: ['tool-library-btn', 'rail-archive'],
-      docs: ['tool-library-btn', 'rail-archive'],
-      archive: ['tool-library-btn', 'rail-archive'],
       brain: ['tool-memory-btn', 'rail-memory'],
       memory: ['tool-memory-btn', 'rail-memory'],
       memories: ['tool-memory-btn', 'rail-memory'],
@@ -1507,10 +1312,10 @@ async function _cmdToolPanel(tool, args, ctx) {
 async function _cmdSettings(args, ctx) {
   // Opens the Settings modal — primarily useful when the user has hidden the
   // Settings cog in Appearance and needs a way back in.
-  const tab = (args[0] || '').toLowerCase() || undefined;
+  const tab = args.join(' ').trim() || undefined;
   try {
     if (settingsModule && typeof settingsModule.open === 'function') {
-      settingsModule.open(tab);
+      (settingsModule.openSettings || settingsModule.open)(tab);
     } else {
       // Fallback: click the cog directly if the module isn't loaded.
       const cog = document.getElementById('user-bar-settings');
@@ -1644,8 +1449,17 @@ async function _cmdMemoryAdd(args, ctx) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, category: 'fact', source: 'user' })
   });
-  if (res.ok) await typewriterReply(`Memory added: ${ctx.esc(text)}`);
-  else slashReply('Failed to add memory');
+  let data = {};
+  try { data = await res.json(); } catch (_) { /* response may be empty */ }
+  if (res.ok) {
+    await typewriterReply(
+      data.pending_review
+        ? `Memory sent to review: ${ctx.esc(text)}`
+        : `Memory added: ${ctx.esc(text)}`
+    );
+  } else {
+    slashReply(ctx.esc(data.detail || 'Failed to add memory'));
+  }
   return true;
 }
 
@@ -2120,15 +1934,18 @@ async function _cmdCompact(args, ctx) {
     reply.body.appendChild(spinnerEl);
     compactSpinner.start(110);
   }
-  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(ctx.sid)}/compact`, {
+  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(ctx.sid)}/mimo-operation`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operation: 'compact' }),
   });
   compactSpinner.destroy();
+  if (ctx.sid !== sessionModule.getCurrentSessionId()) { uiModule.showToast('Compaction finished for the original chat.', 2400); return true; }
   if (res.ok) {
     const d = await res.json();
-    slashReply(`Conversation compacted. Summarized ${d.summarized || 0} older messages, kept ${d.kept || 0} recent messages.`);
+    slashReply(ctx.esc(d.message || d.detail || (d.result === false ? 'Native compaction did not change context.' : 'Native context compaction completed.')));
+    document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
     if (sessionModule?.selectSession) await sessionModule.selectSession(ctx.sid);
   } else {
     let detail = 'Compaction failed';
@@ -2533,7 +2350,7 @@ async function _cmdDemo(args, ctx) {
   const delay = ms => new Promise(r => setTimeout(r, ms));
 
   // ── Welcome ──
-  await typewriterReply('Welcome to Odysseus! Lets begin the tour!');
+  await typewriterReply('Welcome to Open Clank! Lets begin the tour!');
   // Beat between the welcome line and the first hint so it doesn't snap in.
   await delay(900);
 
@@ -2561,7 +2378,7 @@ async function _cmdDemo(args, ctx) {
     { sel: '#sidebar-new-chat-btn', text: 'Start a new chat here. <b>Click it.</b> You can do it!', mode: 'click',
       before() { if (sidebar?.classList.contains('hidden')) sidebar.classList.remove('hidden'); } },
     { sel: '#model-picker-btn',   text: 'Pick your LLM, Local or API.', advanceOnClick: true },
-    { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Odysseus comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
+    { sel: '#web-toggle-btn',     text: 'Toggle tools like <b>web search</b>. Open Clank comes with private built-in <b>SearXNG</b> search.', mode: 'click' },
     { sel: '#overflow-plus-btn',  text: 'More tools can be found here, or in your sidebar. <b>Click to peek.</b>',
       advanceOnClick: true, pulseNext: true, afterDelay: 2200 },
     { sel: '#message',            text: 'Write your prompt here. Drag and drop files to attach them. <b>/prompt</b> for random prompt, <b>/help</b> for more.',
@@ -2591,7 +2408,7 @@ async function _cmdDemo(args, ctx) {
   }
 
   _clearTour();
-  await typewriterReply('Odysseus is yours to explore, enjoy the voyage!');
+  await typewriterReply('Open Clank is yours to explore, enjoy the voyage!');
   return true;
 }
 
@@ -3306,7 +3123,7 @@ async function _cmdTourTheme(args, ctx) {
   // work as a fallback (read past without touching anything).
   const steps = [
     { sel: '#theme-popup',
-      text: '<b>Welcome to Theme.</b> Odysseus is yours to customize!',
+      text: '<b>Welcome to Theme.</b> Open Clank is yours to customize!',
       placement: 'center-above',
       before: () => _clickTab('theme-tab-browse') },
     { sel: '#themeGrid',
@@ -3538,7 +3355,7 @@ async function _cmdTourSettings(args, ctx) {
       text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
       before: () => _clickNav('ai') },
     { sel: '#settings-modal .admin-card:has(#set-defaultModelSelect)',
-      text: '<b>Default Chat Model</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
+      text: '<b>Default Chat Model</b> — your main model. The one Open Clank reaches for whenever you start a new chat.',
       before: () => _clickNav('ai') },
     { sel: '#settings-modal .admin-card:has(#set-utilityModelSelect)',
       text: '<b>Utility Model</b> — your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn\'t burn cycles on chores. <b>Recommend a small local model</b> here — it\'s free and always on.',
@@ -3559,7 +3376,7 @@ async function _cmdTourSettings(args, ctx) {
       text: '<b>Email</b> — sync schedule, drafts, snooze defaults — everything email-flow related.',
       before: () => _clickNav('email') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="reminders"]',
-      text: '<b>Reminders</b> — quiet hours and how Odysseus nudges you about calendar + urgent email.',
+      text: '<b>Reminders</b> — quiet hours and how Open Clank nudges you about calendar + urgent email.',
       before: () => _clickNav('reminders') },
   ];
 
@@ -3582,220 +3399,6 @@ async function _cmdTourSettings(args, ctx) {
   return true;
 }
 
-// ── Gallery tour ──
-async function _cmdTourGallery(args, ctx) {
-  // Clear the chat input so "/tour-gallery" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-  try { localStorage.setItem('odysseus-notes-first-open-hint-v1', '1'); } catch (_) {}
-  document.getElementById('notes-first-open-hint')?.remove();
-
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the gallery modal.
-  let modal = document.getElementById('gallery-modal');
-  if (!modal || modal.classList.contains('hidden')) {
-    const opener = document.getElementById('tool-gallery-btn')
-      || document.getElementById('rail-gallery');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      modal = document.getElementById('gallery-modal');
-      if (modal && !modal.classList.contains('hidden')) break;
-    }
-  }
-  if (!modal || modal.classList.contains('hidden')) {
-    slashReply('Could not open Gallery. Try clicking the Gallery tool first.');
-    return true;
-  }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    const _tStart = performance.now();
-    let _rafId = 0;
-    const tick = () => {
-      update();
-      if (performance.now() - _tStart < 500) _rafId = requestAnimationFrame(tick);
-    };
-    _rafId = requestAnimationFrame(tick);
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      if (_rafId) cancelAnimationFrame(_rafId);
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      setTimeout(() => {
-        const target = document.querySelector(sel);
-        if (!target) return resolve('skip');
-        _halos.push(_makeHalo(target));
-        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-        tooltip.classList.remove('tour-fade-in');
-        tooltip.innerHTML =
-          '<div class="tour-text">' + text + '</div>' +
-          '<div class="tour-nav">' +
-            '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-            '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-            '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-          '</div>';
-        requestAnimationFrame(() => {
-          _positionTooltip(target, placement);
-          tooltip.classList.add('tour-fade-in');
-        });
-
-        const onClick = (e) => {
-          const hit = e.target.closest && e.target.closest('[data-act]');
-          const act = hit && hit.dataset.act;
-          if (!act) return;
-          tooltip.removeEventListener('click', onClick);
-          resolve(act);
-        };
-        tooltip.addEventListener('click', onClick);
-      }, before ? 160 : 0);
-    });
-  }
-
-  function _clickTab(tab) {
-    const btn = modal.querySelector('.gallery-tab[data-tab="' + tab + '"]');
-    if (btn) btn.click();
-  }
-
-  const steps = [
-    { sel: '#gallery-modal .modal-content',
-      text: '<b>Welcome to Gallery.</b> Photos and albums live here.',
-      placement: 'center-above',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="images"]',
-      text: '<b>Photos</b> — every image you\'ve uploaded, in one grid.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-upload-tile',
-      text: 'Drop or click this tile to <b>upload</b> photos and videos.',
-      before: () => _clickTab('images') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="albums"]',
-      text: '<b>Albums</b> — group images into collections.',
-      before: () => _clickTab('albums') },
-    { sel: '#gallery-modal .gallery-tab[data-tab="editor"]',
-      text: '<b>Editor</b> — honestly still WIP, so explore as you want.',
-      before: () => _clickTab('editor') },
-  ];
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: i === steps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // Land on Photos so the user has a familiar starting point.
-  _clickTab('images');
-  _clear();
-  await typewriterReply('That\'s Gallery. Editor is rough — feedback welcome.');
-  return true;
-}
 
 // ── Notes tour ──
 async function _cmdTourNotes(args, ctx) {
@@ -3842,7 +3445,7 @@ async function _cmdTourNotes(args, ctx) {
     }
   }
   if (!pane) {
-    slashReply('Could not open Notes. Try clicking the Notes tool first.');
+    slashReply('Could not open Editor. Try opening Editor first.');
     return true;
   }
 
@@ -3972,7 +3575,7 @@ async function _cmdTourNotes(args, ctx) {
       text: '<b>Notes</b> is your basic todo list, and also where reminders are managed.',
       placement: 'center-above' },
     { sel: '#notes-pane .notes-pane-body',
-      text: 'Your notes show up here. You can also <b>ask Odysseus in chat</b> to take a note for you.' },
+      text: 'Your notes show up here. You can also <b>ask Open Clank in chat</b> to take a note for you.' },
     { sel: '#notes-search',
       text: '<b>Search</b> across every note — title, body, tags, the works.' },
     { sel: '#notes-view-toggle',
@@ -4411,7 +4014,7 @@ async function _cmdTourTask1(args, ctx) {
       text: 'Tasks are <b>paused by default</b> — resume whichever ones make sense for you. (Or pause anything that\'s running.)' },
     { sel: '#tasks-modal .modal-body',
       text: 'When enabled, Tasks use the <b>utility model configured in Settings</b> for cleanup and organization jobs.' },
-  ], 'Use Clanker Tasks when you want Odysseus to handle background housekeeping.', {
+  ], 'Use Clanker Tasks when you want Open Clank to handle background housekeeping.', {
     continueLabel: 'continue →',
     continueText: '<b>Part 1 done.</b> Want to keep going into <b>adding & managing tasks</b>?',
   });
@@ -4435,7 +4038,7 @@ async function _cmdTourTask2(args, ctx) {
     // re-show it when the user moves past this step so the tour lands
     // back where it started.
     { sel: '#message',
-      text: 'You can also <b>just ask in chat</b> — say "every weekday at 9am check for urgent emails" and Odysseus will create the task for you.',
+      text: 'You can also <b>just ask in chat</b> — say "every weekday at 9am check for urgent emails" and Open Clank will create the task for you.',
       before: () => document.getElementById('tasks-modal')?.classList.add('hidden'),
       after:  () => document.getElementById('tasks-modal')?.classList.remove('hidden') },
   ], 'That\'s Clanker Tasks. Have it run the background bits so you can stay in chat.');
@@ -4640,14 +4243,11 @@ async function _cmdTourResearch(args, ctx) {
     const _body = await typewriterReply('That’s Deep Research — hit Start or queue up many. You can also view past research in your ');
     const libLink = document.createElement('button');
     libLink.type = 'button';
-    libLink.textContent = 'Library';
+    libLink.textContent = 'Files';
     libLink.style.cssText = 'background:none;border:none;padding:0;margin:0;color:var(--accent,var(--red));font:inherit;text-decoration:underline;cursor:pointer;';
-    libLink.addEventListener('click', () => {
-      if (window.documentModule && window.documentModule.openLibrary) {
-        window.documentModule.openLibrary({ tab: 'research' });
-      } else {
-        document.getElementById('tool-library-btn')?.click();
-      }
+    libLink.addEventListener('click', async () => {
+      const files = await import('./files.js');
+      await files.openLibraryCollection('research');
     });
     _body.appendChild(libLink);
     _body.appendChild(document.createTextNode('.'));
@@ -4655,282 +4255,25 @@ async function _cmdTourResearch(args, ctx) {
   return true;
 }
 
-// ── Tour: Library + Document editor ──
+// ── Tour: Library collections in Files ──
 
 async function _cmdTourLibrary(args, ctx) {
-  // Clear the chat input so "/tour-library" doesn't linger.
-  const _msgEl = document.getElementById('message');
-  if (_msgEl) {
-    _msgEl.value = '';
-    _msgEl.dispatchEvent(new Event('input', { bubbles: true }));
+  const input = document.getElementById('message');
+  if (input) {
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   }
-
-  // Shared tour-styles injection.
-  if (!document.getElementById('tour-styles')) {
-    const s = document.createElement('style');
-    s.id = 'tour-styles';
-    s.textContent =
-      '#tour-tooltip{position:fixed;z-index:10001;background:var(--bg);color:var(--fg);' +
-      'border:1px solid var(--border);border-radius:8px;padding:12px 14px;max-width:280px;' +
-      'font-family:inherit;font-size:0.8rem;line-height:1.5;' +
-      'box-shadow:0 2px 12px rgba(0,0,0,0.3);pointer-events:auto;' +
-      'opacity:0;transform:translateY(4px);transition:opacity 0.3s ease-out,transform 0.3s ease-out}' +
-      '#tour-tooltip.tour-fade-in{opacity:1;transform:translateY(0)}' +
-      '#tour-tooltip .tour-text{margin-bottom:8px;opacity:0.8}' +
-      '.tour-nav{display:flex;align-items:center;justify-content:space-between}' +
-      '.tour-nav button{background:none;border:1px solid var(--border);color:var(--fg);' +
-      'cursor:pointer;font-family:inherit;border-radius:4px;transition:all .1s}' +
-      '.tour-nav button:hover{background:color-mix(in srgb,var(--fg) 8%,transparent)}' +
-      '.tour-btn-arrow{font-size:1rem;padding:4px 12px;opacity:0.6}' +
-      '.tour-btn-arrow:hover{opacity:1}' +
-      '.tour-btn-arrow.disabled{opacity:0.15;pointer-events:none}' +
-      '.tour-btn-skip{font-size:0.72rem;padding:3px 10px;opacity:0.35;border-color:transparent!important}' +
-      '.tour-btn-skip:hover{opacity:0.6}';
-    document.head.appendChild(s);
-  }
-
-  // Open the library modal if it's not already up.
-  let libModal = document.getElementById('doclib-modal');
-  if (!libModal) {
-    const opener = document.getElementById('tool-library-btn') || document.getElementById('rail-archive');
-    if (opener) opener.click();
-    for (let i = 0; i < 25; i++) {
-      await new Promise(r => setTimeout(r, 80));
-      libModal = document.getElementById('doclib-modal');
-      if (libModal) break;
-    }
-  }
-  if (!libModal) {
-    slashReply('Could not open Library. Try clicking the Library tool first.');
+  const files = await import('./files.js');
+  const opened = await files.openLibraryCollection('documents');
+  if (!opened) {
+    slashReply('The Documents collection is unavailable. Open Files and select a Library collection.');
     return true;
   }
-
-  document.body.classList.add('tour-active');
-  const tooltip = document.createElement('div');
-  tooltip.id = 'tour-tooltip';
-  document.body.appendChild(tooltip);
-
-  let _halos = [];
-  function _makeHalo(target) {
-    const halo = document.createElement('div');
-    halo.className = 'tour-halo';
-    document.body.appendChild(halo);
-    const update = () => {
-      const r = target.getBoundingClientRect();
-      halo.style.top    = (r.top - 4) + 'px';
-      halo.style.left   = (r.left - 4) + 'px';
-      halo.style.width  = (r.width + 8) + 'px';
-      halo.style.height = (r.height + 8) + 'px';
-    };
-    update();
-    window.addEventListener('resize', update);
-    window.addEventListener('scroll', update, true);
-    requestAnimationFrame(() => halo.classList.add('tour-fade-in'));
-    return { destroy() {
-      window.removeEventListener('resize', update);
-      window.removeEventListener('scroll', update, true);
-      halo.remove();
-    } };
-  }
-  function _clearHalos() {
-    _halos.forEach(h => h.destroy());
-    _halos = [];
-    document.querySelectorAll('.tour-halo').forEach(e => e.remove());
-  }
-  const _clear = () => {
-    document.querySelectorAll('.odysseus-highlight').forEach(e => e.classList.remove('odysseus-highlight'));
-    _clearHalos();
-    tooltip.remove();
-    document.body.classList.remove('tour-active');
-  };
-
-  function _positionTooltip(target, placement) {
-    tooltip.style.visibility = 'hidden';
-    tooltip.style.display = '';
-    const tw = tooltip.offsetWidth || 260;
-    const th = tooltip.offsetHeight || 100;
-    if (placement === 'center-above') {
-      const top = Math.max(10, window.innerHeight * 0.32 - th / 2);
-      const left = Math.max(10, window.innerWidth / 2 - tw / 2);
-      tooltip.style.top = top + 'px';
-      tooltip.style.left = left + 'px';
-      tooltip.style.visibility = '';
-      return;
-    }
-    const r = target.getBoundingClientRect();
-    const gap = 12;
-    let top, left;
-    if (r.bottom + gap + th < window.innerHeight - 10) {
-      top = r.bottom + gap;
-      left = r.left + r.width / 2 - tw / 2;
-    } else if (r.top - gap - th > 10) {
-      top = r.top - gap - th;
-      left = r.left + r.width / 2 - tw / 2;
-    } else {
-      top = r.top + r.height / 2 - th / 2;
-      left = r.right + gap;
-      if (left + tw > window.innerWidth - 10) left = r.left - tw - gap;
-    }
-    if (left + tw > window.innerWidth - 10) left = window.innerWidth - tw - 10;
-    if (left < 10) left = 10;
-    if (top < 10) top = 10;
-    tooltip.style.top = top + 'px';
-    tooltip.style.left = left + 'px';
-    tooltip.style.visibility = '';
-  }
-
-  function _showStep(sel, text, opts) {
-    opts = opts || {};
-    const isFirst = !!opts.isFirst;
-    const isLast = !!opts.isLast;
-    const before = opts.before;
-    const placement = opts.placement;
-    const interactive = !!opts.interactive;
-    const optional = !!opts.optional;
-    return new Promise(resolve => {
-      _clearHalos();
-      if (before) { try { before(); } catch (_) {} }
-      const target = document.querySelector(sel);
-      if (!target) return resolve(optional ? 'next' : 'skip');
-      _halos.push(_makeHalo(target));
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-      tooltip.classList.remove('tour-fade-in');
-      tooltip.innerHTML =
-        '<div class="tour-text">' + text + '</div>' +
-        '<div class="tour-nav">' +
-          '<button class="tour-btn-arrow' + (isFirst ? ' disabled' : '') + '" data-act="back">←</button>' +
-          '<button class="tour-btn-skip" data-act="skip">' + (isLast ? 'done' : 'skip tour') + '</button>' +
-          '<button class="tour-btn-arrow" data-act="next">' + (isLast ? '✓' : '→') + '</button>' +
-        '</div>';
-      requestAnimationFrame(() => {
-        _positionTooltip(target, placement);
-        tooltip.classList.add('tour-fade-in');
-      });
-
-      let _onTarget;
-      const cleanup = () => {
-        tooltip.removeEventListener('click', onClick);
-        if (_onTarget) target.removeEventListener('click', _onTarget, true);
-      };
-      const onClick = (e) => {
-        const hit = e.target.closest && e.target.closest('[data-act]');
-        const act = hit && hit.dataset.act;
-        if (!act) return;
-        cleanup();
-        resolve(act);
-      };
-      tooltip.addEventListener('click', onClick);
-      // Interactive steps advance when the user clicks the highlighted
-      // element — letting the original click through so the real action
-      // (open the Create modal, in the Library case) actually fires.
-      if (interactive) {
-        _onTarget = () => { cleanup(); resolve('next'); };
-        target.addEventListener('click', _onTarget, true);
-      }
-    });
-  }
-
-  // ── Phase 1: Library overview ──
-  const libSteps = [
-    { sel: '#doclib-modal .doclib-modal-content',
-      text: '<b>Welcome to Library!</b> Your hub for <b>Chats</b>, <b>Documents</b>, <b>Research</b>, and <b>Archive</b> — search, sort and tidy!',
-      placement: 'center-above',
-      before: () => {
-        // Force the modal box to fill its intended frame so the halo wraps the
-        // whole library window, not just the (possibly collapsed) content.
-        const c = document.querySelector('#doclib-modal .doclib-modal-content');
-        if (c) {
-          c.style.height = '85vh';
-          c.style.minHeight = '85vh';
-        }
-      } },
-    { sel: '#doclib-create-btn',
-      text: '<b>Create</b> a fresh blank document — click it to try it out! (Or hit <b>Import</b> next to it to bring in a file from disk.)',
-      interactive: true },
-    { sel: '#doclib-grid .doclib-card',
-      text: 'Each card is a saved document. It’s linked to the chat you created it in — so either <b>clone</b> it for a new chat, or <b>open</b> it in its original.',
-      optional: true },
-  ];
-
-  for (let i = 0; i < libSteps.length; i++) {
-    const step = libSteps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: i === 0,
-      isLast: false,
-      before: step.before,
-      placement: step.placement,
-      interactive: step.interactive,
-      optional: step.optional,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  // ── Phase 2: open a document & walk the editor ──
-  // Try to load the user's most recent document. If none exist, end with a hint.
-  let firstDocId = null;
-  try {
-    const r = await fetch('/api/documents/library?limit=1&sort=recent', { credentials: 'same-origin' });
-    if (r.ok) {
-      const data = await r.json();
-      if (data.documents && data.documents.length) firstDocId = data.documents[0].id;
-    }
-  } catch (_) {}
-
-  if (!firstDocId || !window.documentModule || !window.documentModule.loadDocument) {
-    _clear();
-    await typewriterReply('All yours — create or import a doc, then run /tour-library again to see the editor.');
-    return true;
-  }
-
-  // Close library, open the doc in the editor, wait for the pane to mount.
-  document.getElementById('doclib-close')?.click();
-  await new Promise(r => setTimeout(r, 200));
-  try { await window.documentModule.loadDocument(firstDocId); } catch (_) {}
-  for (let i = 0; i < 25; i++) {
-    if (document.getElementById('doc-editor-pane')) break;
-    await new Promise(r => setTimeout(r, 80));
-  }
-  if (!document.getElementById('doc-editor-pane')) {
-    _clear();
-    await typewriterReply('All yours — open a doc and run /tour-library again for the editor walkthrough.');
-    return true;
-  }
-
-  const editorSteps = [
-    { sel: '#doc-editor-pane',
-      text: '<b>This is your document editor.</b> You can write here, but so can your model.',
-      placement: 'center-above' },
-    { sel: '#message',
-      text: 'Just tell your model what to write or edit.',
-      placement: 'center-above' },
-    { sel: '#doc-tab-bar',
-      text: 'Multiple docs as <b>tabs</b>. Drag to reorder, click <b>+</b> for a new one, click the dots for rename / clone / export / delete.' },
-    { sel: '#doc-language-select',
-      text: 'Switch the <b>document type</b> — markdown shows a preview, email shows To/Subject/Send, PDF lets you fill blanks with AI.' },
-    { sel: '#doc-editor-textarea',
-      text: 'Ask the LLM to <i>draft</i>, <i>rewrite</i>, <i>summarize</i>, <i>feedback</i> — edits stream live.' },
-  ];
-
-  for (let i = 0; i < editorSteps.length; i++) {
-    const step = editorSteps[i];
-    const res = await _showStep(step.sel, step.text, {
-      isFirst: false,
-      isLast: i === editorSteps.length - 1,
-      before: step.before,
-      placement: step.placement,
-    });
-    if (res === 'skip') { _clear(); return true; }
-    if (res === 'back') { if (i > 0) i -= 2; continue; }
-  }
-
-  _clear();
-  await typewriterReply('All yours — write away!');
+  await typewriterReply('Your Library lives in Files. Documents is open now. Choose Chats, Research or Archive from the Library collections to browse saved work. Open an item to read or edit it; use the Files toolbar to search, sort and change the view.');
   return true;
 }
 
-// ── Prompt ──
+// ── /prompt ──
 
 async function _cmdPrompt(args, ctx) {
   // Pull chat-appropriate prompts from compare templates. Skip the
@@ -5080,180 +4423,18 @@ function _clearSetupCommandInput() {
   }
 }
 
-async function _setupProviderDeviceFlow(providerKey) {
-  _clearSetupGuideMessages();
-  const config = PROVIDER_DEVICE_FLOWS[providerKey];
-  if (!config) {
-    await _setupReply('Provider not recognised.');
-    return;
-  }
-  await _setupReply(`Starting ${config.label} sign-in...`);
-  try {
-    const result = await runProviderDeviceFlow(providerKey, {
-      onStart: async ({ start, authUrl }) => {
-        const place = providerKey === 'copilot' ? 'GitHub' : 'OpenAI';
-        const action = providerKey === 'copilot' ? 'approve the request' : 'enter the code';
-        if (providerKey === 'chatgpt-subscription') {
-          slashReply(
-            '<div class="setup-guide-no-censor" style="display:grid;gap:6px;">' +
-              '<div>Open this URL in your browser, enter the code, then come back here. Waiting...</div>' +
-              '<div>Code: <code>' + uiModule.esc(start.user_code || '') + '</code></div>' +
-              '<div><a href="' + uiModule.esc(authUrl || '') + '" target="_blank" rel="noopener noreferrer">' + uiModule.esc(authUrl || '') + '</a></div>' +
-            '</div>'
-          );
-          return;
-        }
-        await _setupReply(`Opening ${place} - ${action} (code ${start.user_code}). Waiting...`);
-      },
-      openWindow: (url) => {
-        if (providerKey === 'chatgpt-subscription') return;
-        try { if (url) window.open(url, '_blank', 'noopener'); } catch (e) {}
-      },
-    });
-    if (result.status === 'authorized') {
-      const n = ((result.endpoint && result.endpoint.models) || []).length;
-      await _setupReply(`Connected - ${n} ${config.label} model${n !== 1 ? 's' : ''} available.`);
-      if (modelsModule) modelsModule.refreshModels(true);
-      return;
-    }
-    if (result.status === 'failed') {
-      await _setupReply(`${config.label} sign-in failed (${result.error || 'denied'}).`);
-      return;
-    }
-    if (result.status === 'expired') {
-      await _setupReply(`${config.label} sign-in expired - run /setup ${providerKey} again.`);
-      return;
-    }
-  } catch (e) {
-    await _setupReply(formatDeviceFlowError(e));
-  }
-}
-
 async function _cmdSetup(args, ctx) {
+  void args;
+  void ctx;
   _hideWelcomeScreen();
   _clearSetupCommandInput();
-  const topic = (args[0] || '').trim().toLowerCase();
-  const topicArgs = args.slice(1);
-  const deviceAuthProvider = _setupDeviceAuthProviderFromInput(topic);
-  if (deviceAuthProvider) {
-    await _setupProviderDeviceFlow(deviceAuthProvider);
-    return true;
-  }
-  const provider = _setupProviderFromInput(topic);
-  if (provider) {
-    _clearSetupGuideMessages();
-    const credential = topicArgs.join(' ').trim();
-    if (credential) {
-      await connectDetectedSetupEndpoint({ base_url: provider.url, api_key: credential, name: provider.name });
-    } else {
-      pendingSetupProvider = provider;
-      setupMode = 'endpoint-key-for-provider';
-      // Show the canonical "/setup <provider> <key>" usage so the user
-      // learns the one-shot form instead of relying on the pasted-key
-      // mode that always greets them with a generic prompt.
-      // _setupReply renders as plain text (no HTML) — use markdown
-      // backticks for the inline code instead of <code> + &lt;&gt;.
-      const _slug = (topic || '').toLowerCase();
-      await _setupReply(
-        `Paste your ${provider.name} API key, or run \`/setup ${_slug} <api-key>\` to set it in one step.`
-      );
-    }
-    return true;
-  }
-  if (topic === 'local') {
-    _clearSetupGuideMessages();
-    const rawUrl = topicArgs.join(' ').trim();
-    if (rawUrl) {
-      const normalized = _normalizeSetupBaseUrl(rawUrl);
-      await connectDetectedSetupEndpoint({ base_url: normalized, api_key: '', name: 'Local' });
-    } else {
-      setupMode = 'endpoint-provider-first';
-      await _setupReply('Paste your local endpoint URL, for example http://100.x.x.x:11434/v1.');
-    }
-    return true;
-  }
-
-  // Check if models are already configured
-  const modelsBox = document.getElementById('models');
-  const hasModels = modelsBox && modelsBox.querySelector('.models-row');
-
-  if (hasModels) {
-    if (!topic) {
-      _clearSetupGuideMessages();
-      return _showSetupEndpointGuide();
-    }
-
-    if (topic === 'endpoint' || topic === 'api' || topic === 'key') {
-      _clearSetupGuideMessages();
-      return _showSetupEndpointGuide({ simple: true, instant: true });
-    }
-
-    if (topic === 'theme' || topic === 'themes') {
-      const tm = themeModule;
-      const presets = tm && tm.THEMES ? Object.keys(tm.THEMES) : [];
-      const customObj = tm && tm.getCustomThemes ? tm.getCustomThemes() : {};
-      const customKeys = Object.keys(customObj);
-
-      // One-shot: /setup theme <name> -> apply directly
-      const themeName = topicArgs.join(' ').trim().toLowerCase().replace(/\s+/g, '-');
-      if (themeName && tm) {
-        const colors = (tm.THEMES && tm.THEMES[themeName]) || customObj[themeName];
-        if (colors) {
-          tm.applyTheme(themeName, colors);
-          await typewriterReply(`Theme: ${themeName}`);
-        } else {
-          const customLabel = customKeys.length ? ` | Custom: ${customKeys.join(', ')}` : '';
-          slashReply(`Unknown theme "${themeName}". Available: ${presets.join(', ')}${customLabel}`);
-        }
-        return true;
-      }
-
-      const current = (Storage.getJSON(Storage.KEYS.THEME, {}).name) || 'clanker-dark';
-      const customLabel = customKeys.length ? `\n\nCustom: ${customKeys.join(', ')}` : '';
-      await typewriterReply(`Current theme: ${current}\n\nAvailable: ${presets.join(', ')}${customLabel}\n\nType a theme name to switch.`);
-      setupMode = 'theme';
-      return true;
-    }
-
-    if (topic === 'memory' || topic === 'memories') {
-      try {
-        const res = await fetch(`${API_BASE}/api/memory`, { credentials: 'same-origin' });
-        const memories = await res.json();
-        const count = Array.isArray(memories) ? memories.length : 0;
-        await typewriterReply(`You have ${count} saved memor${count === 1 ? 'y' : 'ies'}.\n\nType a memory to save, or use /memory to manage them.`);
-      } catch {
-        await typewriterReply('Could not load memories.');
-      }
-      return true;
-    }
-
-    if (topic === 'features') {
-      try {
-        const res = await fetch(`${API_BASE}/api/auth/features`, { credentials: 'same-origin' });
-        const features = await res.json();
-        const lines = Object.entries(features).map(([k, v]) => `${k}: ${v ? 'on' : 'off'}`).join('\n');
-        await typewriterReply(`Feature toggles:\n\n${lines}\n\nType a feature name to toggle it.`);
-        setupMode = 'features';
-      } catch {
-        await typewriterReply('Could not load features. Check the Admin Panel.');
-      }
-      return true;
-    }
-
-    // Unknown topic — hint
-    await typewriterReply(`I don't have a setup wizard for "${topic}" yet. Try: endpoint, theme, memory, or features.`);
-    return true;
-  }
-
-  // First-time setup — paste API key flow
-  _clearSetupGuideMessages();
-  if (setupIntroShown) {
-    return _showSetupEndpointGuide();
-  }
-  setupIntroShown = true;
-  return _showSetupEndpointGuide();
+  setupMode = false;
+  pendingSetupApiKey = '';
+  pendingSetupProvider = null;
+  settingsModule.open('services');
+  await _setupReply('Provider settings opened. Connections, account pools, rotation, model routes, and shares are managed in one place.');
+  return true;
 }
-
 // ── Shortcuts ──
 
 async function _cmdShortcuts(args, ctx) {
@@ -5366,7 +4547,7 @@ function _eggRender(html) {
   div.className = 'msg msg-ai';
   const role = document.createElement('div');
   role.className = 'role';
-  role.textContent = window.__agentName || 'Odysseus';
+  role.textContent = window.__agentName || 'Open Clank';
   div.appendChild(role);
   const body = document.createElement('div');
   body.className = 'body';
@@ -5467,7 +4648,7 @@ async function _cmdOdyssey(args, ctx) {
 }
 
 async function _cmdAscii(args, ctx) {
-  const text = args.join(' ') || 'Odysseus';
+  const text = args.join(' ') || 'Open Clank';
   const FONT = {
     'A':'  #  \n # # \n#####\n#   #\n#   #','B':'#### \n#   #\n#### \n#   #\n#### ','C':' ####\n#    \n#    \n#    \n ####',
     'D':'#### \n#   #\n#   #\n#   #\n#### ','E':'#####\n#    \n###  \n#    \n#####','F':'#####\n#    \n###  \n#    \n#    ',
@@ -5589,27 +4770,26 @@ async function _cmdUptime(args, ctx) {
 }
 
 async function _cmdPing(args, ctx) {
-  slashReply('<span style="opacity:0.5">Pinging endpoints...</span>');
+  slashReply('<span style="opacity:0.5">Reading managed provider status...</span>');
   try {
-    const res = await fetch(`${API_BASE}/api/ping`, { credentials: 'same-origin' });
-    const data = await res.json();
-    const eps = data.endpoints || [];
-    if (!eps.length) { slashReply('No endpoints configured.'); return true; }
+    const [connectionsRes, modelsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/v1/providers/connections`, { credentials: 'same-origin' }),
+      fetch(`${API_BASE}/api/v1/providers/models`, { credentials: 'same-origin' }),
+    ]);
+    if (!connectionsRes.ok || !modelsRes.ok) throw new Error('Provider control plane unavailable');
+    const connections = (await connectionsRes.json()).connections || [];
+    const models = (await modelsRes.json()).models || [];
+    if (!connections.length) { slashReply('No managed provider connections configured.'); return true; }
     let html = '<div style="font-family:inherit;font-size:0.9em">';
-    for (const ep of eps) {
-      const isUp = ep.status === 'online';
-      const dot = isUp ? '\u25CF' : '\u25CB';
-      const color = isUp ? 'var(--color-success)' : 'var(--color-error)';
-      const latency = ep.latency_ms != null ? ep.latency_ms + 'ms' : '--';
-      const latencyColor = !isUp ? 'var(--color-error)' : ep.latency_ms < 150 ? 'var(--color-success)' : ep.latency_ms < 500 ? 'var(--color-blind-orange)' : 'var(--color-error)';
-      const models = ep.model_count || 0;
-      const err = ep.error ? ' <span style="opacity:0.4;font-size:0.85em">(' + ctx.esc(ep.error).slice(0, 60) + ')</span>' : '';
+    for (const connection of connections) {
+      const enabled = connection.enabled !== false;
+      const dot = enabled ? '\u25CF' : '\u25CB';
+      const color = enabled ? 'var(--color-success)' : 'var(--color-error)';
+      const modelCount = models.filter(model => model.connection_id === connection.id && model.enabled !== false).length;
       html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0">';
       html += '<span style="color:' + color + ';font-size:12px">' + dot + '</span>';
-      html += '<span style="min-width:140px">' + ctx.esc(ep.name) + '</span>';
-      html += '<code style="min-width:60px;text-align:right;color:' + latencyColor + '">' + latency + '</code>';
-      html += '<span style="opacity:0.4;font-size:0.85em">' + models + ' model' + (models !== 1 ? 's' : '') + '</span>';
-      html += err;
+      html += '<span style="min-width:140px">' + ctx.esc(connection.label || connection.id) + '</span>';
+      html += '<span style="opacity:0.4;font-size:0.85em">' + modelCount + ' model' + (modelCount !== 1 ? 's' : '') + '</span>';
       html += '</div>';
     }
     html += '</div>';
@@ -5621,108 +4801,10 @@ async function _cmdPing(args, ctx) {
 }
 
 async function _cmdProbe(args, ctx) {
-  // Find endpoint by name if provided
-  const query = args.join(' ').trim();
-  let url = `${API_BASE}/api/probe`;
-  if (query) {
-    // Fetch endpoint list to resolve name -> id
-    try {
-      const epRes = await fetch(`${API_BASE}/api/model-endpoints`, { credentials: 'same-origin' });
-      const eps = await epRes.json();
-      const match = eps.find(e =>
-        e.name.toLowerCase() === query.toLowerCase() ||
-        e.name.toLowerCase().includes(query.toLowerCase())
-      );
-      if (match) {
-        url += '?endpoint_id=' + encodeURIComponent(match.id);
-      } else {
-        slashReply('No endpoint matching "' + ctx.esc(query) + '". Run <code>/ping</code> to see endpoints.');
-        return true;
-      }
-    } catch (e) {
-      slashReply('Failed to look up endpoints: ' + ctx.esc(e.message));
-      return true;
-    }
-  }
-
-  slashReply('<span style="opacity:0.5">Probing models... this may take a while.</span>');
-  // Get reference to the message we just added so we can update it live
-  const chatBox = document.getElementById('chat-history');
-  const msgEl = chatBox ? chatBox.lastElementChild : null;
-  const bodyEl = msgEl ? msgEl.querySelector('.body') : null;
-  if (!bodyEl) return true;
-
-  let html = '<div style="font-family:inherit;font-size:0.9em">';
-  let currentEndpoint = '';
-  let summary = { total: 0, ok: 0 };
-
-  try {
-    const res = await fetch(url, { credentials: 'same-origin' });
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const data = JSON.parse(line.slice(6));
-
-          if (data.type === 'probe_start') {
-            currentEndpoint = data.endpoint;
-            const skipNote = data.skipped ? ' + ' + data.skipped + ' non-chat skipped' : '';
-            html += '<div style="margin-top:8px;font-weight:600;color:var(--fg);opacity:0.8">'
-              + ctx.esc(data.endpoint) + ' <span style="opacity:0.4;font-weight:400">(' + data.model_count + ' chat models' + skipNote + ')</span></div>';
-            if (data.error) {
-              html += '<div style="padding:2px 0 2px 20px;opacity:0.5;font-size:0.9em">' + ctx.esc(data.error) + '</div>';
-            }
-            bodyEl.innerHTML = html + '</div>';
-
-          } else if (data.type === 'probe_result') {
-            const isOk = data.status === 'ok';
-            const isTimeout = data.status === 'timeout';
-            const dot = isOk ? '\u25CF' : (isTimeout ? '\u25D0' : '\u25CB');
-            const color = isOk ? 'var(--color-success)' : (isTimeout ? 'var(--color-blind-orange)' : 'var(--color-error)');
-            const latency = data.latency_ms != null ? data.latency_ms + 'ms' : '--';
-            const latencyColor = isOk
-              ? (data.latency_ms < 2000 ? 'var(--color-success)' : 'var(--color-blind-orange)')
-              : 'var(--color-error)';
-            const modelName = (data.model || '').split('/').pop();
-            const err = data.error ? ' <span style="opacity:0.4;font-size:0.85em">(' + ctx.esc(data.error) + ')</span>' : '';
-            html += '<div style="display:flex;align-items:center;gap:8px;padding:2px 0 2px 20px">';
-            html += '<span style="color:' + color + ';font-size:12px">' + dot + '</span>';
-            html += '<span style="min-width:180px">' + ctx.esc(modelName) + '</span>';
-            html += '<code style="min-width:60px;text-align:right;color:' + latencyColor + '">' + latency + '</code>';
-            html += err;
-            html += '</div>';
-            bodyEl.innerHTML = html + '</div>';
-            if (uiModule) uiModule.scrollHistory();
-
-          } else if (data.type === 'probe_done') {
-            summary = { total: data.total || 0, ok: data.ok || 0 };
-          }
-        } catch (e) { /* skip parse errors */ }
-      }
-    }
-
-    // Final summary
-    const pct = summary.total > 0 ? Math.round((summary.ok / summary.total) * 100) : 0;
-    const sumColor = pct === 100 ? 'var(--color-success)' : pct >= 50 ? 'var(--color-blind-orange)' : 'var(--color-error)';
-    html += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);font-weight:600;color:' + sumColor + '">';
-    html += summary.ok + '/' + summary.total + ' models responding (' + pct + '%)';
-    html += '</div>';
-    bodyEl.innerHTML = html + '</div>';
-    if (uiModule) uiModule.scrollHistory();
-
-  } catch (e) {
-    bodyEl.innerHTML = 'Failed to probe: ' + ctx.esc(e.message);
-  }
+  void args;
+  void ctx;
+  slashReply('Live provider validation and account health are managed in <strong>Settings → Providers</strong>.');
+  try { document.dispatchEvent(new CustomEvent('open-clank:open-providers')); } catch (_) {}
   return true;
 }
 
@@ -5741,57 +4823,35 @@ async function _cmdColor(args, ctx) {
 
 // ── Help (generated dynamically from COMMANDS) ──
 
+export async function loadCommandCatalog({ fresh = false } = {}) {
+  const [skills, nativeState] = await Promise.all([_loadSkillSlashCatalog(fresh), loadMimoControlState(false, fresh)]);
+  const catalog = buildCommandCatalog({ commands: COMMANDS, legacyAliases: LEGACY_ALIASES, skills, nativeState,
+    settingsEntries: settingsModule.getCommandCatalogEntries?.() || [],
+    translate: value => window.openClankI18n?.t?.(value) || value });
+  catalog.errors = _skillCatalogError ? ['Skills: ' + _skillCatalogError] : [];
+  return catalog;
+}
+
 async function _cmdHelp(args, ctx) {
-  const categories = {};
-  for (const [name, def] of Object.entries(COMMANDS)) {
-    if (def.hidden) continue;
-    const cat = def.category || 'Other';
-    if (!categories[cat]) categories[cat] = [];
-    if (def.subs) {
-      for (const [sub, sDef] of Object.entries(def.subs)) {
-        if (sub.startsWith('_')) continue; // skip internal subs
-        const usage = sDef.usage || `/${name} ${sub}`;
-        const desc = sDef.help || '';
-        categories[cat].push(`  ${usage.padEnd(21)}${desc}`);
-      }
-    } else {
-      const usage = def.usage || `/${name}`;
-      const desc = def.help || '';
-      categories[cat].push(`  ${usage.padEnd(21)}${desc}`);
-    }
+  const pageIndex = args.indexOf('--page');
+  const page = pageIndex >= 0 ? Number(args[pageIndex + 1]) : 1;
+  const query = args.filter((_, index) => pageIndex < 0 || (index !== pageIndex && index !== pageIndex + 1)).join(' ');
+  const catalog = await loadCommandCatalog({ fresh: true });
+  if (ctx.sid !== sessionModule.getCurrentSessionId()) { uiModule.showToast('Chat changed; open commands again in the selected chat.', 2400); return true; }
+  const result = filterCommandCatalog(catalog, query, { page });
+  const lines = [`${ctx.t('Commands')}: ${result.total} ${ctx.t('matches')} · ${ctx.t('page')} ${result.page}/${result.pages}`];
+  for (const entry of result.entries) {
+    lines.push(`${entry.usage} — ${entry.help}`);
+    lines.push(`  ${entry.origin} · ${entry.scope} · ${entry.availability}${entry.availability !== 'available' ? ': ' + entry.reason : ''}`);
+    if (entry.aliases.length) lines.push(`  aliases: ${entry.aliases.join(', ')}`);
   }
-  const order = ['Getting started', 'Tours', 'Chats', 'Settings', 'Memory', 'Productivity', 'AI Tools'];
-  let lines = [];
-  for (const cat of order) {
-    if (categories[cat] && categories[cat].length) {
-      lines.push(`${cat}:`);
-      lines = lines.concat(categories[cat]);
-      lines.push('');
-    }
-  }
-  // Any remaining categories not in the predefined order
-  for (const cat of Object.keys(categories)) {
-    if (!order.includes(cat) && categories[cat].length) {
-      lines.push(`${cat}:`);
-      lines = lines.concat(categories[cat]);
-      lines.push('');
-    }
-  }
-  const skillCommands = await _loadSkillSlashCatalog(false);
-  if (skillCommands.length) {
-    lines.push('Skills:');
-    for (const skill of skillCommands.slice(0, 20)) {
-      const token = String(skill.token || '').padEnd(21);
-      lines.push(`  ${ctx.esc(token)}${ctx.esc(skill.help || '')}`);
-    }
-    if (skillCommands.length > 20) {
-      lines.push(`  ... ${skillCommands.length - 20} more. Use /skills list`);
-    }
-    lines.push('');
-  }
-  lines.push('Tip: /<command> --help for details');
-  lines.push('Shortcuts: /new /rename /fork /web /bash /memories /skills');
-  slashReply(`<pre style="line-height:1.7">${lines.join('\n')}</pre>`);
+  if (!result.total) lines.push('No commands match this filter.');
+  lines.push(...catalog.errors);
+  if (!catalog.nativeState.available) lines.push(`Native catalog: ${catalog.nativeState.reason || 'engine not ready; help does not start it'}`);
+  lines.push(`${ctx.t('Filter')}: /commands <text> · ${ctx.t('Pages')}: /commands <text> --page N`);
+  lines.push('/chat selects Chat mode; chat details: /chats info. /ws opens Workspace. /memories lists memory; /brain opens Brain. /clear starts a new chat.');
+  lines.push('Qualified commands: /host:name, /skill:name, /mimo:name. Send literal text: /literal <text>.');
+  slashReply(`<pre style="line-height:1.7">${ctx.esc(lines.join('\n'))}</pre>`);
   return true;
 }
 
@@ -5802,11 +4862,12 @@ async function _cmdHelp(args, ctx) {
 
 const COMMANDS = {
   chats: {
-    alias: ['chat', 'session', 'sessions', 's'],
+    alias: ['session', 'sessions', 's'],
     category: 'Chats',
     help: 'Manage chat sessions',
     default: 'info',
     subs: {
+      'list':        { handler: _cmdSessionList, alias: ['ls'], help: 'List active host chats', usage: '/chats list' },
       'new':         { handler: _cmdSessionNew,         alias: ['create','mkdir'], help: 'Create new chat',             usage: '/chats new [name]' },
       'delete':      { handler: _cmdSessionDelete,      alias: ['del','rm'],       help: 'Delete chat',                 usage: '/chats delete [id]' },
       'archive':     { handler: _cmdSessionArchive,     alias: ['tar'],            help: 'Archive chat',                usage: '/chats archive [id]' },
@@ -5819,7 +4880,26 @@ const COMMANDS = {
       'sort':        { handler: _cmdSessionSort,        alias: [],                 help: 'Auto-sort into folders',      usage: '/chats sort' },
       'info':        { handler: _cmdSessionInfo,        alias: ['stat'],           help: 'Show chat details',           usage: '/chats info' },
       'clear':       { handler: _cmdSessionClear,       alias: [],                 help: 'Clear chat display',          usage: '/chats clear' },
-      'export':      { handler: _cmdSessionExport,      alias: ['cat'],            help: 'Download as markdown',        usage: '/chats export' }
+      'export':      { handler: _cmdSessionExport,      alias: ['cat'],            help: 'Download this chat as Markdown, JSON, text or HTML', usage: '/chats export [md|json|txt|html|>filename]' }
+    }
+  },
+  sessions: {
+    alias: [], category: 'Chats', help: 'List active host chats; use /resume name to switch', handler: _cmdSessionList, usage: '/sessions'
+  },
+  resume: {
+    alias: ['continue'], category: 'Chats', help: 'List chats, or switch to a chat by name/ID', handler: (args, ctx) => args.length ? _cmdSessionSwitch(args, ctx) : _cmdSessionList(args, ctx), usage: '/resume [name|id]'
+  },
+  copy: {
+    alias: [], category: 'Chats', help: 'Copy loaded conversation text using message Copy format', usage: '/copy',
+    handler: async (args, ctx) => {
+      const messages = Array.from(document.getElementById('chat-history')?.querySelectorAll('.msg') || []);
+      const text = messages.map(message => {
+        const content = chatRenderer.copyMessageText(message);
+        return content ? `${message.querySelector('.role')?.textContent || 'Message'}:\n${content}` : '';
+      }).filter(Boolean).join('\n\n');
+      if (!text) { slashReply('No loaded transcript to copy.'); return true; }
+      await uiModule.copyToClipboard(text);
+      slashReply('Loaded transcript copied.'); return true;
     }
   },
   toggle: {
@@ -5902,34 +4982,10 @@ const COMMANDS = {
   setup: {
     alias: ['su', 'seutp'],
     category: 'Getting started',
-    help: 'Add local or API model endpoints',
+    help: 'Open provider settings',
     handler: _cmdSetup,
-    usage: '/setup local URL  ·  /setup groq KEY  ·  /setup copilot  ·  /setup chatgpt-subscription',
-    // Provider subs so the autocomplete popup surfaces "/setup deepseek",
-    // "/setup openai", etc. when the user types "/setup de". Each sub's
-    // handler is a thin wrapper that re-prepends the sub name and
-    // re-dispatches into _cmdSetup, which already knows how to handle
-    // bare-provider (prompts for the key) AND provider-with-key (saves it).
-    // Without the explicit handler, the slash-dispatcher errors with
-    // "subDef.handler is not a function".
-    subs: {
-      deepseek:   { help: 'DeepSeek',      usage: '/setup deepseek sk-...',     handler: (a, c) => _cmdSetup(['deepseek',   ...a], c) },
-      openai:     { help: 'OpenAI',        usage: '/setup openai sk-proj-...',  handler: (a, c) => _cmdSetup(['openai',     ...a], c) },
-      anthropic:  { help: 'Anthropic',     usage: '/setup anthropic sk-ant-...',handler: (a, c) => _cmdSetup(['anthropic',  ...a], c) },
-      openrouter: { help: 'OpenRouter',    usage: '/setup openrouter sk-or-...',handler: (a, c) => _cmdSetup(['openrouter', ...a], c) },
-      groq:       { help: 'Groq',          usage: '/setup groq gsk_...',        handler: (a, c) => _cmdSetup(['groq',       ...a], c) },
-      gemini:     { help: 'Google Gemini', alias: ['google'], usage: '/setup gemini AIza...', handler: (a, c) => _cmdSetup(['gemini', ...a], c) },
-      xai:        { help: 'xAI (Grok)',    alias: ['grok'],   usage: '/setup xai xai-...',   handler: (a, c) => _cmdSetup(['xai',    ...a], c) },
-      ollama:     { help: 'Ollama Cloud',  usage: '/setup ollama KEY',          handler: (a, c) => _cmdSetup(['ollama',     ...a], c) },
-      copilot:    { help: 'GitHub Copilot', usage: '/setup copilot',            handler: (a, c) => _cmdSetup(['copilot',    ...a], c) },
-      'chatgpt-subscription': { help: 'ChatGPT Subscription', alias: ['codex'], usage: '/setup chatgpt-subscription', handler: (a, c) => _cmdSetup(['chatgpt-subscription', ...a], c) },
-      local:      { help: 'Local model server (vLLM / LM Studio / llama.cpp / Ollama)',
-                    usage: '/setup local http://localhost:8000/v1',
-                    handler: (a, c) => _cmdSetup(['local', ...a], c) },
-      endpoint:   { help: 'Open the endpoint manager in Settings',
-                    usage: '/setup endpoint',
-                    handler: (a, c) => _cmdSetup(['endpoint', ...a], c) },
-    },
+    noUserBubble: true,
+    usage: '/setup',
   },
   demo: {
     alias: ['tour'],
@@ -5979,13 +5035,6 @@ const COMMANDS = {
     help: 'Settings tour: models, integrations, appearance',
     handler: _cmdTourSettings,
     usage: '/tour-settings'
-  },
-  'tour-gallery': {
-    alias: ['gallery-tour'],
-    category: 'Tours',
-    help: 'Gallery tour: photos, albums, editor',
-    handler: _cmdTourGallery,
-    usage: '/tour-gallery'
   },
   'tour-brain': {
     alias: ['brain-tour', 'tour-memory', 'memory-tour'],
@@ -6054,7 +5103,7 @@ const COMMANDS = {
   notes: {
     alias: [],
     category: 'Tools',
-    help: 'Open Notes',
+    help: 'Open Editor',
     handler: (args, ctx) => _cmdToolPanel('notes', args, ctx),
     usage: '/notes'
   },
@@ -6066,7 +5115,7 @@ const COMMANDS = {
     usage: '/tasks'
   },
   brain: {
-    alias: ['memories'],
+    alias: [],
     category: 'Tools',
     help: 'Open Brain',
     handler: (args, ctx) => _cmdToolPanel('brain', args, ctx),
@@ -6082,8 +5131,8 @@ const COMMANDS = {
   gallery: {
     alias: ['photos'],
     category: 'Tools',
-    help: 'Open Gallery',
-    handler: (args, ctx) => _cmdToolPanel('gallery', args, ctx),
+    help: 'Open the Gallery folder in Files',
+    handler: (args, ctx) => _cmdOpen(['files'], ctx),
     usage: '/gallery'
   },
   research: {
@@ -6101,7 +5150,7 @@ const COMMANDS = {
     usage: '/compare'
   },
   mcp: {
-    alias: [],
+    alias: ['mcps'],
     category: 'Tools',
     help: 'Show MCP server status',
     handler: _cmdMcp,
@@ -6122,7 +5171,7 @@ const COMMANDS = {
     usage: '/models'
   },
   search: {
-    alias: ['ws', 'websearch'],
+    alias: ['websearch'],
     category: 'Utility',
     hidden: true,
     help: 'Web search (sends query with web enabled)',
@@ -6156,7 +5205,7 @@ const COMMANDS = {
   compact: {
     alias: [],
     category: 'Utility',
-    help: 'Compact older chat messages',
+    help: 'Compact persistent native session context',
     handler: _cmdCompact,
     usage: '/compact'
   },
@@ -6180,7 +5229,7 @@ const COMMANDS = {
     alias: ['?', 'man', 'commands'],
     category: 'Utility',
     hidden: true,
-    help: 'This help',
+    help: 'Search the complete command catalog',
     handler: _cmdHelp,
     usage: '/help'
   },
@@ -6230,7 +5279,7 @@ export const LEGACY_ALIASES = {
   'goto':        { parent: 'chats', sub: 'switch' },
   'sort':        { parent: 'chats', sub: 'sort' },
   'info':        { parent: 'chats', sub: 'info' },
-  'clear':       { parent: 'chats', sub: 'clear' },
+  'clear':       { parent: 'chats', sub: 'new' },
   'export':      { parent: 'chats', sub: 'export' },
   'web':         { parent: 'toggle', sub: 'web' },
   'bash':        { parent: 'toggle', sub: 'bash' },
@@ -6257,7 +5306,8 @@ export const LEGACY_ALIASES = {
 function _makeCtx() {
   return {
     sid: sessionModule.getCurrentSessionId(),
-    esc: uiModule.esc
+    esc: uiModule.esc,
+    t: value => window.openClankI18n?.t?.(value) || value
   };
 }
 
@@ -6321,173 +5371,175 @@ function _fuzzyMatch(typed, maxDist) {
 
 function _isCmd(str) { return str.startsWith('/') || str.startsWith('!'); }
 
+async function _requestNativeOperation(payload, ctx) {
+  if (ctx.sid !== sessionModule.getCurrentSessionId()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
+  const response = await fetch(`${API_BASE}/api/session/${encodeURIComponent(ctx.sid)}/mimo-operation`, {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (ctx.sid !== sessionModule.getCurrentSessionId()) throw Object.assign(new Error('Chat changed'), { contextChanged: true });
+  if (!response.ok) {
+    const detail = data.detail || data.error || 'Native operation rejected';
+    let message = typeof detail === 'string' ? detail : detail.message || 'Native operation rejected';
+    const code = typeof detail === 'object' ? detail.code : '';
+    if (code === 'HISTORY_RECONCILIATION_REQUIRED' || code === 'NATIVE_HISTORY_REJECTED') message += ' Use /history-reconcile before another history change.';
+    if (code === 'HISTORY_REVISION_CONFLICT') message += ' Reload /timeline before retrying.';
+    if (code === 'SOURCE_BOUNDARY_UNMAPPED') message += ' Use /timeline to choose an available user-message boundary.';
+    if (code === 'FORK_RECONCILIATION_REQUIRED') message += detail.candidate_id ? ` Use /fork-reconcile ${detail.candidate_id} to explicitly settle this candidate.` : ' This fork needs explicit reconciliation before continuing.';
+    throw Object.assign(new Error(message), { code });
+  }
+  return data;
+}
+
 // ── Main dispatcher ───────────────────────────────────────────────
 
 async function handleSlashCommand(input) {
-  const parts = input.slice(1).split(/\s+/);
-  const rawCmd = parts[0].toLowerCase();
-  let args = parts.slice(1);
   const ctx = _makeCtx();
-  let _userShown = false;
-  // Tag the echoed command with source:'slash' so it renders in the transcript
-  // but is excluded from LLM context (get_context_messages), like the replies.
-  function _showUser() { if (!_userShown) { _userShown = true; _addMessage('user', input); _persistMsg('user', input, { source: 'slash' }); } }
-
+  let userShown = false;
+  const showUser = () => { if (!userShown) { userShown = true; _addMessage('user', input); _persistMsg('user', input, { source: 'slash' }); } };
   try {
-    // --- Check for --help / -h on any command ---
-    const wantsHelp = args.includes('--help') || args.includes('-h');
-
-    // --- 1. Try direct command resolution ---
-    let cmdKey = _resolveCommand(rawCmd);
-    let cmdDef = cmdKey ? COMMANDS[cmdKey] : null;
-
-    // --- 2. Try legacy alias ---
-    if (!cmdDef && LEGACY_ALIASES[rawCmd]) {
-      const leg = LEGACY_ALIASES[rawCmd];
-      cmdDef = COMMANDS[leg.parent];
-      cmdKey = leg.parent;
-      if (cmdDef && cmdDef.subs) {
-        const subDef = cmdDef.subs[leg.sub];
-        if (subDef) {
-          _showUser();
-          if (wantsHelp) {
-            const usage = subDef.usage || `/${leg.parent} ${leg.sub}`;
-            slashReply(`<pre>${usage}\n${subDef.help || 'No help available.'}</pre>`);
-            return true;
-          }
-          return await subDef.handler(args, ctx);
-        }
-      } else if (cmdDef && cmdDef.handler) {
-        _showUser();
-        if (wantsHelp) {
-          const usage = cmdDef.usage || `/${cmdKey}`;
-          slashReply(`<pre>${usage}\n${cmdDef.help || 'No help available.'}</pre>`);
-          return true;
-        }
-        return await cmdDef.handler(args, ctx);
-      }
-    }
-
-    // --- 3. Resolved to a known command ---
-    if (cmdDef) {
-      if (!cmdDef.noUserBubble) _showUser();
-      // Command with subcommands
-      if (cmdDef.subs) {
-        // Show help for the whole group
-        if (wantsHelp && !args.filter(a => a !== '--help' && a !== '-h').length) {
-          let lines = [`${cmdDef.help || cmdKey}`];
-          if (cmdDef.alias && cmdDef.alias.length) lines[0] += ` (aliases: ${cmdDef.alias.map(a => '/'+a).join(', ')})`;
-          lines.push('');
-          for (const [sub, sDef] of Object.entries(cmdDef.subs)) {
-            if (sub.startsWith('_')) continue; // skip internal subs like _show
-            const usage = sDef.usage || `/${cmdKey} ${sub}`;
-            lines.push(`  ${usage.padEnd(25)}${sDef.help || ''}`);
-          }
-          slashReply(`<pre>${lines.join('\n')}</pre>`);
-          return true;
-        }
-
-        // Try to match first arg as subcommand
-        const subArg = (args[0] || '').toLowerCase();
-        const subKey = subArg ? _resolveSubcommand(cmdDef, subArg) : null;
-
-        if (subKey) {
-          const subDef = cmdDef.subs[subKey];
-          const subArgs = args.slice(1);
-          // Help for specific subcommand
-          if (wantsHelp || subArgs.includes('--help') || subArgs.includes('-h')) {
-            const usage = subDef.usage || `/${cmdKey} ${subKey}`;
-            slashReply(`<pre>${usage}\n${subDef.help || 'No help available.'}</pre>`);
-            return true;
-          }
-          return await subDef.handler(subArgs, ctx);
-        }
-
-        // No matching sub — use default if defined
-        if (cmdDef.default) {
-          const defKey = cmdDef.default;
-          const defSub = cmdDef.subs[defKey];
-          if (defSub) {
-            // For the default sub, pass all args through (they weren't consumed as a sub name)
-            return await defSub.handler(args, ctx);
-          }
-        }
-
-        // Unknown sub — show usage
-        slashReply(`Unknown subcommand. Try /${cmdKey} --help`);
-        return true;
-      }
-
-      // Flat command (no subs)
-      if (wantsHelp) {
-        const usage = cmdDef.usage || `/${cmdKey}`;
-        slashReply(`<pre>${usage}\n${cmdDef.help || 'No help available.'}</pre>`);
-        return true;
-      }
-      return await cmdDef.handler(args, ctx);
-    }
-
-    // --- 4. Skill invocation: /<skill-name> [request] ---
-    // If `rawCmd` matches a published skill, the backend records usage and
-    // returns a skill-pinned message to submit as the next agent turn.
-    if (rawCmd.startsWith('mimo:')) {
-      const state = await loadMimoControlState(false);
-      const name = rawCmd.slice('mimo:'.length);
-      const commands = state.commands || [];
-      if (!state.available || !commands.some(command => command.name === name)) {
-        _showUser();
-        slashReply(`MiMo command <b>/${ctx.esc(name)}</b> is not available in this session.`);
-        return true;
-      }
-      return false;
-    }
-
-    const mimoState = await loadMimoControlState(false);
-    if (mimoState.available) {
-      const mode = (mimoState.modes?.availableModes || []).find(item => item.id === rawCmd);
-      if (mode) {
-        _showUser();
-        try {
-          await _setMimoConfig('mode', mode.id);
-        } catch (error) {
-          slashReply(`MiMo rejected mode <b>${ctx.esc(mode.id)}</b>: ${ctx.esc(error.message)}`);
-          return true;
-        }
-        const prompt = args.join(' ').trim();
-        if (prompt) _submitComposedMessage(prompt);
-        else slashReply(`MiMo mode is now <b>${ctx.esc(mode.name || mode.id)}</b>.`);
-        document.dispatchEvent(new CustomEvent('odysseus:mimo-state-changed'));
-        return true;
-      }
-      if ((mimoState.commands || []).some(command => command.name === rawCmd)) {
-        return false;
-      }
-    }
-
-    try {
-      const catalog = await _loadSkillSlashCatalog(false);
-      if (catalog.some(s => s.name === rawCmd)) {
-        _showUser();
-        return await _invokeSkillByName(rawCmd, args.join(' ').trim(), ctx);
-      }
-    } catch (_) { /* fall through to fuzzy match */ }
-
-    // --- 5. Fuzzy match for typos ---
-    const suggestions = _fuzzyMatch(rawCmd);
-    if (suggestions.length) {
-      _showUser();
-      slashReply(`Unknown command "/${ctx.esc(rawCmd)}". Did you mean: ${suggestions.map(s => '<b>/'+s+'</b>').join(', ')}?`);
+    const catalog = await loadCommandCatalog({ fresh: true });
+    if (ctx.sid !== sessionModule.getCurrentSessionId()) { uiModule.showToast('Chat changed while resolving the command; send it again in the selected chat.', 2400); return true; }
+    const resolved = resolveCatalogCommand(catalog, input);
+    if (!resolved) return false;
+    const { entry } = resolved;
+    if (!entry) {
+      showUser();
+      const suggestions = _fuzzyMatch(resolved.name);
+      slashReply(`${resolved.name.startsWith('skill:') ? 'Skill is unavailable or no longer eligible: /' : 'Unknown command /'}${ctx.esc(resolved.name)}.${suggestions.length ? ' Try ' + suggestions.map(s => '/' + ctx.esc(s)).join(', ') + '.' : ''} Use /commands to search, or /literal to send slash text.`);
       return true;
     }
-
+    const args = resolved.arguments.trim() ? resolved.arguments.trim().split(/\s+/) : [];
+    const wantsHelp = args.includes('--help') || args.includes('-h');
+    if (wantsHelp) {
+      showUser();
+      const lines = [entry.usage, entry.help, `${entry.origin} · ${entry.scope} · ${entry.availability}`];
+      if (entry.reason && entry.availability !== 'available') lines.push(entry.reason);
+      if (entry.definition?.subs) for (const [name, def] of Object.entries(entry.definition.subs)) if (!name.startsWith('_')) lines.push(`${def.usage || entry.token + ' ' + name} — ${def.help || ''}`);
+      slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`);
+      return true;
+    }
+    if (!['available', 'requires-start'].includes(entry.availability)) {
+      showUser(); slashReply(`Command ${ctx.esc(entry.token)} is unavailable: ${ctx.esc(entry.reason || 'required capability is missing')}`); return true;
+    }
+    if (entry.executor === 'literal') {
+      if (!resolved.arguments) { showUser(); slashReply('Usage: /literal <text>'); return true; }
+      return false; // Explicit transport escape; host strips the marker before inference.
+    }
+    if (entry.executor === 'native') return false; // Native owner interprets exact original text/files/variant.
+    if (entry.executor === 'mode') {
+      showUser();
+      if (typeof window.__odysseusSetChatMode !== 'function') { slashReply('Interaction mode control is unavailable.'); return true; }
+      window.__odysseusSetChatMode(entry.name);
+      if (resolved.arguments) _submitComposedMessage(resolved.arguments);
+      else uiModule.showToast(`${entry.name[0].toUpperCase()}${entry.name.slice(1)} mode selected`, 1600);
+      return true;
+    }
+    if (entry.executor === 'settings') {
+      showUser(); settingsModule.open(entry.destination?.panel, { field: entry.destination?.field }); return true;
+    }
+    if (entry.executor === 'operation') {
+      showUser();
+      if (!ctx.sid) { slashReply('No active session.'); return true; }
+      if (entry.name === 'agent-profile') {
+        if (args.length > 1) { slashReply('Usage: /agent-profile [id|reset]'); return true; }
+        const state = await loadMimoControlState(false, true);
+        if (ctx.sid !== sessionModule.getCurrentSessionId()) throw new Error('Chat changed; the profile was not selected.');
+        const profiles = (state.modes?.availableModes || []).filter(profile => !['plan','chat'].includes(profile.id));
+        if (!args.length) {
+          slashReply(`<pre>${ctx.esc(profiles.map(profile => `${profile.id} — ${profile.name || profile.id}${profile.description ? ': ' + profile.description : ''}`).join('\n') || 'No named profiles are eligible in this chat.')}</pre>`);
+          return true;
+        }
+        const value = args[0] === 'reset' ? '' : args[0];
+        if (value && !profiles.some(profile => profile.id === value)) throw new Error('That profile is not currently eligible. Use /agent-profile to list available profiles.');
+        const response = await fetch(`${API_BASE}/api/session/${ctx.sid}/mimo-config`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config_id: 'agent_profile', value }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : data.detail?.message || 'Profile selection was rejected.');
+        if (ctx.sid !== sessionModule.getCurrentSessionId()) throw new Error('Chat changed; the response belongs to the previous chat.');
+        document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
+        slashReply(value ? `Profile ${ctx.esc(value)} selected for the next Agent turn. The main model stays unchanged.` : 'Named profile reset for the next Agent turn. The main model stays unchanged.');
+        return true;
+      }
+      if (['timeline','undo','redo','history-reconcile','native-fork','fork-reconcile'].includes(entry.name)) {
+        const draftBefore = window.chatModule?.captureComposerDraftState?.();
+        if ((['undo','native-fork'].includes(entry.name) && args.length > 1) || (entry.name === 'fork-reconcile' && args.length !== 1) || (!['undo','native-fork','fork-reconcile'].includes(entry.name) && args.length)) { slashReply(`Usage: ${ctx.esc(entry.usage)}`); return true; }
+        const timelineData = await _requestNativeOperation({ operation: 'timeline' }, ctx);
+        const timeline = timelineData.result || {};
+        if (!Number.isInteger(timeline.transcript_revision) || timeline.transcript_revision < 0) throw new Error('Native timeline did not return a valid history revision.');
+        if (entry.name === 'timeline') {
+          const choices = Array.isArray(timeline.source_map) ? timeline.source_map : [];
+          const messages = Array.from(document.getElementById('chat-history')?.querySelectorAll('.msg') || []);
+          const lines = choices.map((choice, index) => {
+            const message = messages.find(item => String(item.dataset?.dbId || '') === String(choice.host_message_id));
+            const preview = message ? chatRenderer.copyMessageText(message).replace(/\s+/g, ' ').slice(0, 120) : 'User turn';
+            return `${index + 1}. ${choice.host_message_id} — ${preview}`;
+          });
+          if (!lines.length) lines.push('No user-turn boundaries are available for native undo.');
+          else lines.push('Use /undo <host-message-id>, or /undo for the latest available user turn.');
+          if (timeline.history_operation?.status === 'pending') lines.push('A previous history change needs /history-reconcile.');
+          slashReply(`<pre>${ctx.esc(lines.join('\n'))}</pre>`);
+          return true;
+        }
+        const request = { operation: entry.name === 'native-fork' ? 'fork' : entry.name, expected_transcript_revision: timeline.transcript_revision };
+        if (['undo','native-fork'].includes(entry.name) && args[0]) request.host_message_id = args[0];
+        if (entry.name === 'fork-reconcile') request.child_session_id = args[0];
+        const data = await _requestNativeOperation(request, ctx);
+        const result = data.result || {};
+        if (result.status !== 'settled') throw new Error(['native-fork','fork-reconcile'].includes(entry.name) ? 'The fork is not settled. Use /fork-reconcile with the pending candidate ID before continuing.' : 'History change is not settled. Use /history-reconcile before continuing.');
+        if (['native-fork','fork-reconcile'].includes(entry.name)) {
+          if (typeof result.id !== 'string' || !result.id) throw new Error('The settled fork did not return a chat ID.');
+          await sessionModule.selectSession(result.id);
+          return true;
+        }
+        let message = entry.name === 'undo' ? 'Native chat history reverted.' : entry.name === 'redo' ? 'Native chat history restored.' : 'Native history reconciliation is settled.';
+        if (result.history_operation?.outcome === 'unapplied') message = 'The interrupted history change was not applied.';
+        if (result.history_operation?.file_snapshot_available === false) message += ' No native file snapshot was available; files may remain changed.';
+        slashReply(ctx.esc(message));
+        await sessionModule.selectSession?.(ctx.sid, { preserveComposer: true });
+        if (result.restore_draft) {
+          const restored = window.chatModule?.restoreComposerDraft?.(result.restore_draft, { sid: ctx.sid, expected: draftBefore });
+          if (restored?.restored === false) slashReply(restored.reason === 'draft-changed' ? 'Your newer draft was preserved.' : 'The saved draft could not be restored; your current draft was preserved.');
+        }
+        if (ctx.sid === sessionModule.getCurrentSessionId()) document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
+        return true;
+      }
+      let payload;
+      if (entry.name === 'btw') {
+        if (!resolved.arguments.trim()) { slashReply('Usage: /btw <question>'); return true; }
+        payload = { operation: 'btw', question: resolved.arguments };
+      } else {
+        if (args.length > 1) { slashReply('Usage: /recover [assistantMessageID]'); return true; }
+        payload = args[0] ? { operation: 'recover', assistantMessageID: args[0] } : { operation: 'recovery' };
+      }
+      const data = await _requestNativeOperation(payload, ctx);
+      if (payload.operation === 'btw') {
+        if (typeof data.result?.answer !== 'string') throw new Error('Native side question returned no answer');
+        slashReply(`<div aria-label="Side question answer">${ctx.esc(data.result.answer)}</div>`);
+      } else if (payload.operation === 'recovery') {
+        const candidates = Array.isArray(data.result) ? data.result : [];
+        slashReply(candidates.length ? `<pre>${ctx.esc(candidates.map(candidate => `/recover ${candidate.assistantMessageID} — interrupted ${candidate.created || ''}`).join('\n'))}</pre>` : 'No recoverable interrupted candidates.');
+      } else {
+        slashReply('Explicit recovery acknowledged.');
+        await sessionModule.selectSession?.(ctx.sid);
+        document.dispatchEvent(new Event('odysseus:mimo-state-changed'));
+      }
+      return true;
+    }
+    if (entry.executor === 'skill') { showUser(); return await _invokeSkillByName(entry.name, resolved.arguments, ctx); }
+    if (!entry.definition.noUserBubble) showUser();
+    const def = entry.definition;
+    if (def.handler) return await def.handler(args, ctx);
+    if (def.subs) {
+      const subKey = _resolveSubcommand(def, (args[0] || '').toLowerCase());
+      const sub = subKey ? def.subs[subKey] : def.subs[def.default];
+      if (sub?.handler) return await sub.handler(subKey ? args.slice(1) : args, ctx);
+      slashReply(`Unknown subcommand. Try ${ctx.esc(entry.token)} --help`); return true;
+    }
+    slashReply(`Command ${ctx.esc(entry.token)} has no executor.`); return true;
   } catch (err) {
-    _showUser();
-    slashReply(`Error: ${ctx.esc(err.message)}`);
-    return true;
+    if (err.contextChanged || ctx.sid !== sessionModule.getCurrentSessionId()) { uiModule.showToast('Chat changed; the command result belongs to the original chat.', 2400); return true; }
+    showUser(); slashReply(`Error: ${ctx.esc(err.message)}`); return true;
   }
-
-  // Unknown slash command — pass through to AI
-  return false;
 }
 
 // ── Public API ──────────────────────────────────────────────────────
@@ -6502,11 +5554,16 @@ export function initSlashCommands(deps) {
   API_BASE = deps.apiBase || '';
   if (deps.isStreaming) _isStreamingFn = deps.isStreaming;
 
+  for (const event of ['odysseus:skills-changed', 'odysseus:skill-trust-changed', 'odysseus:workspace-changed', 'odysseus:provider-changed', 'odysseus:mcp-changed', 'odysseus:command-catalog-changed', 'openclank:languagechange']) document.addEventListener(event, () => {
+    _skillCatalogCache = { at: 0, items: [] };
+    _mimoStateCache = { sid: '', at: 0, state: { available: false } };
+  });
   document.addEventListener('odysseus:session-selected', () => {
     _mimoStateCache = { sid: '', at: 0, state: { available: false } };
     refreshMimoModeControl(false);
   });
   document.addEventListener('odysseus:mimo-state-changed', () => {
+    _mimoStateCache = { sid: '', at: 0, state: { available: false } };
     refreshMimoModeControl(false);
   });
 

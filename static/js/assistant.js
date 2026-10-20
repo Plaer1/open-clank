@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // Personal Assistant — sidebar entry, settings modal, and chat-header extras.
 //
 // The Assistant is just a specially-flagged CrewMember whose pinned Session
@@ -8,6 +9,11 @@
 import uiModule from './ui.js';
 import { selectSession } from './sessions.js';
 import { sortModelIds } from './modelSort.js';
+import {
+  providerDisplayName,
+  sharedProviderLabel,
+  sharedSecondaryLabel,
+} from './modelLabels.js';
 
 const API = '/api/assistant';
 
@@ -94,7 +100,7 @@ function _ensureModalEl() {
     <div class="modal-content" style="max-width:640px;width:96%;">
       <div class="modal-header">
         <h4>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          ${uiIcon("contact", 14, {"style":"vertical-align:-2px;margin-right:6px;"})}
           Assistant settings
         </h4>
         <button class="close-btn" id="assistant-settings-close">✖</button>
@@ -131,8 +137,8 @@ const TOOL_GROUPS = {
 
 async function _fetchEndpoints() {
   try {
-    const eps = await _fetchJSON('/api/model-endpoints');
-    return Array.isArray(eps) ? eps : [];
+    const catalogue = await _fetchJSON('/api/models');
+    return Array.isArray(catalogue?.items) ? catalogue.items : [];
   } catch { return []; }
 }
 
@@ -234,30 +240,45 @@ function _renderSettingsBody(body, data, tzList) {
   _fetchEndpoints().then(endpoints => {
     let epHTML = '<option value="">(use session default)</option>';
     for (const ep of endpoints) {
-      if (!ep.is_enabled) continue;
-      const url = ep.base_url || '';
-      const name = ep.name || url;
-      const sel = crew.endpoint_id === ep.id ? ' selected' : '';
-      epHTML += `<option value="${_esc(ep.id)}"${sel}>${_esc(name)}</option>`;
+      const endpointId = ep.endpoint_id || '';
+      if (!endpointId) continue;
+      const provider = providerDisplayName(ep.provider_display_name || ep.provider);
+      const secondary = sharedSecondaryLabel({
+        label: ep.share_label,
+        owner: ep.shared_by,
+      });
+      const name = ep.shared === true
+        ? [sharedProviderLabel(provider), secondary].filter(Boolean).join(' · ')
+        : (ep.endpoint_name || endpointId);
+      const sel = crew.endpoint_id === endpointId ? ' selected' : '';
+      epHTML += `<option value="${_esc(endpointId)}"${sel}>${_esc(name)}</option>`;
     }
     epSelect.innerHTML = epHTML;
-    // When endpoint changes, load its models
-    epSelect.addEventListener('change', async () => {
+    // /api/models is the complete secret-free normalized catalogue. Endpoint
+    // changes only project the already-authorized records; they never call a
+    // retired endpoint-specific discovery route.
+    epSelect.addEventListener('change', () => {
       const endpointId = epSelect.value;
       if (!endpointId) { modelSelect.innerHTML = '<option value="">(default)</option>'; return; }
-      const ep = endpoints.find(e => e.id === endpointId);
+      const ep = endpoints.find(e => e.endpoint_id === endpointId);
       if (!ep) return;
-      modelSelect.innerHTML = '<option value="">loading...</option>';
-      try {
-        const models = await _fetchJSON(`/api/model-endpoints/${ep.id}/models`);
-        let mHTML = '';
-        const modelIds = (models.models || models || []).map(m => typeof m === 'string' ? m : (m.id || m.name || '')).filter(Boolean);
-        for (const mid of sortModelIds(modelIds)) {
-          const sel = mid === crew.model ? ' selected' : '';
-          mHTML += `<option value="${_esc(mid)}"${sel}>${_esc(mid.split('/').pop())}</option>`;
+      let mHTML = '';
+      const modelIds = (ep.models || []).filter(Boolean);
+      const displayById = new Map();
+      for (const record of (ep.catalog || [])) {
+        if (record?.model_id) displayById.set(record.model_id, record.display_name || record.model_id);
+      }
+      (ep.models || []).forEach((modelId, index) => {
+        if (!displayById.has(modelId)) {
+          displayById.set(modelId, ep.models_display?.[index] || modelId);
         }
-        modelSelect.innerHTML = mHTML || '<option value="">(no models)</option>';
-      } catch { modelSelect.innerHTML = '<option value="">(failed)</option>'; }
+      });
+      for (const mid of sortModelIds(modelIds)) {
+        const sel = mid === crew.model ? ' selected' : '';
+        const label = displayById.get(mid) || mid.split('/').pop();
+        mHTML += `<option value="${_esc(mid)}"${sel}>${_esc(label)}</option>`;
+      }
+      modelSelect.innerHTML = mHTML || '<option value="">(no models)</option>';
     });
     // Trigger initial model load if endpoint is pre-selected
     if (epSelect.value) epSelect.dispatchEvent(new Event('change'));
@@ -434,7 +455,7 @@ async function _ensureHeaderAffordances(sessionId) {
   gear.type = 'button';
   gear.title = 'Assistant settings';
   gear.className = 'chat-header-btn';
-  gear.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+  gear.innerHTML = uiIcon("settings", 15);
   gear.addEventListener('click', openAssistantSettings);
   headerRight.appendChild(gear);
 }

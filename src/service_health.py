@@ -1,7 +1,6 @@
 """Consolidated service health / degraded-state reporting.
 
-ROADMAP: "Better degraded-state reporting for ChromaDB, SearXNG, email, ntfy,
-and provider probes." There was no single readout of which subsystems are
+There was no single readout of which subsystems are
 actually working — `/api/health` is only a liveness ping and each subsystem's
 signal lives in a different module. This collects them into one uniform,
 *non-intrusive* report (no test push is sent, no real search is run), so the
@@ -42,6 +41,7 @@ import logging
 import socket
 import ssl
 import time
+from collections.abc import Mapping
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -181,34 +181,57 @@ def _bounded_map(items: List[Any], worker: Callable[[int, Any], Dict[str, Any]],
     return out
 
 
-# ── ChromaDB (vector RAG + vector memory) ──
+# ── Canonical Frankenmemory RAG ──
 
-def chromadb_health(rag_manager: Any, memory_vector: Any) -> Dict[str, Any]:
-    """Report on the two ChromaDB-backed stores via their `.healthy` flags.
-
-    Both absent  → disabled (Chroma/embeddings not installed or off).
-    Both healthy → ok. One down → degraded. Both present but unhealthy → down.
-    """
+def frankenmemory_rag_health(rag_manager: Any) -> Dict[str, Any]:
+    """Report the canonical Frankenmemory document RAG."""
     rag_present = rag_manager is not None
-    mem_present = memory_vector is not None
-    if not rag_present and not mem_present:
-        return _svc("chromadb", DISABLED,
-                    "Vector RAG and vector memory are not initialized.",
-                    rag=None, memory=None)
+    if not rag_present:
+        return _svc("frankenmemory_rag", DISABLED,
+                    "Canonical Frankenmemory RAG is not initialized.",
+                    rag=None)
 
     rag_ok = bool(rag_present and getattr(rag_manager, "healthy", False))
-    mem_ok = bool(mem_present and getattr(memory_vector, "healthy", False))
-    meta = {"rag": rag_ok if rag_present else None,
-            "memory": mem_ok if mem_present else None}
-
-    healthy = [ok for ok in (rag_ok if rag_present else None,
-                             mem_ok if mem_present else None) if ok is not None]
-    if healthy and all(healthy):
-        return _svc("chromadb", OK, "Vector stores healthy.", **meta)
-    if any(healthy):
-        return _svc("chromadb", DEGRADED,
-                    "One vector store is unavailable.", **meta)
-    return _svc("chromadb", DOWN, "Vector stores are unavailable.", **meta)
+    if rag_ok:
+        try:
+            raw_stats = rag_manager.get_stats()
+        except Exception:
+            raw_stats = None
+        stats = dict(raw_stats) if isinstance(raw_stats, Mapping) else {}
+        index_health = stats.get("index_health") or {}
+        generation_states = stats.get("generation_states") or {}
+        reasons = []
+        if stats.get("documents", 0) and not stats.get("fts_available", False):
+            reasons.append("FTS runtime unavailable")
+        if index_health.get("lagging"):
+            reasons.append("lagging generation")
+        if index_health.get("invalid"):
+            reasons.append("invalid generation")
+        if stats.get("documents", 0) and index_health.get("missing"):
+            reasons.append("missing generation")
+        if generation_states.get("failed"):
+            reasons.append("failed build")
+        degraded = bool(reasons)
+        status = DEGRADED if degraded else OK
+        detail = (
+            "Canonical RAG is degraded: " + ", ".join(reasons) + "."
+            if degraded
+            else "Canonical RAG is healthy; exact/FTS retrieval and published generation state are available."
+        )
+        return _svc(
+            "frankenmemory_rag",
+            status,
+            detail,
+            rag=True,
+            documents=stats.get("documents", 0),
+            chunks=stats.get("chunks", 0),
+            fts_available=stats.get("fts_available", False),
+            index_health=index_health,
+            generation_states=generation_states,
+            indexes=stats.get("indexes", []),
+        )
+    return _svc("frankenmemory_rag", DOWN,
+                "Canonical Frankenmemory RAG is unavailable.", rag=False)
 
 
 # ── SearXNG ──
@@ -345,24 +368,29 @@ def email_health(accounts: List[Dict[str, Any]],
 
 def providers_health(endpoints: List[Dict[str, Any]],
                      *, probe: Optional[Callable] = None) -> Dict[str, Any]:
-    """Probe each enabled model endpoint's model list, concurrently.
+    """Summarize normalized provider connections without executing models.
 
-    `endpoints` is a list of plain dicts ({name, base_url, api_key}) so this
-    stays decoupled from the ORM and trivially testable. Non-empty model list
-    → reachable. Bounded by `_FANOUT_BUDGET` regardless of count. `meta` never
-    contains api_key or raw URLs — only a display name (or a sanitized URL when
-    no name is set) and a controlled error category.
+    Live application inputs are secret-free snapshots from ``ProviderStore``:
+    ``{name, ready, model_count, error}``.  The optional injected ``probe`` is
+    retained solely for isolated tests of the bounded fan-out/error rollup; the
+    application path never imports or calls a legacy endpoint probe.
     """
     if not endpoints:
         return _svc("providers", DISABLED, "No model endpoints configured.")
-    if probe is None:
-        from routes.model_routes import _probe_endpoint as probe
-
     def _label(ep: Dict[str, Any]) -> str:
         return ep.get("name") or _safe_url(ep.get("base_url")) or "endpoint"
 
     def _check(_i: int, ep: Dict[str, Any]) -> Dict[str, Any]:
         name = _label(ep)
+        if probe is None:
+            count = max(0, int(ep.get("model_count") or 0))
+            ready = bool(ep.get("ready"))
+            return {
+                "name": name,
+                "ok": ready,
+                "model_count": count,
+                "error": None if ready else str(ep.get("error") or "no_models"),
+            }
         try:
             models = probe(ep.get("base_url"), ep.get("api_key"),
                            timeout=_PROBE_TIMEOUT) or []
@@ -433,21 +461,46 @@ def _gather_inputs(owner: str | None = None) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"service_health: email accounts load failed: {e}")
     try:
-        from core.database import SessionLocal, ModelEndpoint
-        from src.auth_helpers import owner_filter
-        db = SessionLocal()
-        try:
-            query = db.query(ModelEndpoint).filter(
-                ModelEndpoint.is_enabled == True)  # noqa: E712
-            rows = owner_filter(
-                query, ModelEndpoint, owner or "", include_shared=False
-            ).all()
-            endpoints = [{"name": r.name, "base_url": r.base_url,
-                          "api_key": r.api_key} for r in rows]
-        finally:
-            db.close()
+        from src.openclank.chat_routing import normalized_provider_owner
+        from src.openclank.provider_store import ProviderStore
+
+        provider_owner = normalized_provider_owner(owner)
+        store = ProviderStore()
+        for connection in store.list_connections(owner=provider_owner):
+            if not bool(connection.enabled):
+                continue
+            routes = [
+                route
+                for route in store.list_model_routes(
+                    owner=provider_owner,
+                    connection_id=connection.id,
+                )
+                if bool(route.enabled)
+            ]
+            provider_accounts = [
+                account
+                for account in store.list_accounts(
+                    owner=provider_owner,
+                    connection_id=connection.id,
+                )
+                if bool(account.enabled)
+            ]
+            account_required = str(connection.kind or "").lower() not in {
+                "local", "local_server", "local_executor"
+            }
+            ready = bool(routes) and (bool(provider_accounts) or not account_required)
+            endpoints.append({
+                "name": connection.label,
+                "ready": ready,
+                "model_count": len(routes),
+                "error": (
+                    None if ready else
+                    "no_models" if not routes else
+                    "no_accounts"
+                ),
+            })
     except Exception as e:
-        logger.debug(f"service_health: endpoint load failed: {e}")
+        logger.debug(f"service_health: provider snapshot load failed: {e}")
     return {"settings": settings, "integrations": integrations,
             "accounts": accounts, "endpoints": endpoints}
 
@@ -473,7 +526,7 @@ async def collect_service_health(rag_manager: Any = None,
                                  owner: str | None = None) -> Dict[str, Any]:
     """Run every probe and return {overall, services, timestamp}.
 
-    Bounded end-to-end: in-process ChromaDB flags are read synchronously; the
+    Bounded end-to-end: in-process Frankenmemory flags are read synchronously; the
     four network subsystems run concurrently, each under `_SUBSYSTEM_DEADLINE`,
     with an overall `_AGGREGATE_DEADLINE` backstop. Per-item probes inside
     providers/email are themselves bounded by `_FANOUT_BUDGET`.
@@ -483,8 +536,8 @@ async def collect_service_health(rag_manager: Any = None,
     inputs = _gather_inputs(owner)
     settings = inputs["settings"]
 
-    # ChromaDB is in-process and synchronous (just reads flags).
-    chroma = chromadb_health(rag_manager, memory_vector)
+    # Frankenmemory RAG is in-process and synchronous (just reads flags).
+    canonical_rag = frankenmemory_rag_health(rag_manager)
 
     names = ["searxng", "ntfy", "email", "providers"]
     coros = [
@@ -501,7 +554,7 @@ async def collect_service_health(rag_manager: Any = None,
         results = [_svc(n, DOWN, _detail_for("timeout"), error="timeout")
                    for n in names]
 
-    services = [chroma, *results]
+    services = [canonical_rag, *results]
     return {
         "overall": _rollup(services),
         "services": services,

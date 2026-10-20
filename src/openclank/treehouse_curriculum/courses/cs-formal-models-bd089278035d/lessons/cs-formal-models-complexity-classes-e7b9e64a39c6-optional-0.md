@@ -1,0 +1,1 @@
+Witness truth values; check all clauses; transform and solve A using B, with polynomial overhead.

@@ -1,0 +1,1 @@
+Inspect the argument-dependent assignment before the printf.

@@ -1,3 +1,10 @@
+"""GET-only local model inventory discovery.
+
+Discovery reports catalogue metadata and never sends prompts or invokes model
+inference.  Provider execution belongs exclusively to the managed operation
+router; discovered URLs are informational compatibility data.
+"""
+
 import subprocess
 import json
 import time

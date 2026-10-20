@@ -1,0 +1,35 @@
+{
+  "id": "batch-027",
+  "group": "docs.openclank-docs-getting-work-done",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1748,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-getting-work-done.body",
+      "source": "# Getting Work Done\n\nOpen Clank is a chat-first workspace. You talk with your assistant in the\ncenter, and the Copal suite — Editor, Files, Graph, Timeline, TreeHouse and\nTasks — holds the durable material you produce together.\n\n## A normal session\n\n1. Start or resume a chat. Every conversation keeps its own transcript and its\n   own task list.\n2. Ask for something concrete. The assistant can read and write your Copal\n   documents, run tools, and reference what it did later.\n3. Capture the durable parts. Notes, tables, images and tasks live in Copal\n   rather than only in the transcript.\n\nOpen [Editor](clank://editor) to see the documents, or [Chat](clank://chat) to\nreturn to the conversation.\n\n## Where things live\n\n| You want to | Go to |\n| --- | --- |\n| Write or read long-form documents | [Editor](clank://editor) |\n| Organize linked knowledge pages | [Wiki library](clank://wiki) |\n| Manage files and images | [Files](clank://files) |\n| See how documents connect | [Graph](clank://graph) |\n| Track follow-through | [Tasks](clank://tasks) |\n| Change appearance or behavior | [Settings](clank://settings) |\n\n## Two kinds of content\n\n**Personal** notes, copies and annotations belong to you. Rename them, edit\nthem, delete them — the assistant will not overwrite them just because a name\nlooks familiar.\n\n**Official** pages like this handbook are read-only and shared by every\naccount on this installation. They live in the `OpenClank/` folder and update\nwith the product.\n\nWhen you want to change an official page, make an editable copy. Your copy is\nyours from then on.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:105"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-getting-work-done.title",
+      "source": "Getting Work Done",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:105"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { captureScopeEvidence, captureSdkEvidence, flushCaptures } from "@/provider/logging-transport"
 import {
   RequestError,
   type Agent as ACPAgent,
@@ -32,10 +33,18 @@ import {
 
 import { Log } from "../util"
 import { pathToFileURL } from "url"
+import path from "node:path"
+import { createHash } from "node:crypto"
 import { Filesystem } from "../util"
 import { Hash } from "@mimo-ai/shared/util/hash"
-import { ACPSessionManager } from "./session"
+import { ACPSessionManager, reserveProvisionalSessionID } from "./session"
 import type { ACPConfig } from "./types"
+import { SessionID, MessageID } from "@/session/schema"
+import { Session as NativeSession } from "@/session"
+import { hostSourceForMessage, type SourceMessage } from "@/session/fork-source"
+import { SessionRunState } from "@/session/run-state"
+import { Instance } from "@/project/instance"
+import { Effect } from "effect"
 import { Provider } from "../provider"
 import { ModelID, ProviderID } from "../provider/schema"
 import { Agent as AgentModule } from "../agent/agent"
@@ -43,6 +52,9 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { Installation } from "@/installation"
 import { MessageV2 } from "@/session/message-v2"
 import { Config } from "@/config"
+import { Question } from "@/question"
+import { Skill } from "@/skill"
+import { Flag } from "@/flag/flag"
 import { ConfigMCP } from "@/config/mcp"
 import { z } from "zod"
 import { LoadAPIKeyError } from "ai"
@@ -50,9 +62,56 @@ import type { AssistantMessage, Event, OpencodeClient, SessionMessageResponse, T
 import { applyPatch } from "diff"
 import { InstallationVersion } from "@/installation/version"
 import { SYSTEM_SPAWNED_AGENT_TYPES } from "@/agent/config"
+import { OpenClankManagedProtocol } from "./openclank-protocol"
+import { ManagedProvider } from "./managed-provider"
+import { ManagedProviderControl } from "./provider-control"
+import { ManagedOperations } from "./managed-operations"
+import { contextWindow } from "@/session/overflow"
+import { preserveRecentBudgetFor, tailTurnsFor } from "@/session/compaction"
+import { defaultThresholdsFor, resolveThresholds } from "@/session/prune"
+
+/** Consume only the slash name and one separator; argument bytes stay native-owned. */
+export function parseCommandText(text: string) {
+  const match = /^\/([^\s]+)(?:[ \t]|\r?\n)?([\s\S]*)$/.exec(text)
+  return match ? { name: match[1], args: match[2] } : undefined
+}
+
+/** Durable host-to-native user anchors; content and attachments never leave this map. */
+export function sourceMessageAnchors(messages: SourceMessage[]) {
+  const anchors = messages.filter((message) => message.info.role === "user" && (!message.info.agentID || message.info.agentID === "main")).flatMap((message) => {
+    const source = hostSourceForMessage(message)
+    return source ? [{ nativeMessageID: message.info.id, hostSourceMessageID: source }] : []
+  })
+  if (new Set(anchors.map((anchor) => anchor.hostSourceMessageID)).size !== anchors.length) {
+    throw new RequestError(-32602, "Multiple native messages share a host source boundary", { code: "SOURCE_MAPPING_AMBIGUOUS" })
+  }
+  return anchors
+}
+
+export function nativeForkReceipt(messages: Array<{ parts: Array<{ type: string; metadata?: Record<string, unknown> }> }>) {
+  const receipts = messages.flatMap((message) => message.parts.filter((part) => part.type === "text" && part.metadata?.nativeForkReceipt).map((part) => part.metadata!.nativeForkReceipt))
+  if (receipts.length > 1) throw new RequestError(-32602, "Native fork completion receipt is ambiguous", { code: "FORK_RECEIPT_AMBIGUOUS" })
+  const parsed = z.object({ sourceSessionID: z.string(), targetSessionID: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/), sourceMessageCount: z.number().int().nonnegative() }).strict().safeParse(receipts[0])
+  return parsed.success ? parsed.data : null
+}
+
+const ManagedForkRequest = z.object({
+  sourceSessionID: SessionID.zod,
+  targetSessionID: SessionID.zod,
+  directory: z.string().refine(path.isAbsolute),
+  hostSourceMap: z.record(z.string().min(1).max(256), z.string().min(1).max(256)),
+  messageID: MessageID.zod.optional(),
+  title: z.string().min(1).max(512).optional(),
+}).strict()
 
 type ModeOption = { id: string; name: string; description?: string }
-type ModelOption = { modelId: string; name: string }
+export type ModelOption = {
+  modelId: string
+  name: string
+  baseModelId: string
+  preset?: string
+  variant?: string
+}
 
 const DEFAULT_VARIANT_VALUE = "default"
 
@@ -142,10 +201,17 @@ export class Agent implements ACPAgent {
   private sessionManager: ACPSessionManager
   private eventAbort = new AbortController()
   private eventStarted = false
+  private terminalDeliveries = new Map<string, { busy: boolean; finish: () => void; fail: (error: Error) => void }>()
   private bashSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
   private permissionQueues = new Map<string, Promise<void>>()
   private questionQueues = new Map<string, Promise<void>>()
+  private providerControl = new ManagedProviderControl.ControlPlane()
+  private managedOperations: ManagedOperations.Router
+  private reservedForkTargets = new Set<string>()
+  private forkSources = new Set<string>()
+  private forkReceipts = new Map<string, { fingerprint: string; owner: string; sourceChatID: string; targetChatID: string; result: Promise<Record<string, unknown>> }>()
+  private commandNames = new Map<string, Set<string>>()
   private actorFeeds = new Map<string, { rootTurnID: string; revision: number; baseline: Set<string> }>()
   private actorRoots = new Map<string, string>()
   private actorRevisions = new Map<string, number>()
@@ -157,18 +223,155 @@ export class Agent implements ACPAgent {
 
   constructor(connection: AgentSideConnection, config: ACPConfig) {
     this.connection = connection
+    ManagedProvider.installHostConnection(connection)
+    this.managedOperations = new ManagedOperations.Router(connection)
     this.config = config
     this.sdk = config.sdk
     this.sessionManager = new ACPSessionManager(this.sdk)
     this.startEventSubscription()
   }
 
-  async extMethod(method: string, params: Record<string, unknown>) {
-    if (method !== "_odysseus/session/release") {
-      throw new Error(`Unsupported ACP extension method: ${method}`)
+  async extMethod(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (OpenClankManagedProtocol.isProviderControlMethod(method)) {
+      return (await this.providerControl.handle(method, params as never)) as unknown as Record<string, unknown>
     }
-    const sessionId = String(params.sessionId ?? "")
-    if (!sessionId) throw RequestError.invalidParams("sessionId is required")
+    if (method === "_openclank/operations/v1/execute") {
+      if (!ManagedProvider.enabled()) {
+        throw RequestError.invalidParams("managed operations require Open Clank managed mode")
+      }
+      return (await this.managedOperations.handle(params)) as unknown as Record<string, unknown>
+    }
+    if (method === "_openclank/operations/v1/cancel") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed operations require Open Clank managed mode")
+      return (await this.managedOperations.cancel(params)) as unknown as Record<string, unknown>
+    }
+    if (method === "_openclank/session/v1/fork/create") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("reserved forks require Open Clank managed mode")
+      const parsed = ManagedForkRequest.safeParse(params)
+      if (!parsed.success) throw RequestError.invalidParams(parsed.error.flatten())
+      const request = parsed.data
+      if (request.sourceSessionID === request.targetSessionID || path.resolve(this.sessionManager.get(request.sourceSessionID).cwd) !== path.resolve(request.directory)) throw RequestError.invalidParams("fork source and target must differ and share the requested directory")
+      const [sourceBinding, targetBinding] = await Promise.all([ManagedProvider.ensureManagedSessionBinding(request.sourceSessionID), ManagedProvider.ensureManagedSessionBinding(request.targetSessionID)])
+      if (!sourceBinding || !targetBinding || sourceBinding.engineSessionID !== request.sourceSessionID || targetBinding.engineSessionID !== request.targetSessionID || sourceBinding.owner !== targetBinding.owner || sourceBinding.authorityWorkspaceID !== targetBinding.authorityWorkspaceID || sourceBinding.stableChatID === targetBinding.stableChatID || path.resolve(sourceBinding.physicalCwd) !== path.resolve(request.directory) || path.resolve(targetBinding.physicalCwd) !== path.resolve(request.directory)) throw new RequestError(-32602, "Fork authority does not match the reserved source and target", { code: "FORK_AUTHORITY_MISMATCH" })
+      const fingerprint = createHash("sha256").update(JSON.stringify([request.sourceSessionID, request.targetSessionID, path.resolve(request.directory), Object.entries(request.hostSourceMap).sort(([left], [right]) => left.localeCompare(right)), request.messageID ?? null, request.title ?? null])).digest("hex")
+      const prior = this.forkReceipts.get(request.targetSessionID)
+      if (prior) {
+        if (prior.fingerprint !== fingerprint || prior.owner !== sourceBinding.owner || prior.sourceChatID !== sourceBinding.stableChatID || prior.targetChatID !== targetBinding.stableChatID) throw new RequestError(-32602, "Fork target already belongs to another request", { code: "FORK_REQUEST_CONFLICT" })
+        return await prior.result
+      }
+      if (!this.reservedForkTargets.has(request.targetSessionID)) throw new RequestError(-32602, "Fork target was not reserved by this worker", { code: "FORK_TARGET_UNRESERVED" })
+      if (this.forkSources.has(request.sourceSessionID)) throw new RequestError(-32602, "A fork is already capturing this source", { code: "FORK_SOURCE_BUSY" })
+      this.reservedForkTargets.delete(request.targetSessionID)
+      this.forkSources.add(request.sourceSessionID)
+      const result = (async () => {
+        try {
+          await Instance.provide({ directory: request.directory, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+            const runState = yield* SessionRunState.Service
+            yield* runState.assertNotBusy(request.sourceSessionID)
+            const session = yield* NativeSession.Service
+            return yield* session.fork({ sessionID: request.sourceSessionID, targetSessionID: request.targetSessionID, hostSourceMap: request.hostSourceMap, forkFingerprint: fingerprint, messageID: request.messageID, title: request.title })
+          })) })
+          await this.sessionManager.adoptManagedFork(request.targetSessionID, request.directory, this.sessionManager.get(request.sourceSessionID).model)
+          const messages = await this.sdk.session.messages({ sessionID: request.targetSessionID, directory: request.directory, agent_id: "main" }, { throwOnError: true }).then((reply) => reply.data!)
+          return { created: true, sourceSessionID: request.sourceSessionID, targetSessionID: request.targetSessionID, fingerprint, anchors: sourceMessageAnchors(messages), forkReceipt: nativeForkReceipt(messages) }
+        } catch (error) {
+          if (error instanceof Error && error.message.includes("target already exists")) throw new RequestError(-32602, "Reserved fork target already exists", { code: "FORK_TARGET_EXISTS", targetSessionID: request.targetSessionID })
+          // Retain this failed receipt; retry never clones into a partial target.
+          await this.sessionManager.adoptManagedFork(request.targetSessionID, request.directory).catch(() => undefined)
+          throw new RequestError(-32603, "Fork candidate is incomplete; reconcile or discard this exact reserved target", { code: "FORK_INCOMPLETE", targetSessionID: request.targetSessionID, requiresReconciliation: true })
+        } finally {
+          this.forkSources.delete(request.sourceSessionID)
+        }
+      })()
+      this.forkReceipts.set(request.targetSessionID, { fingerprint, owner: sourceBinding.owner, sourceChatID: sourceBinding.stableChatID, targetChatID: targetBinding.stableChatID, result })
+      return await result
+    }
+    if (method === "_openclank/session/v1/commands/refresh") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("command refresh requires Open Clank managed mode")
+      if (Object.keys(params).some((key) => !["directory", "sessionID", "reloadSkills"].includes(key)) || typeof params.directory !== "string" || !path.isAbsolute(params.directory) || typeof params.sessionID !== "string" || (params.reloadSkills !== undefined && typeof params.reloadSkills !== "boolean")) throw RequestError.invalidParams("sessionID and absolute directory are required; reloadSkills is optional")
+      if (path.resolve(this.sessionManager.get(params.sessionID).cwd) !== path.resolve(params.directory)) throw RequestError.invalidParams("session directory does not match command target")
+      if (params.reloadSkills === true) await Instance.provide({ directory: params.directory, fn: () => AppRuntime.runPromise(Skill.Service.use((service) => service.reload())) })
+      const availableCommands = await this.loadAvailableCommands(params.directory, params.sessionID)
+      await this.connection.sessionUpdate({ sessionId: params.sessionID, update: { sessionUpdate: "available_commands_update", availableCommands } })
+      return { sessionID: params.sessionID, availableCommands }
+    }
+    if (method === "_openclank/session/v1/messages/source-map") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("source mapping requires Open Clank managed mode")
+      if (Object.keys(params).some((key) => !["directory", "sessionID", "messageID"].includes(key)) || typeof params.directory !== "string" || !path.isAbsolute(params.directory) || typeof params.sessionID !== "string" || (params.messageID !== undefined && !MessageID.zod.safeParse(params.messageID).success)) {
+        throw RequestError.invalidParams("sessionID and absolute directory are required")
+      }
+      if (path.resolve(this.sessionManager.get(params.sessionID).cwd) !== path.resolve(params.directory)) throw RequestError.invalidParams("session directory does not match source target")
+      const [messages, session] = await Promise.all([
+        this.sdk.session.messages({ sessionID: params.sessionID, directory: params.directory, agent_id: "*" }, { throwOnError: true }).then((result) => result.data!),
+        this.sdk.session.get({ sessionID: params.sessionID, directory: params.directory }, { throwOnError: true }).then((result) => result.data!),
+      ])
+      const cutoff = typeof params.messageID === "string" ? params.messageID : undefined
+      const selected = cutoff ? messages.filter((message) => message.info.id < cutoff) : messages
+      return { sessionID: params.sessionID, sourceMessageCount: selected.length, anchors: sourceMessageAnchors(selected), forkReceipt: nativeForkReceipt(selected), revert: session.revert ? { messageID: session.revert.messageID, partID: session.revert.partID } : null }
+    }
+    if (method === "_openclank/session/v1/settings/effective") {
+      if (!ManagedProvider.enabled()) throw RequestError.invalidParams("managed settings require Open Clank managed mode")
+      if (Object.keys(params).some((key) => !["providerID", "modelID", "directory", "sessionID"].includes(key)) || typeof params.providerID !== "string" || typeof params.modelID !== "string" || typeof params.directory !== "string" || !path.isAbsolute(params.directory) || (params.sessionID !== undefined && typeof params.sessionID !== "string")) {
+        throw RequestError.invalidParams("providerID, modelID and absolute directory are required; sessionID is optional")
+      }
+      const directory = params.directory
+      if (typeof params.sessionID === "string" && path.resolve(this.sessionManager.get(params.sessionID).cwd) !== path.resolve(directory)) {
+        throw RequestError.invalidParams("session directory does not match settings target")
+      }
+      const [providers, base, agents] = await Promise.all([
+        this.sdk.config.providers({ directory }, { throwOnError: true }).then((x) => x.data!.providers),
+        this.sdk.config.get({ directory }, { throwOnError: true }).then((x) => x.data!),
+        this.sdk.app.agents({ directory }, { throwOnError: true }).then((x) => x.data!),
+      ])
+      const provider = providers.find((item) => item.id === params.providerID)
+      const model = provider?.models?.[params.modelID]
+      if (!provider || !model) throw RequestError.invalidParams("selected model is unavailable")
+      const nativeModel = model as unknown as Provider.Model
+      const output = model.limit.output
+      const input = model.limit.input ?? model.limit.context
+      // Public provider discovery strips private options. Resolve managed values
+      // from the actual merged Config instead, exactly as turn admission does.
+      const cfg = Config.withManagedModelSettings(base as Config.Info, nativeModel)
+      const runtimeState = await this.runtimeStateFor(directory)
+      const compaction = cfg.compaction ?? {}
+      const checkpoint = cfg.checkpoint ?? {}
+      const window = contextWindow({ cfg, model: nativeModel })
+      const tailTurns = tailTurnsFor(cfg)
+      const recent = preserveRecentBudgetFor(cfg, nativeModel)
+      const reserved = cfg.compaction?.reserved ?? Math.min(20000, output)
+      const rawThresholds = cfg.checkpoint?.thresholds ?? defaultThresholdsFor(window.effective)
+      const thresholds = resolveThresholds(rawThresholds, window.effective, cfg.checkpoint?.reserved)
+      return { providerID: params.providerID, modelID: params.modelID, target: { directory, sessionID: params.sessionID }, timing: "next_admission", profile: { timing: "next_generation", scope: "worker-generation", runtime_flags: { never_ask: runtimeState.neverAsk, try_best_handoff: Flag.MIMOCODE_ENABLE_TRY_BEST_HANDOFF }, default_agent: runtimeState.defaultAgent, small_model: cfg.small_model ?? null, vision_model: cfg.vision_model ?? null, model_policy: { helper: cfg.small_model || cfg.model_groups?.lite ? "explicit_config" : "inherit_caller", vision: cfg.vision_model || cfg.model_groups?.vision ? "explicit_config" : "inherit_caller_capability_required" }, agent: Object.fromEntries(agents.map((entry) => [entry.name, { description: entry.description, mode: entry.mode, disable: false, hidden: entry.hidden ?? false, model: entry.model ? `${entry.model.providerID}/${entry.model.modelID}` : entry.modelRef, variant: entry.variant, temperature: entry.temperature, top_p: entry.topP, steps: entry.steps, color: entry.color, tool_allowlist: entry.toolAllowlist, native: entry.native }])), model_groups: cfg.model_groups ?? {}, checkpoint: { task_archive_days: cfg.checkpoint?.task_archive_days ?? cfg.checkpoint?.task_cleanup_days ?? 7, memory_reconcile_on_search: cfg.checkpoint?.memory_reconcile_on_search ?? true, memory_search_score_floor: cfg.checkpoint?.memory_search_score_floor ?? 0.15 }, workflow: Config.workflowPolicyFor(cfg), watcher: cfg.watcher ?? {}, snapshot: cfg.snapshot ?? true, commands: Object.fromEntries(Object.entries(cfg.command ?? {}).map(([name, command]) => [name, { description: command.description, agent: command.agent, model: command.model, subtask: command.subtask }])), formatter: typeof cfg.formatter === "boolean" ? cfg.formatter : Object.fromEntries(Object.entries(cfg.formatter ?? {}).map(([name, entry]) => [name, { disabled: entry.disabled, command: entry.command, extensions: entry.extensions }])), lsp: typeof cfg.lsp === "boolean" ? cfg.lsp : Object.fromEntries(Object.entries(cfg.lsp ?? {}).map(([name, entry]) => [name, { disabled: entry.disabled, ...("command" in entry ? { command: entry.command, extensions: entry.extensions } : {}) }])), instructions: { count: cfg.instructions?.length ?? 0, source: "merged_native_config" } }, policies: { dream: cfg.dream ?? {}, distill: cfg.distill ?? {}, experimental: { try_best_enabled: Flag.MIMOCODE_ENABLE_TRY_BEST_HANDOFF, continue_loop_on_deny: cfg.experimental?.continue_loop_on_deny ?? false, try_best: cfg.experimental?.try_best ?? {} } }, context: { hard: window.hard, effective: window.effective, usable: window.usable, source: window.source, input, output }, compaction: { auto: compaction.auto !== false, prune: compaction.prune !== false, tailTurns, preserveRecentTokens: recent, reserved }, checkpoint: { thresholds, reserved: cfg.checkpoint?.reserved ?? 13000, maxWriterFailures: cfg.checkpoint?.max_writer_failures ?? 3, fork: checkpoint.fork === true, pushCaps: checkpoint.push_caps && typeof checkpoint.push_caps === "object" ? checkpoint.push_caps : {} } }
+    }
+    if (method === "_odysseus/session/reserve") {
+      // Reserve-without-create: mint a provisional engine `ses_…` and create
+      // nothing. The host persists its projection-first candidate against this
+      // ID, then create-and-publishes it through newSession/_meta or Session.create.
+      if (Object.keys(params).length !== 0) throw RequestError.invalidParams("session reserve takes no parameters")
+      const provisionalID = reserveProvisionalSessionID()
+      this.reservedForkTargets ??= new Set<string>()
+      this.reservedForkTargets.add(provisionalID)
+      return { sessionID: provisionalID, provisional: true } as Record<string, unknown>
+    }
+    if (method !== "_odysseus/session/release" && method !== "_odysseus/session/discard") throw new Error(`Unsupported ACP extension method: ${method}`)
+    const sessionId = params.sessionId
+    if (typeof sessionId !== "string" || !sessionId || sessionId !== sessionId.trim()) throw RequestError.invalidParams("sessionId is required")
+    if (method === "_odysseus/session/discard") {
+      if (Object.keys(params).length !== 2 || typeof params.cwd !== "string" || !path.isAbsolute(params.cwd) || path.normalize(params.cwd) !== params.cwd) {
+        throw RequestError.invalidParams("canonical cwd is required for session discard")
+      }
+      const ack = await this.sessionManager.discard(sessionId, params.cwd, [], "explicit")
+      // Wire contract with the host ACPClient.discard_session predicate:
+      // the RPC result is exactly {"deleted": true}. The rich ack stays
+      // internal for logs only.
+      log.info("session_discard_ack", {
+        sessionID: ack.sessionID,
+        cwd: ack.cwd,
+        reason: ack.reason,
+        deleted: ack.deleted,
+      })
+      return { deleted: true } as Record<string, unknown>
+    }
     await this.sessionManager.release(sessionId)
     return {}
   }
@@ -177,29 +380,128 @@ export class Agent implements ACPAgent {
     if (this.eventStarted) return
     this.eventStarted = true
     this.runEventSubscription().catch((error) => {
+      this.failTerminalDeliveries(new Error("ACP event subscription failed before terminal delivery"))
       if (this.eventAbort.signal.aborted) return
       log.error("event subscription failed", { error })
     })
   }
 
+  private readonly goalDeliveries = new Map<string, Promise<void>>()
+
+  private deliverGoalCompletions(sessionID: string): Promise<void> {
+    const prior = this.goalDeliveries.get(sessionID) ?? Promise.resolve()
+    // Each actual event queues a fresh read, so a completion racing an older
+    // verification-started read cannot be hidden by in-flight coalescing.
+    const delivery = prior.catch(() => undefined).then(() => this.projectGoalCompletions(sessionID)).finally(() => {
+      if (this.goalDeliveries.get(sessionID) === delivery) this.goalDeliveries.delete(sessionID)
+    })
+    this.goalDeliveries.set(sessionID, delivery)
+    return delivery
+  }
+
+  private async projectGoalCompletions(sessionID: string) {
+    const session = this.sessionManager.tryGet(sessionID)
+    if (!session) return
+    const journal = await this.sdk.session.goal.journal({ sessionID, directory: session.cwd }, { throwOnError: true })
+    for (const entry of journal.data ?? []) {
+      if (entry.type !== "completed" || entry.actor !== "verifier" || entry.reasonCode !== "met") continue
+      const completed = entry.snapshot?.history?.find((goal) => goal.id === entry.goalID && goal.revision === entry.revision)
+      if (!completed || completed.status !== "completed" || completed.lastOutcome?.code !== "met") continue
+      const evidenceRefs = (entry.evidenceRefs ?? []).filter((id) => completed.evidence?.some((evidence) =>
+        evidence.id === id && (evidence.kind === "file" || evidence.kind === "command") && !!evidence.verifier,
+      )).slice(0, 128)
+      if (!evidenceRefs.length) continue
+      await OpenClankManagedProtocol.callHost(this.connection, "_openclank/session/v1/goal/completed", {
+        sessionID, journalID: entry.id, goalID: entry.goalID, goalRevision: entry.revision,
+        evidenceRefs, verifiedAt: entry.createdAt,
+      })
+    }
+  }
+
   private async runEventSubscription() {
     while (true) {
-      if (this.eventAbort.signal.aborted) return
+      if (this.eventAbort.signal.aborted) {
+        this.failTerminalDeliveries(new Error("ACP event subscription stopped before terminal delivery"))
+        return
+      }
       const events = await this.sdk.global.event({
         signal: this.eventAbort.signal,
       })
       for await (const event of events.stream) {
-        if (this.eventAbort.signal.aborted) return
+        if (this.eventAbort.signal.aborted) {
+          this.failTerminalDeliveries(new Error("ACP event subscription stopped before terminal delivery"))
+          return
+        }
         const payload = event?.payload
         if (!payload) continue
         await this.handleEvent(payload as Event).catch((error) => {
           log.error("failed to handle event", { error, type: payload.type })
         })
       }
+      this.failTerminalDeliveries(new Error("ACP event subscription ended before terminal delivery"))
+    }
+  }
+
+  private failTerminalDeliveries(error: Error) {
+    for (const delivery of this.terminalDeliveries.values()) delivery.fail(error)
+    this.terminalDeliveries.clear()
+  }
+
+  private async withPromptDelivery<A extends { data?: { info?: unknown } }>(sessionID: string, run: () => Promise<A>): Promise<A> {
+    if (this.terminalDeliveries.has(sessionID)) throw new Error("ACP prompt delivery is already active")
+    let finish!: () => void
+    let fail!: (error: Error) => void
+    const terminal = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject })
+    // A stream error may arrive while the SDK request is still settling.
+    terminal.catch(() => undefined)
+    this.terminalDeliveries.set(sessionID, { busy: false, finish, fail })
+    try {
+      const response = await run()
+      // Early SDK admission errors have no turn or terminal event. A returned
+      // message (including cancellation/error) has an ordered busy→idle turn.
+      if (response.data?.info) await terminal
+      return response
+    } finally {
+      this.terminalDeliveries.delete(sessionID)
     }
   }
 
   private async handleEvent(event: Event) {
+    if (event.type === "session.status") {
+      const delivery = this.terminalDeliveries.get(event.properties.sessionID)
+      if (delivery) {
+        if (event.properties.status.type === "busy") delivery.busy = true
+        if (event.properties.status.type === "idle" && delivery.busy) delivery.finish()
+      }
+      return
+    }
+
+    // SessionCwd.Event.Changed is an engine bus event carrying the one-chat
+    // physical cwd. It is bridged as a private ACP update so the host can
+    // atomically refresh its per-chat workspace projection. Cast here because
+    // the upstream SDK's generated Event union does not know Open Clank's
+    // private event yet.
+    const eventType = (event as unknown as { type?: string }).type
+    if (eventType === "session.goal") {
+      const sessionID = String((event as unknown as { properties?: { sessionID?: string } }).properties?.sessionID ?? "")
+      if (sessionID) await this.deliverGoalCompletions(sessionID)
+      return
+    }
+    if (eventType === "session.cwd") {
+      const props = (event as unknown as { properties?: Record<string, unknown> }).properties ?? {}
+      const sessionID = String(props.sessionID ?? "")
+      const cwd = String(props.cwd ?? "")
+      if (!sessionID || !cwd || !this.sessionManager.tryGet(sessionID)) return
+      this.sessionManager.setCwd(sessionID, cwd)
+      await this.connection.sessionUpdate({
+        sessionId: sessionID,
+        update: {
+          sessionUpdate: "_openclank_session_cwd",
+          cwd,
+        } as any,
+      })
+      return
+    }
     switch (event.type) {
       case "actor.registered":
       case "actor.status": {
@@ -667,6 +969,13 @@ export class Agent implements ACPAgent {
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     log.info("initialize", { protocolVersion: params.protocolVersion })
 
+    const managed = ManagedProvider.enabled()
+    if (managed) {
+      OpenClankManagedProtocol.validatePeerCapabilities(
+        params.clientCapabilities?._meta?.openclankManaged,
+      )
+    }
+
     const authMethod: AuthMethod = {
       description: "Run `opencode auth login` in the terminal",
       name: "Login with opencode",
@@ -702,12 +1011,13 @@ export class Agent implements ACPAgent {
           resume: {},
         },
       },
-      authMethods: [authMethod],
+      authMethods: managed ? [] : [authMethod],
       agentInfo: {
-        name: "OpenCode",
+        name: managed ? "Open Clank Engine" : "OpenCode",
         version: InstallationVersion,
       },
-    }
+      ...(managed ? { _meta: OpenClankManagedProtocol.initializeMeta } : {}),
+    } as InitializeResponse
   }
 
   async authenticate(_params: AuthenticateRequest) {
@@ -718,9 +1028,17 @@ export class Agent implements ACPAgent {
     const directory = params.cwd
     try {
       const model = await defaultModel(this.config, directory)
+      const meta = (params._meta ?? {}) as Record<string, unknown>
+      const rawProvisional = meta.provisionalSessionID
+      const provisionalID =
+        typeof rawProvisional === "string" && rawProvisional.startsWith("ses_") && rawProvisional === rawProvisional.trim()
+          ? (rawProvisional as SessionID)
+          : undefined
 
-      // Store ACP session state
-      const state = await this.sessionManager.create(params.cwd, params.mcpServers, model)
+      // Create-and-publish under one owner lifecycle lease. A provisional ID
+      // reserved earlier is reused so the host's projection-first candidate
+      // keeps one identity across the interrupt window.
+      const state = await this.sessionManager.create(params.cwd, params.mcpServers, model, { provisionalID })
       const sessionId = state.id
 
       log.info("creating_session", { sessionId, mcpServers: params.mcpServers.length })
@@ -766,6 +1084,8 @@ export class Agent implements ACPAgent {
         mcpServers: params.mcpServers,
         sessionId,
       })
+
+      await this.deliverGoalCompletions(sessionId).catch(() => undefined)
 
       // Replay session history
       const messages = await this.sdk.session
@@ -1234,6 +1554,55 @@ export class Agent implements ACPAgent {
       })
   }
 
+  private async loadAvailableCommands(directory: string, sessionId: string) {
+    const commands = await this.config.sdk.command
+      .list(
+        {
+          directory,
+        },
+        { throwOnError: true },
+      )
+      .then((resp) => resp.data!)
+
+    const availableCommands = commands.map((command) => ({
+      name: command.name,
+      description: command.description ?? "",
+      input: command.hints.length ? { hint: command.hints.join(" ") } : undefined,
+      _meta: { source: command.source ?? "native", bundled: command.bundled, subtask: command.subtask, agent: command.agent, model: command.model, hints: command.hints },
+    }))
+    const names = new Set(availableCommands.map((c) => c.name))
+    this.commandNames.set(sessionId, names)
+    if (!names.has("compact"))
+      availableCommands.push({
+        name: "compact",
+        description: "summarize the session to reduce context",
+        input: undefined,
+        _meta: { source: "native", bundled: undefined, subtask: undefined, agent: undefined, model: undefined, hints: [] },
+      })
+
+    return availableCommands
+  }
+
+  private async runtimeStateFor(directory: string) {
+    return Instance.provide({ directory, fn: () => AppRuntime.runPromise(Effect.gen(function* () {
+      const questions = yield* Question.Service
+      const agents = yield* AgentModule.Service
+      return { neverAsk: yield* questions.neverAsk(), defaultAgent: yield* agents.defaultAgent() }
+    })) })
+  }
+
+  private async agentForPrompt(directory: string, currentMode: string | undefined, context?: { mode?: string; lane?: string; agent_profile?: string }) {
+    if (context?.lane === "auxiliary") return "chat"
+    if (context?.mode === "plan") return "plan"
+    if (ManagedProvider.enabled() && context?.mode === "agent") {
+      const selected = context.agent_profile ?? (await this.runtimeStateFor(directory)).defaultAgent
+      const modes = await this.loadAvailableModes(directory)
+      if (typeof selected !== "string" || ["chat", "plan"].includes(selected) || !modes.some((mode) => mode.id === selected)) throw new RequestError(-32602, "Selected Agent profile is unavailable; choose an enabled primary profile", { code: "AGENT_PROFILE_UNAVAILABLE" })
+      return selected
+    }
+    return currentMode ?? (await this.runtimeStateFor(directory)).defaultAgent
+  }
+
   private async loadAvailableModes(directory: string): Promise<ModeOption[]> {
     const agents = await this.config.sdk.app
       .agents(
@@ -1245,7 +1614,7 @@ export class Agent implements ACPAgent {
       .then((resp) => resp.data!)
 
     return agents
-      .filter((agent) => agent.mode !== "subagent" && !agent.hidden)
+      .filter((agent) => agent.mode !== "subagent" && !agent.hidden && !SYSTEM_SPAWNED_AGENT_TYPES.has(agent.name))
       .map((agent) => ({
         id: agent.name,
         name: agent.name,
@@ -1262,7 +1631,7 @@ export class Agent implements ACPAgent {
       this.sessionManager.get(sessionId).modeId ||
       (await (async () => {
         if (!availableModes.length) return undefined
-        const defaultAgentName = await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))
+        const defaultAgentName = (await this.runtimeStateFor(directory)).defaultAgent
         const resolvedModeId = availableModes.find((mode) => mode.name === defaultAgentName)?.id ?? availableModes[0].id
         this.sessionManager.setMode(sessionId, resolvedModeId)
         return resolvedModeId
@@ -1292,26 +1661,6 @@ export class Agent implements ACPAgent {
           currentModeId,
         }
       : undefined
-
-    const commands = await this.config.sdk.command
-      .list(
-        {
-          directory,
-        },
-        { throwOnError: true },
-      )
-      .then((resp) => resp.data!)
-
-    const availableCommands = commands.map((command) => ({
-      name: command.name,
-      description: command.description ?? "",
-    }))
-    const names = new Set(availableCommands.map((c) => c.name))
-    if (!names.has("compact"))
-      availableCommands.push({
-        name: "compact",
-        description: "summarize the session to reduce context",
-      })
 
     const mcpServers: Record<string, ConfigMCP.Info> = {}
     for (const server of params.mcpServers) {
@@ -1352,6 +1701,8 @@ export class Agent implements ACPAgent {
           })
       }),
     )
+
+    const availableCommands = await this.loadAvailableCommands(directory, sessionId)
 
     setTimeout(() => {
       void this.connection.sessionUpdate({
@@ -1464,14 +1815,25 @@ export class Agent implements ACPAgent {
           system_prompt?: string
           persona?: string
           mode?: string
+          agent_profile?: string
           lane?: string
           root_turn_id?: string
+          chat_id?: string
+          workspace_id?: string
+          goal_id?: string
+          requested_model?: string
         }
+        openclankProvider?: unknown
       }
     })._meta?.odysseus
+    const managedProvider = (params as PromptRequest & {
+      _meta?: { openclankProvider?: unknown }
+    })._meta?.openclankProvider
     const hostSystem = odysseus?.system_prompt?.trim() || undefined
     const sessionID = params.sessionId
+    if (this.forkSources.has(sessionID)) throw new RequestError(-32602, "A fork is capturing this source", { code: "FORK_SOURCE_BUSY" })
     const session = this.sessionManager.get(sessionID)
+    await this.deliverGoalCompletions(sessionID).catch(() => undefined)
     const directory = session.cwd
 
     const current = session.model
@@ -1481,15 +1843,10 @@ export class Agent implements ACPAgent {
     }
     // Named auxiliary work is tool-free Chat plumbing; Plan is an explicit
     // read-only Agent authority. Ordinary product turns stay on Agent.
-    const agent =
-      odysseus?.lane === "auxiliary"
-        ? "chat"
-        : odysseus?.mode === "plan"
-          ? "plan"
-          : (session.modeId ?? (await AppRuntime.runPromise(AgentModule.Service.use((svc) => svc.defaultAgent()))))
+    const agent = await this.agentForPrompt(directory, session.modeId, odysseus)
 
     const parts: Array<
-      | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean }
+      | { type: "text"; text: string; synthetic?: boolean; ignored?: boolean; metadata?: Record<string, unknown> }
       | { type: "file"; url: string; filename: string; mime: string }
     > = []
     for (const part of params.prompt) {
@@ -1562,27 +1919,37 @@ export class Agent implements ACPAgent {
       }
     }
 
-    log.info("parts", { parts })
+    // Media parts may contain large base64 payloads. Keep diagnostics bounded and
+    // content-free so ACP logs never become an attachment exfiltration path.
+    const partSummary = parts.reduce(
+      (summary, part) => {
+        summary[part.type] = (summary[part.type] ?? 0) + 1
+        return summary
+      },
+      {} as Record<string, number>,
+    )
+    log.info("parts", { count: parts.length, types: partSummary })
 
     if (odysseus?.root_turn_id) {
       await this.startActorFeed(sessionID, odysseus.root_turn_id)
     }
 
+    const literalSlash = (params._meta as Record<string, unknown> | undefined)?.openclankLiteralSlash === true
     const cmd = (() => {
+      if (literalSlash) return
       const text = parts
         .findLast(
           (p): p is { type: "text"; text: string; synthetic?: boolean; ignored?: boolean } =>
             p.type === "text" && !p.synthetic && !p.ignored,
         )
-        ?.text.trim()
-        .replace(/^\[turn_source_id=[^\]]+\]\s*/, "")
+        ?.text.replace(/^\[turn_source_id=[^\]]+\]\s*/, "")
 
       if (!text?.startsWith("/")) return
 
-      const [name, ...rest] = text.slice(1).split(/\s+/)
-      return { name, args: rest.join(" ").trim() }
+      return parseCommandText(text)
     })()
 
+    let mainSdkUsage: ReturnType<typeof captureSdkEvidence>
     const buildUsage = (msg: AssistantMessage): Usage => ({
       totalTokens:
         msg.tokens.input +
@@ -1590,12 +1957,103 @@ export class Agent implements ACPAgent {
         msg.tokens.reasoning +
         (msg.tokens.cache?.read ?? 0) +
         (msg.tokens.cache?.write ?? 0),
-      inputTokens: msg.tokens.input,
+      inputTokens: mainSdkUsage?.usage.inputTokens ?? msg.tokens.input,
       outputTokens: msg.tokens.output,
-      thoughtTokens: msg.tokens.reasoning || undefined,
-      cachedReadTokens: msg.tokens.cache?.read || undefined,
-      cachedWriteTokens: msg.tokens.cache?.write || undefined,
+      thoughtTokens: msg.tokens.reasoning,
+      cachedReadTokens: msg.tokens.cache?.read,
+      cachedWriteTokens: mainSdkUsage?.usage.cacheWriteTokens,
     })
+
+    const managedRoute =
+      managedProvider && typeof managedProvider === "object"
+        ? (managedProvider as Record<string, unknown>)
+        : undefined
+    if (ManagedProvider.enabled() && typeof managedRoute?.rootOperationID === "string" && managedRoute.rootOperationID.length > 0 && managedRoute.rootOperationID.length <= 256) {
+      // The managed lease authenticates this operation before any SDK write.
+      // Ignored metadata survives native fork without entering model context.
+      parts.push({ type: "text", text: "", synthetic: true, ignored: true, metadata: { hostSourceMessageID: managedRoute.rootOperationID } })
+    }
+    const hostContextForOperation = () => {
+      const scope = ManagedProvider.currentScope(sessionID)
+      return {
+        ...(scope?.accountID
+          ? { accountID: scope.accountID }
+          : typeof managedRoute?.preferredAccountID === "string" && managedRoute.preferredAccountID
+            ? { accountID: managedRoute.preferredAccountID }
+            : typeof managedRoute?.inheritedAccountID === "string" && managedRoute.inheritedAccountID
+              ? { accountID: managedRoute.inheritedAccountID }
+              : {}),
+        ...(scope?.credentialRevision !== undefined ? { credentialRevision: scope.credentialRevision } : {}),
+        ...(typeof managedRoute?.grantID === "string" && managedRoute.grantID ? { grantID: managedRoute.grantID } : {}),
+        ...(typeof managedRoute?.grantRevision === "number" && Number.isInteger(managedRoute.grantRevision) && managedRoute.grantRevision >= 0
+          ? { grantRevision: managedRoute.grantRevision }
+          : {}),
+        ...(typeof odysseus?.chat_id === "string" && odysseus.chat_id
+          ? { chatID: odysseus.chat_id }
+          : {}),
+        ...(typeof odysseus?.workspace_id === "string" && odysseus.workspace_id
+          ? { workspaceID: odysseus.workspace_id }
+          : {}),
+        ...(typeof odysseus?.goal_id === "string" && odysseus.goal_id
+          ? { goalID: odysseus.goal_id }
+          : {}),
+        cwd: directory,
+      }
+    }
+
+    let usageMeta: Record<string, unknown> = {
+      normalizationProfile: "acp-separated-v1",
+      identityCoverage: "partial",
+      coveredDispatchIDs: [],
+      metricCoverage: {},
+    }
+    const runManaged = <A>(run: () => Promise<A>) =>
+      ManagedProvider.withOperation(
+        sessionID,
+        managedProvider,
+        { providerID: model.providerID, modelID: model.modelID },
+        () =>
+          ManagedProvider.withHostContext(sessionID, hostContextForOperation(), async () => {
+            try {
+              return await run()
+            } finally {
+              await flushCaptures()
+              const scope = ManagedProvider.currentScope(sessionID)
+              const last = captureSdkEvidence(scope)
+              mainSdkUsage = last
+              const coverage = Object.fromEntries(
+                ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"].map(
+                  (key) => [
+                    key,
+                    last?.metricCoverage[key] ?? {
+                      state: "unavailable",
+                      coverage: "unknown",
+                      source: "acp",
+                      reason: "sdk_category_absent",
+                    },
+                  ],
+                ),
+              )
+              for (const [base, subsets] of [
+                ["output_tokens", ["reasoning_tokens"]],
+              ] as const) {
+                if (subsets.some((key) => !last?.metricCoverage[key]))
+                  coverage[base] = {
+                    state: "unavailable",
+                    coverage: "unknown",
+                    source: "acp",
+                    reason: "missing_normalization_subset",
+                  }
+              }
+              usageMeta = {
+                ...captureScopeEvidence(scope),
+                normalizationProfile: "acp-inclusive-input-separated-output-v1",
+                metricCoverage: coverage,
+                coveredDispatchIDs: last?.coveredDispatchIDs ?? [],
+              }
+            }
+          }),
+      )
 
     // The server resolves session.prompt 200 even when the turn died on a
     // provider error (it lands on info.error), and the SDK reports transport
@@ -1626,19 +2084,21 @@ export class Agent implements ACPAgent {
     }
 
     if (!cmd) {
-      const response = await this.sdk.session.prompt({
-        sessionID,
-        model: {
-          providerID: model.providerID,
-          modelID: model.modelID,
-        },
-        variant: this.sessionManager.getVariant(sessionID),
-        parts,
-        agent,
-        directory,
-        tools: odysseus?.tools,
-        system: hostSystem,
-      })
+      const response = await runManaged(() => this.withPromptDelivery(sessionID, () =>
+        this.sdk.session.prompt({
+          sessionID,
+          model: {
+            providerID: model.providerID,
+            modelID: model.modelID,
+          },
+          variant: this.sessionManager.getVariant(sessionID),
+          parts,
+          agent,
+          directory,
+          tools: odysseus?.tools,
+          system: hostSystem,
+        } as any),
+      ))
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1648,7 +2108,7 @@ export class Agent implements ACPAgent {
         return {
           stopReason: "cancelled" as const,
           usage: msg ? buildUsage(msg) : undefined,
-          _meta: {},
+          _meta: usageMeta,
         }
       }
       if (failure) {
@@ -1658,7 +2118,7 @@ export class Agent implements ACPAgent {
       return {
         stopReason: "end_turn" as const,
         usage: msg ? buildUsage(msg) : undefined,
-        _meta: {},
+        _meta: usageMeta,
       }
     }
 
@@ -1668,14 +2128,18 @@ export class Agent implements ACPAgent {
     if (command) {
       // session.command has no system-override input; command templates keep
       // their own framing. Persona authority applies to ordinary prompts.
-      const response = await this.sdk.session.command({
-        sessionID,
-        command: command.name,
-        arguments: cmd.args,
-        model: model.providerID + "/" + model.modelID,
-        agent,
-        directory,
-      })
+      const response = await runManaged(() =>
+        this.sdk.session.command({
+          sessionID,
+          command: command.name,
+          arguments: cmd.args,
+          parts: parts.filter((part) => part.type === "file" || (part.type === "text" && part.ignored === true && typeof part.metadata?.hostSourceMessageID === "string")),
+          variant: this.sessionManager.getVariant(sessionID),
+          model: model.providerID + "/" + model.modelID,
+          agent,
+          directory,
+        }),
+      )
       const msg = response.data?.info
 
       await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1685,7 +2149,7 @@ export class Agent implements ACPAgent {
         return {
           stopReason: "cancelled" as const,
           usage: msg ? buildUsage(msg) : undefined,
-          _meta: {},
+          _meta: usageMeta,
         }
       }
       if (failure) {
@@ -1695,22 +2159,28 @@ export class Agent implements ACPAgent {
       return {
         stopReason: "end_turn" as const,
         usage: msg ? buildUsage(msg) : undefined,
-        _meta: {},
+        _meta: usageMeta,
       }
     }
 
     switch (cmd.name) {
       case "compact":
-        await this.config.sdk.session.summarize(
-          {
-            sessionID,
-            directory,
-            providerID: model.providerID,
-            modelID: model.modelID,
-          },
-          { throwOnError: true },
+        await runManaged(() =>
+          this.config.sdk.session.summarize(
+            {
+              sessionID,
+              directory,
+              providerID: model.providerID,
+              modelID: model.modelID,
+            },
+            { throwOnError: true },
+          ),
         )
         break
+      default: {
+        const unavailable = this.commandNames.get(sessionID)?.has(cmd.name) || ["deep-research", "loops"].includes(cmd.name)
+        throw new RequestError(-32602, `${unavailable ? "Unavailable" : "Unknown"} command /${cmd.name}; refresh /commands or use /literal to send literal text`, { code: unavailable ? "COMMAND_UNAVAILABLE" : "UNKNOWN_COMMAND", command: cmd.name })
+      }
     }
 
     await sendUsageUpdate(this.connection, this.sdk, sessionID, directory)
@@ -1928,24 +2398,36 @@ function modelVariantsFromProviders(
   return Object.keys(modelInfo.variants)
 }
 
-function buildAvailableModels(
-  providers: Array<{ id: string; name: string; models: Record<string, any> }>,
+export function buildAvailableModels(
+  providers: Array<{
+    id: string
+    name: string
+    models: Record<
+      string,
+      { id: string; name: string; baseModelId?: string; preset?: string; variants?: Record<string, unknown> }
+    >
+  }>,
   options: { includeVariants?: boolean } = {},
 ): ModelOption[] {
   const includeVariants = options.includeVariants ?? false
   return providers.flatMap((provider) => {
-    const unsorted: Array<{ id: string; name: string; variants?: Record<string, any> }> = Object.values(provider.models)
+    const unsorted = Object.values(provider.models)
     const models = Provider.sort(unsorted)
     return models.flatMap((model) => {
       const base: ModelOption = {
         modelId: `${provider.id}/${model.id}`,
         name: `${provider.name}/${model.name}`,
+        baseModelId: model.baseModelId ?? `${provider.id}/${model.id}`,
+        ...(model.preset ? { preset: model.preset } : {}),
       }
       if (!includeVariants || !model.variants) return [base]
       const variants = Object.keys(model.variants).filter((variant) => variant !== DEFAULT_VARIANT_VALUE)
       const variantOptions = variants.map((variant) => ({
         modelId: `${provider.id}/${model.id}/${variant}`,
         name: `${provider.name}/${model.name} (${variant})`,
+        baseModelId: base.baseModelId,
+        ...(base.preset ? { preset: base.preset } : {}),
+        variant,
       }))
       return [base, ...variantOptions]
     })

@@ -6,6 +6,7 @@ import type { Permission } from "../permission"
 import type { ProjectID } from "../project/schema"
 import type { SessionID, MessageID, PartID } from "./schema"
 import type { WorkspaceID } from "../control-plane/schema"
+import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Timestamps } from "../storage/schema.sql"
 
 type PartData = Omit<MessageV2.Part, "id" | "sessionID" | "messageID">
@@ -26,6 +27,8 @@ export const SessionTable = sqliteTable(
     slug: text().notNull(),
     directory: text().notNull(),
     title: text().notNull(),
+    title_source: text().$type<"fallback" | "generated" | "user">().notNull().default("user"),
+    title_revision: integer().notNull().default(0),
     version: text().notNull(),
     share_url: text(),
     summary_additions: integer(),
@@ -38,6 +41,8 @@ export const SessionTable = sqliteTable(
     time_compacting: integer(),
     time_archived: integer(),
     last_checkpoint_message_id: text().$type<MessageID>(),
+    // Retain the inert column for older clients sharing this database.
+    auto_worktree_hint_sent: integer({ mode: "boolean" }),
   },
   (table) => [
     index("session_project_idx").on(table.project_id),
@@ -46,6 +51,14 @@ export const SessionTable = sqliteTable(
     index("session_context_from_idx").on(table.context_from),
   ],
 )
+
+export type SessionPrefixToolSnapshot = { name: string; description?: string; input_schema: JSONSchema7 }
+export const SessionPrefixSnapshotTable = sqliteTable("session_prefix_snapshot", {
+  session_id: text().$type<SessionID>().notNull().references(() => SessionTable.id, { onDelete: "cascade" }),
+  profile_key: text().notNull(), system: text({ mode: "json" }).$type<string[]>().notNull(), system_hash: text().notNull(),
+  tools_hash: text().notNull(), tools: text({ mode: "json" }).$type<SessionPrefixToolSnapshot[]>(),
+  watermark_message_id: text().$type<MessageID>().notNull(), revision: integer().notNull(), created_at: integer().notNull(), updated_at: integer().notNull(),
+}, (table) => [primaryKey({ columns: [table.session_id, table.profile_key] })])
 
 export const MessageTable = sqliteTable(
   "message",

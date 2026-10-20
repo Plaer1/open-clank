@@ -1,0 +1,1 @@
+A content correction need not change evidence requirements. New required work can make current progress pending while preserving an earlier completion receipt. Required subject fractions determine the root's exact progress; rounded display percentages cannot grant completion.

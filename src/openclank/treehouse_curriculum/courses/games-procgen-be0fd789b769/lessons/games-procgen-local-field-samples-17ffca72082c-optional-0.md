@@ -1,0 +1,1 @@
+V:0,1/4,1/2,1; G:0,3/8,1/2,0. Mask rows101/101/101. Values and gradients encode different inputs; placement and movement rules are separate. Outside [0,1] needs an explicit lattice extension.

@@ -1,198 +1,213 @@
-"""Tests for the code-navigation tools (grep, glob, ls) + read_file line range."""
-import os
-import shutil
+"""Code navigation through authenticated native Files authority."""
 import asyncio
-import tempfile
+import json
+import os
+from pathlib import Path
+
 import pytest
 
-os.environ.setdefault("DATABASE_URL", "sqlite:////tmp/test_code_nav.db")
-
+from src import tool_execution
 from src.tool_execution import _direct_fallback
+from src.openclank.filesystem_registry import FilesystemRootRegistry
+from src.openclank.files_service_client import close_all_clients
 
 
-def _run(tool, content):
-    return asyncio.run(_direct_fallback(tool, content))
+@pytest.fixture(autouse=True)
+def isolated_file_authority(tmp_path, monkeypatch):
+    """A JSON transport hint does not isolate the canonical policy authority."""
+    from src import constants, secret_storage, tool_security
+    from src.openclank import file_policy, filesystem_registry, files_service_client
+    from core import auth
+    data = tmp_path / "authority"
+    data.mkdir()
+    paths = {"DATA_DIR": str(data), "APP_DB": str(data / "app.db"),
+             "AUTH_FILE": str(data / "auth.json"), "FM_DB_PATH": str(data / "fm.db")}
+    for name, value in paths.items():
+        monkeypatch.setattr(constants, name, value)
+    for name, value in {"OPEN_CLANK_DATA_DIR": paths["DATA_DIR"], "ODYSSEUS_DATA_DIR": paths["DATA_DIR"],
+                        "OPEN_CLANK_AUTHORITY_DB_PATH": paths["APP_DB"],
+                        "OPEN_CLANK_AUTHORITY_AUTH_PATH": paths["AUTH_FILE"], "FM_DB_PATH": paths["FM_DB_PATH"]}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("ODYSSEUS_FILES_TRANSPORT", "framed")
+    for name in list(os.environ):
+        if name.startswith("OPENCLANK_HISTORY_") or name in {"ODYSSEUS_FILES_SOCKET", "ODYSSEUS_FILES_GRPC_SOCKET", "ODYSSEUS_FILES_GRPC_SESSION", "OPEN_CLANK_AGENT_HOME", "THESIUS_AGENT_HOME"}:
+            monkeypatch.delenv(name, raising=False)
+    for module in (file_policy, filesystem_registry):
+        monkeypatch.setattr(module, "APP_DB", paths["APP_DB"])
+    monkeypatch.setattr(auth, "DEFAULT_AUTH_PATH", paths["AUTH_FILE"])
+    monkeypatch.setattr(auth.AuthManager.__init__, "__defaults__", (paths["AUTH_FILE"],))
+    monkeypatch.setattr(secret_storage, "_KEY_PATH", data / ".app_key")
+    monkeypatch.setattr(secret_storage, "_fernet", None)
+    monkeypatch.setattr(files_service_client, "_HISTORY_BINDING_PROVIDER", None)
+    assert secret_storage._KEY_PATH.resolve().is_relative_to(tmp_path.resolve())
+    assert all(Path(value).resolve().is_relative_to(tmp_path.resolve()) for value in paths.values())
+    original_registry_init = filesystem_registry.FilesystemRootRegistry.__init__
+    def checked_registry_init(self, *args, **kwargs):
+        original_registry_init(self, *args, **kwargs)
+        assert Path(self.repository.db_path).resolve().is_relative_to(tmp_path.resolve())
+    monkeypatch.setattr(filesystem_registry.FilesystemRootRegistry, "__init__", checked_registry_init)
+    original_environment = files_service_client.OdysseusFilesClient._service_environment
+    def checked_environment(self):
+        environment = original_environment(self)
+        for name in ("OPEN_CLANK_DATA_DIR", "ODYSSEUS_DATA_DIR", "OPEN_CLANK_AUTHORITY_DB_PATH",
+                     "OPEN_CLANK_AUTHORITY_AUTH_PATH", "FM_DB_PATH", "ODYSSEUS_FILES_REGISTRY"):
+            if environment.get(name):
+                assert Path(environment[name]).resolve().is_relative_to(tmp_path.resolve()), name
+        return environment
+    monkeypatch.setattr(files_service_client.OdysseusFilesClient, "_service_environment", checked_environment)
+    close_all_clients()
+    repository = file_policy.FilePolicyRepository(paths["APP_DB"])
+    assert Path(repository.db_path).resolve().is_relative_to(tmp_path.resolve())
+    users = {name: {"account_id": f"account-s02a-{name}", "is_admin": name in {"administrator", "owner"}}
+             for name in ("administrator", "owner", "alice", "bob", "non-admin")}
+    Path(paths["AUTH_FILE"]).write_text(json.dumps({"users": users}), encoding="utf-8")
+    repository.sync_subjects(users)
+    assert tool_security.owner_is_admin_or_single_user("alice") is False
+    assert tool_security.owner_is_admin_or_single_user("bob") is False
+    assert tool_security.owner_is_admin_or_single_user("administrator") is True
+    yield repository
+    close_all_clients()
 
 
 @pytest.fixture
-def repo():
-    # Built under /tmp, which is on the default tool-path allowlist.
-    root = tempfile.mkdtemp(dir="/tmp", prefix="codenav_")
+def repo(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    (root / "sub" / "deep").mkdir(parents=True)
+    (root / ".hidden").mkdir()
+    for name, text in {"a.py": "import os\n# needle a*b here\nprint('x')\n",
+                       "sub/b.txt": "nothing\nNEEDLE upper ab\n",
+                       "sub/deep/c.py": "# deep python a*b\n",
+                       ".hidden/secret.py": "needle a*b\n",
+                       "sub/東京.py": "unicode\n"}.items():
+        (root / name).write_text(text, encoding="utf-8")
+    registry = FilesystemRootRegistry(tmp_path / "roots.json")
+    ceiling = registry.add("administrator", str(root), "recursive_directory", ["read"])
+    registry.assign_visibility("administrator", "alice", ceiling["id"], ["read"])
+    registry.add("alice", str(root), "recursive_directory", ["read"])
+    monkeypatch.setenv("ODYSSEUS_FILES_REGISTRY", str(registry.path))
+    monkeypatch.setenv("ODYSSEUS_FILES_SERVICE_BIN", str(Path(__file__).resolve().parents[1] / "packages/odysseus-files/target/debug/odysseus-files-service"))
+    token = tool_execution._active_workspace.set(str(root))
     try:
-        with open(os.path.join(root, "a.py"), "w") as f:
-            f.write("import os\n# needle here\nprint('x')\n")
-        os.mkdir(os.path.join(root, "sub"))
-        with open(os.path.join(root, "sub", "b.txt"), "w") as f:
-            f.write("nothing\nNEEDLE upper\n")
-        os.mkdir(os.path.join(root, "sub", "deep"))
-        with open(os.path.join(root, "sub", "deep", "c.py"), "w") as f:
-            f.write("# deep python\n")
-        os.mkdir(os.path.join(root, "node_modules"))
-        with open(os.path.join(root, "node_modules", "dep.py"), "w") as f:
-            f.write("needle in dep\n")
-        g = os.path.join(root, ".git")
-        os.mkdir(g)
-        with open(os.path.join(g, "config"), "w") as f:
-            f.write("needle in git\n")
         yield root
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        tool_execution._active_workspace.reset(token)
+        close_all_clients()
 
 
-# ── grep ──────────────────────────────────────────────────────────────────
-
-def test_grep_finds_match(repo):
-    r = _run("grep", f'{{"pattern": "needle", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "a.py:2:" in r["output"]
+def run(tool, repo, **args):
+    return asyncio.run(_direct_fallback(tool, json.dumps({"path": str(repo), **args}), owner="alice"))
 
 
-def test_grep_skips_junk_dirs(repo):
-    r = _run("grep", f'{{"pattern": "needle", "path": "{repo}"}}')
-    assert "node_modules" not in r["output"]
-    assert ".git/config" not in r["output"]
+def test_grep_returns_matching_files_not_line_occurrences(repo):
+    result = run("grep", repo, pattern="needle")
+    assert result["exit_code"] == 0
+    assert [row["path"] for row in result["matches"]] == [str(repo / "a.py")]
+    assert result["metadata"]["file"]["page"]["unit"] == "file"
 
 
-def test_grep_ignore_case(repo):
-    r = _run("grep", f'{{"pattern": "needle", "ignore_case": true, "path": "{repo}"}}')
-    assert "b.txt:2:" in r["output"]
+def test_literal_star_is_preserved(repo):
+    result = run("grep", repo, pattern="a*b")
+    assert {row["path"] for row in result["matches"]} == {str(repo / "a.py"), str(repo / "sub/deep/c.py")}
+    assert str(repo / "sub/b.txt") not in result["output"]
 
 
-def test_grep_glob_filter(repo):
-    r = _run("grep", f'{{"pattern": "needle", "ignore_case": true, "glob": "*.py", "path": "{repo}"}}')
-    assert "a.py" in r["output"]
-    assert "b.txt" not in r["output"]
+def test_ignore_case_and_glob_filter(repo):
+    result = run("grep", repo, pattern="needle", ignore_case=True, glob="*.py")
+    assert [row["path"] for row in result["matches"]] == [str(repo / "a.py")]
+    assert str(repo / "sub/b.txt") in run("grep", repo, pattern="needle", ignore_case=True)["output"]
 
 
-def test_grep_no_match(repo):
-    r = _run("grep", f'{{"pattern": "zzzznotfound", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "No matches" in r["output"]
+def test_literal_whitespace_is_preserved(repo):
+    assert run("grep", repo, pattern=" needle ")["matches"]
+    assert run("grep", repo, pattern=" needle  ")["matches"] == []
 
 
-def test_grep_requires_pattern(repo):
-    r = _run("grep", "{}")
-    assert r["exit_code"] == 1
-    assert "pattern is required" in r["error"]
+@pytest.mark.parametrize("pattern,expected", [
+    ("*.py", {"a.py", "sub/deep/c.py", "sub/東京.py"}),
+    ("**/*.py", {"a.py", "sub/deep/c.py", "sub/東京.py"}),
+    ("sub/*.py", {"sub/東京.py"}),
+    ("sub/**/c.py", {"sub/deep/c.py"}),
+    ("b.txt", {"sub/b.txt"}),
+    ("sub/??.py", {"sub/東京.py"}),
+])
+def test_real_glob_dialect(repo, pattern, expected):
+    result = run("glob", repo, pattern=pattern)
+    assert result["exit_code"] == 0
+    assert {str(Path(path).relative_to(repo)) for path in result["paths"]} == expected
+    assert result["search_mode"] == "glob"
 
 
-def test_grep_path_outside_roots_rejected(repo):
-    r = _run("grep", '{"pattern": "x", "path": "/etc"}')
-    assert r["exit_code"] == 1
-    assert "outside the allowed roots" in r["error"]
+@pytest.mark.parametrize("pattern", ["[bad", "{x,y}", "sub/**x.py", "../*.py"])
+def test_invalid_glob_is_error(repo, pattern):
+    result = run("glob", repo, pattern=pattern)
+    assert result["exit_code"] == 1
+    assert result["code"] == "malformed_request"
 
 
-def test_grep_python_fallback_when_no_rg(repo, monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda name: None)
-    r = _run("grep", f'{{"pattern": "needle", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "a.py:2:" in r["output"]
-    assert "node_modules" not in r["output"]
-    assert ".git/config" not in r["output"]
+def test_hidden_is_explicit(repo):
+    assert str(repo / ".hidden/secret.py") not in run("glob", repo, pattern="**/*.py")["output"]
+    assert str(repo / ".hidden/secret.py") in run("glob", repo, pattern="**/*.py", include_hidden=True)["output"]
 
 
-@pytest.mark.skipif(shutil.which("rg") is None, reason="targets the ripgrep fast-path")
-def test_grep_skips_case_variant_sensitive_files_rg(repo):
-    """The rg fast-path must exclude deny-listed key files case-insensitively.
-
-    A file whose name is a case variant of a sensitive pattern (e.g. ID_RSA vs
-    id_rsa, Known_Hosts vs known_hosts) points at the same secret on a
-    case-insensitive filesystem, so grep must not return its contents. The
-    Python fallback already folds case via _is_sensitive_path; a plain --glob
-    exclusion is case-sensitive, so it would leak these — this pins the rg path.
-    """
-    token = "GREPSECRET_TOKEN_ZZZ"
-    with open(os.path.join(repo, "notes.txt"), "w") as f:
-        f.write(f"see {token}\n")
-    with open(os.path.join(repo, "ID_RSA"), "w") as f:
-        f.write(f"PRIVATE {token}\n")
-    with open(os.path.join(repo, "Known_Hosts"), "w") as f:
-        f.write(f"host {token}\n")
-    r = _run("grep", f'{{"pattern": "{token}", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "notes.txt" in r["output"]        # ordinary matches still returned
-    assert "ID_RSA" not in r["output"]        # case-variant key excluded
-    assert "Known_Hosts" not in r["output"]
+def test_bounded_nonresumable_receipt(repo):
+    result = run("glob", repo, pattern="**/*.py", limit=1)
+    assert result["page"]["returned"] == 1
+    assert result["page"]["total"] is None
+    assert not result["page"]["resumable"]
+    assert not result["page"]["complete"]
+    assert result["metadata"]["file"]["page"] == result["page"]
+    assert result["continuation"]["supported"] is False
+    assert run("glob", repo, pattern="*.py", cursor=7)["code"] == "unsupported"
 
 
-# ── glob ──────────────────────────────────────────────────────────────────
-
-def test_glob_py(repo):
-    r = _run("glob", f'{{"pattern": "*.py", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "a.py" in r["output"]
+def test_regex_is_explicitly_unsupported(repo):
+    assert run("grep", repo, pattern="a.*b", mode="regex")["code"] == "unsupported"
 
 
-def test_glob_recursive_skips_junk(repo):
-    r = _run("glob", f'{{"pattern": "**/*.py", "path": "{repo}"}}')
-    assert "a.py" in r["output"]
-    assert "node_modules" not in r["output"]
+def test_no_match_is_complete_not_failure(repo):
+    result = run("grep", repo, pattern="zzzznotfound")
+    assert result["exit_code"] == 0 and result["matches"] == []
+    assert result["page"]["complete"] and result["page"]["total"] == 0
 
 
-def test_glob_requires_pattern(repo):
-    r = _run("glob", "{}")
-    assert r["exit_code"] == 1
+@pytest.mark.parametrize("tool", ["grep", "glob"])
+def test_pattern_required(repo, tool):
+    assert run(tool, repo)["exit_code"] == 1
 
 
-def test_glob_literal_in_subdir(repo):
-    """Bare literal should match at any depth (like rglob), not only at root."""
-    r = _run("glob", f'{{"pattern": "b.txt", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "b.txt" in r["output"]
+def test_search_wrong_owner_and_outside_root_denied(repo):
+    wrong = asyncio.run(_direct_fallback("grep", json.dumps({"pattern": "needle", "path": str(repo)}), owner="bob"))
+    assert wrong["exit_code"] == 1
+    outside = run("grep", repo.parent, pattern="needle")
+    assert outside["exit_code"] == 1
+    assert outside["code"] in {"denied", "outside_root"}
 
 
-def test_glob_multi_segment_single_star(repo):
-    """sub/*.txt matches sub/b.txt but NOT sub/deep/c.py (single * stays in one segment)."""
-    r = _run("glob", f'{{"pattern": "sub/*.txt", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "b.txt" in r["output"]
-    assert "c.py" not in r["output"]
+def test_ls_and_read_use_registered_authority(repo):
+    listing = run("ls", repo)
+    assert listing["exit_code"] == 0 and "a.py" in listing["output"]
+    result = run("read_file", repo / "a.py", offset=2, limit=1)
+    assert result["output"] == "# needle a*b here\n"
 
 
-def test_glob_star_does_not_cross_slash(repo):
-    """src/*.py must NOT match src/a/b/x.py — * is single-segment only."""
-    r = _run("glob", f'{{"pattern": "sub/*.py", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    # sub/ has no .py directly, only sub/deep/c.py — should NOT match
-    assert "No files matching" in r["output"]
+def test_transport_failure_remains_error(repo, monkeypatch):
+    from src.agent_tools import filesystem_tools
+    async def failed(*args, **kwargs):
+        return {"error": "fixture service unavailable", "exit_code": 1, "code": "service_unavailable"}
+    monkeypatch.setattr(filesystem_tools, "_agent_request", failed)
+    result = run("grep", repo, pattern="needle")
+    assert result["exit_code"] == 1 and result["code"] == "service_unavailable"
+    assert "No matches" not in result["error"]
 
 
-def test_glob_double_star_matches_deep(repo):
-    """**/*.py should match files at any depth."""
-    r = _run("glob", f'{{"pattern": "**/*.py", "path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "a.py" in r["output"]
-    assert "c.py" in r["output"]
-
-
-# ── ls ────────────────────────────────────────────────────────────────────
-
-def test_ls_lists_entries(repo):
-    r = _run("ls", f'{{"path": "{repo}"}}')
-    assert r["exit_code"] == 0
-    assert "a.py" in r["output"]
-    assert "sub/" in r["output"]
-    assert ".git" not in r["output"]  # hidden skipped
-
-
-def test_ls_path_outside_rejected(repo):
-    r = _run("ls", '{"path": "/etc"}')
-    assert r["exit_code"] == 1
-    assert "outside the allowed roots" in r["error"]
-
-
-# ── read_file line range ───────────────────────────────────────────────────
-
-def test_read_file_offset_limit(repo):
-    p = os.path.join(repo, "lines.txt")
-    with open(p, "w") as f:
-        f.write("\n".join(f"line{i}" for i in range(1, 11)) + "\n")
-    r = _run("read_file", f'{{"path": "{p}", "offset": 3, "limit": 2}}')
-    assert r["exit_code"] == 0
-    assert r["output"] == "line3\nline4\n"
-
-
-def test_read_file_plain_path_backcompat(repo):
-    r = _run("read_file", os.path.join(repo, "a.py"))
-    assert r["exit_code"] == 0
-    assert "needle" in r["output"]
+def test_empty_partial_result_is_not_complete_no_match(repo, monkeypatch):
+    from src.agent_tools import filesystem_tools
+    async def partial(*args, **kwargs):
+        return {"data": {"matches": [], "complete": False, "work": {"entries_visited": 10000}}}
+    monkeypatch.setattr(filesystem_tools, "_agent_request", partial)
+    result = run("grep", repo, pattern="unmatched")
+    assert result["page"]["total"] is None
+    assert result["page"]["complete"] is False
+    assert "scanned portion" in result["output"]
+    assert "Partial bounded search" in result["output"]
+    assert "continuation is unavailable" in result["output"]

@@ -1,14 +1,24 @@
 pub mod code;
+pub mod code_metrics;
+pub mod code_index_scheduler;
+pub mod code_evidence;
+pub mod code_query;
+pub mod code_visual;
 pub mod config;
 pub mod cue;
 pub mod curate;
 pub mod embed;
 pub mod graph;
 pub mod layer;
+pub mod ontology;
+pub mod privacy;
 pub mod provider;
 pub mod record;
+pub mod repository;
 pub mod retrieval;
 pub mod store;
 
 pub use config::FmConfig;
+pub use ontology::*;
 pub use record::*;
+pub use repository::*;

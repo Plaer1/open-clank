@@ -1,0 +1,1 @@
+Show shared [1,2] first; then a→[1,2], b→[9]; distinguish mutation from rebinding.

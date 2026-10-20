@@ -1,0 +1,105 @@
+{
+  "publication_version": 9,
+  "previous_version": 8,
+  "changed_files": [
+    "static/docs/media/editor-workbench/editor-workbench-master.jpg",
+    "static/docs/media/editor-workbench/preview.webp",
+    "static/docs/media/editor-file-picker/editor-file-picker-master.jpg",
+    "static/docs/media/editor-file-picker/preview.webp",
+    "static/docs/media/files-imps/files-host-context-master.jpg",
+    "static/docs/media/files-imps/preview.webp",
+    "src/openclank/official_docs_assets.py",
+    "src/openclank/official_docs_content.py",
+    "src/openclank/official_docs.py",
+    ".clanker/robonotes/files-workbench-qol-2026-10-02/11-docs-implementation.md",
+    "static/docs/media/files-workbench-20261002-manifest.json"
+  ],
+  "media": [
+    {
+      "asset_id": "editor-workbench",
+      "source_capture": "/tmp/openclank-files-workbench-20261002/captures/07-editor-final.jpg",
+      "master": {
+        "path": "static/docs/media/editor-workbench/editor-workbench-master.jpg",
+        "width": 1920,
+        "height": 1200,
+        "mime": "image/jpeg",
+        "sha256": "0414cbbe7cf745a4fbbf3f6c5f8ea5fc06638cf3bbfd501aedea224cb6ac39f2"
+      },
+      "delivery": {
+        "role": "image",
+        "url": "/static/docs/media/editor-workbench/preview.webp",
+        "mime": "image/webp",
+        "width": 1920,
+        "height": 1200,
+        "bytes": 97748
+      }
+    },
+    {
+      "asset_id": "editor-file-picker",
+      "source_capture": "/tmp/openclank-files-workbench-20261002/captures/08-picker-final.jpg",
+      "master": {
+        "path": "static/docs/media/editor-file-picker/editor-file-picker-master.jpg",
+        "width": 1920,
+        "height": 1200,
+        "mime": "image/jpeg",
+        "sha256": "60f91f55e7168c7deb8b246490a03fd6c466f292de12053d04805bf6c8742e8d"
+      },
+      "delivery": {
+        "role": "image",
+        "url": "/static/docs/media/editor-file-picker/preview.webp",
+        "mime": "image/webp",
+        "width": 1920,
+        "height": 1200,
+        "bytes": 99982
+      }
+    },
+    {
+      "asset_id": "files-imps",
+      "source_capture": "/tmp/openclank-files-workbench-20261002/captures/09-files-split-final.jpg",
+      "master": {
+        "path": "static/docs/media/files-imps/files-host-context-master.jpg",
+        "width": 1920,
+        "height": 1200,
+        "mime": "image/jpeg",
+        "sha256": "355cdfbdc163e79bcdacacc0db2ce8def9adf92569d1eb42cc78e1329301f273"
+      },
+      "delivery": {
+        "role": "image",
+        "url": "/static/docs/media/files-imps/preview.webp",
+        "mime": "image/webp",
+        "width": 1920,
+        "height": 1200,
+        "bytes": 97076
+      }
+    }
+  ],
+  "preimages": {
+    "static/docs/media/files-imps/files-host-context-master.jpg": {
+      "blob": "ea9392650958f94fd273ee6a05a768f8688d7e22",
+      "ref": "refs/codex-backups/files-workbench-20261002/docs/static-docs-media-files-imps-files-host-context-master.jpg-preimage-final01"
+    },
+    "static/docs/media/files-imps/preview.webp": {
+      "blob": "c329da5b4f8b603edfa8b97ea0fd9d511cc4aec1",
+      "ref": "refs/codex-backups/files-workbench-20261002/docs/static-docs-media-files-imps-preview.webp-preimage-final01"
+    },
+    "src/openclank/official_docs_assets.py": {
+      "blob": "ed571cc0993e98af1b98f8a889fad7ec3ac93b7d",
+      "ref": "refs/codex-backups/files-workbench-20261002/docs/src-openclank-official_docs_assets.py-preimage-final01"
+    },
+    "src/openclank/official_docs_content.py": {
+      "blob": "10945cebc3704d7434a9a2f65759bb323360c330",
+      "ref": "refs/codex-backups/files-workbench-20261002/docs/src-openclank-official_docs_content.py-preimage-final01"
+    },
+    "src/openclank/official_docs.py": {
+      "blob": "31dd2258eed7fee951a5fdccc509746adb4092ff",
+      "ref": "refs/codex-backups/files-workbench-20261002/docs/src-openclank-official_docs.py-preimage-final01"
+    }
+  },
+  "binding_dispositions": {
+    "editor-wiki": "Preserved for other Wiki/formatting articles; replaced on Editor article by current workbench and picker.",
+    "editor-context-actions": "Asset preserved; obsolete binding removed from Editor.",
+    "files-context-actions": "Asset preserved; obsolete binding removed from Files.",
+    "unrelated_assets": "Unchanged."
+  },
+  "qualification": "Root actual disposable-app CUA screenshots at native1920x1200; original JPEG bytes retained, WebP92 delivery only; no synthetic editing/upscale/clip claim."
+}

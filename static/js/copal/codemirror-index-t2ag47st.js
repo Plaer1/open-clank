@@ -1,0 +1,1 @@
+import{Q as a}from"./codemirror-openclank-codemirror-ms5pa58j.js";import"./codemirror-openclank-codemirror-7rktvhjm.js";import"./codemirror-openclank-codemirror-x4zbapeg.js";import"./codemirror-openclank-codemirror-jb760h44.js";export{a as parser};

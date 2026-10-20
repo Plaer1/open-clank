@@ -1,0 +1,1 @@
+Some(3) and None; handle both match branches.

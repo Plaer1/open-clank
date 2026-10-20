@@ -1,0 +1,1 @@
+Use an image you may edit in a disposable project. Make one visible layer change, save the project, export and reopen the export. Record project/export paths, dimensions, transparency and observed difference. Keep AI editing separate unless a provider run is explicitly chosen and produces an actual result.

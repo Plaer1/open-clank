@@ -1,0 +1,35 @@
+{
+  "id": "batch-022",
+  "group": "docs.openclank-docs-accounts-models",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1669,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-accounts-models.body",
+      "source": "# Accounts and Models\n\nOpen Clank is multi-account. Each account owns its own chats, documents, files\nand settings, so two people can share one installation without seeing each\nother's work.\n\n## Your account\n\nYour account is chosen at sign-in. Documents, tasks, memory and settings are\nscoped to that account. If you sign in as someone else you get their\nworkspace, not yours — nothing is merged.\n\nLocal installs without authentication map to a single local account. The\nCopal document store is still scoped per owner internally, so enabling\nauthentication later does not scramble existing data.\n\n## Choosing a model\n\nModels are configured in [Settings](clank://settings/providers). A provider is\nthe service that runs a model — a local runtime, or a hosted API you bring a\nkey for.\n\nPractical guidance:\n\n- Pick a small, fast model for quick edits and summaries.\n- Pick a stronger model for long reasoning, code or research.\n- Switch mid-conversation if a task grows; the transcript keeps both.\n\nCompare is available for side-by-side answers from two models on the same\nprompt. It is useful when you are deciding which model to keep.\n\n## What Open Clank does not do\n\n- It does not choose a model for you or silently fall back to a different\n  provider without telling you.\n- It does not send your documents to a provider unless a tool call or prompt\n  needs them.\n- It does not store provider API keys in your documents or in first-party\n  source.\n\nSee [[Limits and Platform Support]] for what runs where.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:154"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-accounts-models.title",
+      "source": "Accounts and Models",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:154"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

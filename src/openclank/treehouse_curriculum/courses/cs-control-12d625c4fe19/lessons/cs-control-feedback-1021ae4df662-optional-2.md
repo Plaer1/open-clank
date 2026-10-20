@@ -1,0 +1,1 @@
+State summarizes chosen variables; model boundaries determine which causes are included. Equilibrium means unchanged state. Robustness concerns behavior under specified perturbations; it differs from speed, fairness, or guaranteed recovery. Games develops stock/flow economies, emergence, intervention, and observer effects.

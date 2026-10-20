@@ -1,0 +1,1 @@
+Syntax alone does not establish purity: a called function may still have effects.

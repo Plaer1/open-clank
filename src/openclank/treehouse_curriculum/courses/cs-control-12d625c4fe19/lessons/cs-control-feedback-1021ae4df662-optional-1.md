@@ -1,0 +1,1 @@
+A negative multiplier changes direction; it does not guarantee stability.

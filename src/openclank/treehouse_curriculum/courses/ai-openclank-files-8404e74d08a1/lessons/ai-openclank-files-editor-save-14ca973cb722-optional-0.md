@@ -1,0 +1,1 @@
+With a writable scratch document, record its starting text, make one edit, Save, close/reopen and compare the persisted text. Keep the original recoverable. Record success only if the intended saved content is observed; a failed save remains a failed attempt.

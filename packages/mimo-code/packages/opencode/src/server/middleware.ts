@@ -2,6 +2,7 @@ import { Provider } from "../provider"
 import { NamedError } from "@mimo-ai/shared/util/error"
 import { NotFoundError } from "../storage"
 import { Session } from "../session"
+import * as GoalState from "../session/goal-state"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
 import type { ErrorHandler, MiddlewareHandler } from "hono"
 import { HTTPException } from "hono/http-exception"
@@ -11,6 +12,11 @@ import { basicAuth } from "hono/basic-auth"
 import { cors } from "hono/cors"
 import { compress } from "hono/compress"
 import { isPtyConnectPath, PTY_CONNECT_TICKET_QUERY } from "./pty-ticket"
+
+// Keep this path prefix a leaf constant: importing ./routes/instance/capability
+// pulls AppRuntime (Actor.appLayer) into the middleware graph and circularly
+// freezes BootstrapLayer while S06/S07 Effect integration is still open.
+const CAPABILITY_PREFIX = "/v1"
 
 const log = Log.create({ service: "server" })
 
@@ -27,7 +33,12 @@ export const ErrorMiddleware: ErrorHandler = (err, c) => {
     else status = 500
     return c.json(err.toObject(), { status })
   }
+  if (err instanceof Session.TitleConflictError) return c.json(err.toObject(), { status: 409 })
+  if (err instanceof Session.TitleRevisionError) return c.json({ success: false, data: { message: err.message }, errors: [{ message: err.message }] }, { status: 400 })
   if (err instanceof Session.BusyError) {
+    return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 409 })
+  }
+  if (err instanceof GoalState.ConflictError) {
     return c.json(new NamedError.Unknown({ message: err.message }).toObject(), { status: 409 })
   }
   if (err instanceof HTTPException) return err.getResponse()
@@ -35,6 +46,17 @@ export const ErrorMiddleware: ErrorHandler = (err, c) => {
   return c.json(new NamedError.Unknown({ message }).toObject(), {
     status: 500,
   })
+}
+
+/**
+ * Does this request carry something that could be a task token?
+ *
+ * Only a presence check — validity is the route's job. Deciding here would duplicate the
+ * token store's logic in a middleware that runs for every request, including ones that have
+ * nothing to do with models.
+ */
+function presentsToken(...headers: (string | undefined)[]) {
+  return headers.some((value) => (value ?? "").trim().length > 0)
 }
 
 export const AuthMiddleware: MiddlewareHandler = (c, next) => {
@@ -45,6 +67,15 @@ export const AuthMiddleware: MiddlewareHandler = (c, next) => {
   // PTY websocket connect with a ticket skips basic auth; the handler validates the ticket.
   const path = new URL(c.req.url).pathname
   if (isPtyConnectPath(path) && c.req.query(PTY_CONNECT_TICKET_QUERY)) return next()
+
+  // Same carve-out, same reason: the model routes are authenticated by a minted task token,
+  // which the handler validates ALWAYS — including when no server password is set, where
+  // this middleware waves everything through. A task holds that token and not the server
+  // password, so requiring basic auth here would make the surface unreachable by the only
+  // clients it exists for.
+  if (path.startsWith(CAPABILITY_PREFIX + "/") && presentsToken(c.req.header("authorization"), c.req.header("x-api-key"), c.req.header("api-key"))) {
+    return next()
+  }
 
   const username = Flag.MIMOCODE_SERVER_USERNAME ?? "mimocode"
 

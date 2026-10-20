@@ -1,0 +1,1 @@
+For divisible surplus and a specified feasible utility set, Nash bargaining selects a feasible agreement by maximizing the product of gains over disagreement under its assumptions. In the two-player transferable example with fallback (2,0), equal surplus gains yield (4,2). A different fallback changes the result; this is a model, not a guarantee of fair negotiation.

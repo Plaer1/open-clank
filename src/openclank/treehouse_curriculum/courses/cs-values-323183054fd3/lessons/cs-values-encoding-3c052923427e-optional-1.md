@@ -1,0 +1,1 @@
+Do not count displayed glyphs as a guaranteed count of stored code points.

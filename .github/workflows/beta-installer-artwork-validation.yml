@@ -1,0 +1,113 @@
+name: Existing Windows installer artwork validation
+
+on:
+  push:
+    branches: [codex/beta1-installer-artwork-validation-20261006]
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful same-repository native Windows build run ID
+        required: true
+        type: string
+      build_source_sha:
+        description: Exact reviewed source SHA of that successful build
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: installer-artwork-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  artwork:
+    if: github.ref == 'refs/heads/codex/beta1-installer-artwork-validation-20261006'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-latest
+            architecture: x64
+          - target: windows-arm64
+            runner: windows-11-arm
+            architecture: arm64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      BUILD_RUN_ID: ${{ inputs.build_run_id || '' }}
+      BUILD_SOURCE_SHA: ${{ inputs.build_source_sha || '' }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13.16'
+          architecture: ${{ matrix.architecture }}
+      - name: Admit exact successful native installer artifact without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:BUILD_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Bind an explicitly reviewed successful build run/source pair before pushing this validation branch; no latest-run discovery or failed defaults.' }
+          python -I -c "import platform; assert platform.machine().lower() in ('${{ matrix.architecture }}', '${{ matrix.architecture == 'x64' && 'amd64' || 'aarch64' }}')"
+          if ($LASTEXITCODE -ne 0) { throw 'Validation Python must match the native target.' }
+          $root = Join-Path $env:RUNNER_TEMP "installer-artifact-$env:RELEASE_TARGET"
+          python -B scripts/verify_windows_installer_artifact.py --run-id $env:BUILD_RUN_ID --source $env:BUILD_SOURCE_SHA --target $env:RELEASE_TARGET --output $root --receipt "dist/artifact-admission-$env:RELEASE_TARGET.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Existing native artifact failed exact run/source/target/checksum/provenance admission.' }
+      - name: Reserve space for preserved artwork and both installation modes
+        run: |
+          @'
+          import json, os, shutil
+          from pathlib import Path
+          target = os.environ['RELEASE_TARGET']
+          admission = json.loads(Path('dist/artifact-admission-' + target + '.json').read_text())
+          pin = json.loads(Path('static/vendor/google-emoji/bundle-manifest.json').read_text())
+          required = admission['payload_bytes'] + 4 * pin['pack_bytes'] + 1024**3
+          if shutil.disk_usage(os.environ['RUNNER_TEMP']).free < required:
+              raise SystemExit('Insufficient native runner disk for supplied parts, preserved packs, default download and assembly')
+          print('Sequential artwork installation disk reservation passed')
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Keep all existing evidence; do not start artwork installation without its disk budget.' }
+      - name: Acquire matching existing artwork parts for the second installer journey
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $parts = Join-Path $env:RUNNER_TEMP "artwork-parts-$env:RELEASE_TARGET"
+          gh release download v1.0.2-beta.1-artwork --repo $env:GITHUB_REPOSITORY --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir $parts
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned supporting artwork download failed.' }
+      - name: Qualify default download and existing-parts installs using the same Setup
+        run: |
+          @'
+          import json, os, shutil
+          from pathlib import Path
+          target = os.environ['RELEASE_TARGET']
+          admission = json.loads(Path('dist/artifact-admission-' + target + '.json').read_text())
+          pin = json.loads(Path('static/vendor/google-emoji/bundle-manifest.json').read_text())
+          required = admission['payload_bytes'] + 3 * pin['pack_bytes'] + 1024**3
+          if shutil.disk_usage(os.environ['RUNNER_TEMP']).free < required:
+              raise SystemExit('Insufficient remaining disk to retain the first verified pack during the second install')
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { throw 'Sequential artwork installation disk reservation no longer holds.' }
+          $record = Get-Content "dist/artifact-admission-$env:RELEASE_TARGET.json" -Raw | ConvertFrom-Json
+          $root = Join-Path $env:RUNNER_TEMP "installer-artifact-$env:RELEASE_TARGET"
+          $installer = Join-Path $root (Join-Path installers $record.installer_name)
+          $parts = Join-Path $env:RUNNER_TEMP "artwork-parts-$env:RELEASE_TARGET"
+          python -B scripts/qualify_windows_installer_artwork.py --installer $installer --target $env:RELEASE_TARGET --parts $parts --output "dist/artwork-qualification-$env:RELEASE_TARGET"
+          if ($LASTEXITCODE -ne 0) { throw 'Actual default-download/existing-parts installer artwork qualification failed.' }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Installer-artwork-${{ matrix.target }}
+          path: |
+            dist/artifact-admission-${{ matrix.target }}.json
+            dist/artwork-qualification-${{ matrix.target }}/receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

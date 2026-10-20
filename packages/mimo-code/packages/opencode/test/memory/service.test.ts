@@ -1,4 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
+import type { McpServer } from "@agentclientprotocol/sdk"
 import { Effect, Layer } from "effect"
 import * as fs from "fs/promises"
 import path from "path"
@@ -6,6 +7,10 @@ import { Database } from "../../src/storage"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { MemoryFtsTable } from "../../src/memory/fts.sql"
 import { Memory } from "../../src/memory"
+import {
+  registerMemorySessionScope,
+  unregisterMemorySessionScope,
+} from "../../src/memory/session-scope"
 import { Instance } from "../../src/project/instance"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -164,6 +169,53 @@ describe("Memory.search", () => {
         const empty = yield* memory.search({ query: "   " })
         expect(empty.length).toBe(0)
       }),
+    ),
+  )
+
+  it.live("a mixed-tenant process degrades reconcile-on-search instead of failing search", () =>
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const memory = yield* Memory.Service
+          const root = yield* memory.root()
+          yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
+          yield* Effect.promise(() => fs.mkdir(path.join(root, "global"), { recursive: true }))
+          yield* Effect.promise(() =>
+            fs.writeFile(path.join(root, "global", "tenant.md"), "mixed tenant native rows survive"),
+          )
+
+          // Index the file while the process is still single-tenant.
+          const seeded = yield* memory.search({ query: "mixed tenant", scope: "global" })
+          expect(seeded.length).toBe(1)
+
+          // A second tenant turns uniqueMemorySessionScope() (used by the
+          // reconcile-time fm ingest scope) into a throw. The native leg must
+          // still serve rows from the last good index.
+          const descriptor = (owner: string): McpServer =>
+            ({
+              name: `lifetools_${owner}`,
+              command: "python",
+              args: [],
+              env: [
+                { name: "FM_OWNER", value: owner },
+                { name: "FM_WORKSPACE_ID", value: "global" },
+              ],
+            }) as McpServer
+          registerMemorySessionScope("mixed-tenant-alice", [descriptor("alice")], "/w/alice")
+          registerMemorySessionScope("mixed-tenant-bob", [descriptor("bob")], "/w/bob")
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              unregisterMemorySessionScope("mixed-tenant-alice")
+              unregisterMemorySessionScope("mixed-tenant-bob")
+            }),
+          )
+
+          const results = yield* memory.search({ query: "mixed tenant", scope: "global" })
+          expect(results.length).toBe(1)
+          expect(results[0].path).toContain("tenant.md")
+          expect(results[0].backend).toBe("mimo")
+        }),
+      { config: { memory: { provider: "frankenmemory" } } },
     ),
   )
 })

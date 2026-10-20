@@ -1,0 +1,86 @@
+{
+  "id": "batch-083",
+  "group": "ui-misc",
+  "surface": "ui-misc",
+  "entry_count": 6,
+  "character_count": 758,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.your.base.value.latest.value",
+      "source": "Your base: {0} · latest: {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.detected.hardware.appears.here.you.can.also.manually.edit",
+      "source": "Your detected hardware appears here. You can also manually edit it to see what would fit on other setups.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/slashCommands.js:2856"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.hard.working.sidekick.runs.background.tasks.compaction.cleanup.auto",
+      "source": "— your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn't burn cycles on chores.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/slashCommands.js:3336"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.your.hub.for",
+      "source": "Your hub for",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/slashCommands.js:4629"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.story.is.empty",
+      "source": "Your story is empty",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:1062"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.unsaved.version",
+      "source": "Your unsaved version",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/copal.js:418"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

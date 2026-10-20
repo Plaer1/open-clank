@@ -1,0 +1,424 @@
+diff --git a/dist/index.js b/dist/index.js
+index dca128d..a334cd0 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -114,9 +114,20 @@ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
++    case "audio/x-wav":
++      return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/flac":
++    case "audio/x-flac":
++      return "flac";
++    case "audio/mp4":
++    case "audio/m4a":
++    case "audio/x-m4a":
++      return "m4a";
++    case "audio/ogg":
++      return "ogg";
+     default:
+       return null;
+   }
+@@ -196,6 +207,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new import_provider.UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${(0, import_provider_utils.convertToBase64)(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     (0, import_provider_utils.convertBase64ToUint8Array)(part.data)
+@@ -765,98 +790,45 @@ var OpenAICompatibleChatLanguageModel = class {
+               }
+               for (const toolCallDelta of delta.tool_calls) {
+                 const index = (_c = toolCallDelta.index) != null ? _c : toolCalls.length;
+-                if (toolCalls[index] == null) {
+-                  if (toolCallDelta.id == null) {
+-                    throw new import_provider3.InvalidResponseDataError({
+-                      data: toolCallDelta,
+-                      message: `Expected 'id' to be a string.`
+-                    });
+-                  }
+-                  if (((_d = toolCallDelta.function) == null ? void 0 : _d.name) == null) {
+-                    throw new import_provider3.InvalidResponseDataError({
+-                      data: toolCallDelta,
+-                      message: `Expected 'function.name' to be a string.`
+-                    });
+-                  }
++                const toolCall = toolCalls[index] ??= {
++                  id: undefined,
++                  type: "function",
++                  function: { name: undefined, arguments: "" },
++                  hasFinished: false,
++                  hasStarted: false,
++                  lastValidDelta: undefined,
++                  thoughtSignature: undefined
++                };
++                toolCall.id ||= toolCallDelta.id;
++                toolCall.function.name ||= toolCallDelta.function.name;
++                toolCall.function.arguments += toolCallDelta.function.arguments ?? "";
++                toolCall.thoughtSignature ??= toolCallDelta.extra_content?.google?.thought_signature;
++                if (toolCallDelta.function.arguments != null && (0, import_provider_utils2.isParsableJson)(toolCallDelta.function.arguments)) {
++                  toolCall.lastValidDelta = toolCallDelta.function.arguments;
++                }
++                // Buffer incomplete headers so a later upstream ID remains authoritative.
++                if (!toolCall.hasStarted) {
++                  if (!toolCall.id || !toolCall.function.name) continue;
+                   controller.enqueue({
+                     type: "tool-input-start",
+-                    id: toolCallDelta.id,
+-                    toolName: toolCallDelta.function.name
++                    id: toolCall.id,
++                    toolName: toolCall.function.name
+                   });
+-                  toolCalls[index] = {
+-                    id: toolCallDelta.id,
+-                    type: "function",
+-                    function: {
+-                      name: toolCallDelta.function.name,
+-                      arguments: (_e = toolCallDelta.function.arguments) != null ? _e : ""
+-                    },
+-                    hasFinished: false,
+-                    thoughtSignature: (_h = (_g = (_f = toolCallDelta.extra_content) == null ? void 0 : _f.google) == null ? void 0 : _g.thought_signature) != null ? _h : void 0
+-                  };
+-                  const toolCall2 = toolCalls[index];
+-                  if (((_i = toolCall2.function) == null ? void 0 : _i.name) != null && ((_j = toolCall2.function) == null ? void 0 : _j.arguments) != null) {
+-                    if (toolCall2.function.arguments.length > 0) {
+-                      controller.enqueue({
+-                        type: "tool-input-delta",
+-                        id: toolCall2.id,
+-                        delta: toolCall2.function.arguments
+-                      });
+-                    }
+-                    if ((0, import_provider_utils2.isParsableJson)(toolCall2.function.arguments)) {
+-                      controller.enqueue({
+-                        type: "tool-input-end",
+-                        id: toolCall2.id
+-                      });
+-                      controller.enqueue({
+-                        type: "tool-call",
+-                        toolCallId: (_k = toolCall2.id) != null ? _k : (0, import_provider_utils2.generateId)(),
+-                        toolName: toolCall2.function.name,
+-                        input: toolCall2.function.arguments,
+-                        ...toolCall2.thoughtSignature ? {
+-                          providerMetadata: {
+-                            [providerOptionsName]: {
+-                              thoughtSignature: toolCall2.thoughtSignature
+-                            }
+-                          }
+-                        } : {}
+-                      });
+-                      toolCall2.hasFinished = true;
+-                    }
++                  toolCall.hasStarted = true;
++                  if (toolCall.function.arguments.length > 0) {
++                    controller.enqueue({
++                      type: "tool-input-delta",
++                      id: toolCall.id,
++                      delta: toolCall.function.arguments
++                    });
+                   }
+                   continue;
+                 }
+-                const toolCall = toolCalls[index];
+-                if (toolCall.hasFinished) {
+-                  continue;
+-                }
+-                if (((_l = toolCallDelta.function) == null ? void 0 : _l.arguments) != null) {
+-                  toolCall.function.arguments += (_n = (_m = toolCallDelta.function) == null ? void 0 : _m.arguments) != null ? _n : "";
+-                }
+                 controller.enqueue({
+                   type: "tool-input-delta",
+                   id: toolCall.id,
+-                  delta: (_o = toolCallDelta.function.arguments) != null ? _o : ""
++                  delta: toolCallDelta.function.arguments ?? ""
+                 });
+-                if (((_p = toolCall.function) == null ? void 0 : _p.name) != null && ((_q = toolCall.function) == null ? void 0 : _q.arguments) != null && (0, import_provider_utils2.isParsableJson)(toolCall.function.arguments)) {
+-                  controller.enqueue({
+-                    type: "tool-input-end",
+-                    id: toolCall.id
+-                  });
+-                  controller.enqueue({
+-                    type: "tool-call",
+-                    toolCallId: (_r = toolCall.id) != null ? _r : (0, import_provider_utils2.generateId)(),
+-                    toolName: toolCall.function.name,
+-                    input: toolCall.function.arguments,
+-                    ...toolCall.thoughtSignature ? {
+-                      providerMetadata: {
+-                        [providerOptionsName]: {
+-                          thoughtSignature: toolCall.thoughtSignature
+-                        }
+-                      }
+-                    } : {}
+-                  });
+-                  toolCall.hasFinished = true;
+-                }
+               }
+             }
+           },
+@@ -871,6 +843,28 @@ var OpenAICompatibleChatLanguageModel = class {
+             for (const toolCall of toolCalls.filter(
+               (toolCall2) => !toolCall2.hasFinished
+             )) {
++              if (!toolCall.function.name) {
++                throw new import_provider3.InvalidResponseDataError({
++                  data: toolCall,
++                  message: `Expected 'function.name' to be a string.`
++                });
++              }
++              if (!toolCall.hasStarted) {
++                // Match doGenerate's fallback, using one ID for every tool event.
++                toolCall.id ||= (0, import_provider_utils2.generateId)();
++                controller.enqueue({
++                  type: "tool-input-start",
++                  id: toolCall.id,
++                  toolName: toolCall.function.name
++                });
++                if (toolCall.function.arguments.length > 0) {
++                  controller.enqueue({
++                    type: "tool-input-delta",
++                    id: toolCall.id,
++                    delta: toolCall.function.arguments
++                  });
++                }
++              }
+               controller.enqueue({
+                 type: "tool-input-end",
+                 id: toolCall.id
+@@ -879,7 +873,7 @@ var OpenAICompatibleChatLanguageModel = class {
+                 type: "tool-call",
+                 toolCallId: (_a2 = toolCall.id) != null ? _a2 : (0, import_provider_utils2.generateId)(),
+                 toolName: toolCall.function.name,
+-                input: toolCall.function.arguments,
++                input: (0, import_provider_utils2.isParsableJson)(toolCall.function.arguments) ? toolCall.function.arguments : (toolCall.lastValidDelta != null ? toolCall.lastValidDelta : toolCall.function.arguments),
+                 ...toolCall.thoughtSignature ? {
+                   providerMetadata: {
+                     [providerOptionsName]: {
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 3b1e1b6..39eb18c 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -99,9 +99,20 @@ function getAudioFormat(mediaType) {
+   switch (mediaType) {
+     case "audio/wav":
+       return "wav";
++    case "audio/x-wav":
++      return "wav";
+     case "audio/mp3":
+     case "audio/mpeg":
+       return "mp3";
++    case "audio/flac":
++    case "audio/x-flac":
++      return "flac";
++    case "audio/mp4":
++    case "audio/m4a":
++    case "audio/x-m4a":
++      return "m4a";
++    case "audio/ogg":
++      return "ogg";
+     default:
+       return null;
+   }
+@@ -181,6 +192,20 @@ function convertToOpenAICompatibleChatMessages(prompt) {
+                     ...partMetadata
+                   };
+                 }
++                if (part.mediaType.startsWith("video/")) {
++                  if (part.data instanceof URL) {
++                    throw new UnsupportedFunctionalityError({
++                      functionality: "video file parts with URLs"
++                    });
++                  }
++                  return {
++                    type: "video_url",
++                    video_url: {
++                      url: `data:${part.mediaType};base64,${convertToBase64(part.data)}`
++                    },
++                    ...partMetadata
++                  };
++                }
+                 if (part.mediaType.startsWith("text/")) {
+                   const textContent = part.data instanceof URL ? part.data.toString() : typeof part.data === "string" ? new TextDecoder().decode(
+                     convertBase64ToUint8Array(part.data)
+@@ -752,98 +777,45 @@ var OpenAICompatibleChatLanguageModel = class {
+               }
+               for (const toolCallDelta of delta.tool_calls) {
+                 const index = (_c = toolCallDelta.index) != null ? _c : toolCalls.length;
+-                if (toolCalls[index] == null) {
+-                  if (toolCallDelta.id == null) {
+-                    throw new InvalidResponseDataError({
+-                      data: toolCallDelta,
+-                      message: `Expected 'id' to be a string.`
+-                    });
+-                  }
+-                  if (((_d = toolCallDelta.function) == null ? void 0 : _d.name) == null) {
+-                    throw new InvalidResponseDataError({
+-                      data: toolCallDelta,
+-                      message: `Expected 'function.name' to be a string.`
+-                    });
+-                  }
++                const toolCall = toolCalls[index] ??= {
++                  id: undefined,
++                  type: "function",
++                  function: { name: undefined, arguments: "" },
++                  hasFinished: false,
++                  hasStarted: false,
++                  lastValidDelta: undefined,
++                  thoughtSignature: undefined
++                };
++                toolCall.id ||= toolCallDelta.id;
++                toolCall.function.name ||= toolCallDelta.function.name;
++                toolCall.function.arguments += toolCallDelta.function.arguments ?? "";
++                toolCall.thoughtSignature ??= toolCallDelta.extra_content?.google?.thought_signature;
++                if (toolCallDelta.function.arguments != null && isParsableJson(toolCallDelta.function.arguments)) {
++                  toolCall.lastValidDelta = toolCallDelta.function.arguments;
++                }
++                // Buffer incomplete headers so a later upstream ID remains authoritative.
++                if (!toolCall.hasStarted) {
++                  if (!toolCall.id || !toolCall.function.name) continue;
+                   controller.enqueue({
+                     type: "tool-input-start",
+-                    id: toolCallDelta.id,
+-                    toolName: toolCallDelta.function.name
++                    id: toolCall.id,
++                    toolName: toolCall.function.name
+                   });
+-                  toolCalls[index] = {
+-                    id: toolCallDelta.id,
+-                    type: "function",
+-                    function: {
+-                      name: toolCallDelta.function.name,
+-                      arguments: (_e = toolCallDelta.function.arguments) != null ? _e : ""
+-                    },
+-                    hasFinished: false,
+-                    thoughtSignature: (_h = (_g = (_f = toolCallDelta.extra_content) == null ? void 0 : _f.google) == null ? void 0 : _g.thought_signature) != null ? _h : void 0
+-                  };
+-                  const toolCall2 = toolCalls[index];
+-                  if (((_i = toolCall2.function) == null ? void 0 : _i.name) != null && ((_j = toolCall2.function) == null ? void 0 : _j.arguments) != null) {
+-                    if (toolCall2.function.arguments.length > 0) {
+-                      controller.enqueue({
+-                        type: "tool-input-delta",
+-                        id: toolCall2.id,
+-                        delta: toolCall2.function.arguments
+-                      });
+-                    }
+-                    if (isParsableJson(toolCall2.function.arguments)) {
+-                      controller.enqueue({
+-                        type: "tool-input-end",
+-                        id: toolCall2.id
+-                      });
+-                      controller.enqueue({
+-                        type: "tool-call",
+-                        toolCallId: (_k = toolCall2.id) != null ? _k : generateId(),
+-                        toolName: toolCall2.function.name,
+-                        input: toolCall2.function.arguments,
+-                        ...toolCall2.thoughtSignature ? {
+-                          providerMetadata: {
+-                            [providerOptionsName]: {
+-                              thoughtSignature: toolCall2.thoughtSignature
+-                            }
+-                          }
+-                        } : {}
+-                      });
+-                      toolCall2.hasFinished = true;
+-                    }
++                  toolCall.hasStarted = true;
++                  if (toolCall.function.arguments.length > 0) {
++                    controller.enqueue({
++                      type: "tool-input-delta",
++                      id: toolCall.id,
++                      delta: toolCall.function.arguments
++                    });
+                   }
+                   continue;
+                 }
+-                const toolCall = toolCalls[index];
+-                if (toolCall.hasFinished) {
+-                  continue;
+-                }
+-                if (((_l = toolCallDelta.function) == null ? void 0 : _l.arguments) != null) {
+-                  toolCall.function.arguments += (_n = (_m = toolCallDelta.function) == null ? void 0 : _m.arguments) != null ? _n : "";
+-                }
+                 controller.enqueue({
+                   type: "tool-input-delta",
+                   id: toolCall.id,
+-                  delta: (_o = toolCallDelta.function.arguments) != null ? _o : ""
++                  delta: toolCallDelta.function.arguments ?? ""
+                 });
+-                if (((_p = toolCall.function) == null ? void 0 : _p.name) != null && ((_q = toolCall.function) == null ? void 0 : _q.arguments) != null && isParsableJson(toolCall.function.arguments)) {
+-                  controller.enqueue({
+-                    type: "tool-input-end",
+-                    id: toolCall.id
+-                  });
+-                  controller.enqueue({
+-                    type: "tool-call",
+-                    toolCallId: (_r = toolCall.id) != null ? _r : generateId(),
+-                    toolName: toolCall.function.name,
+-                    input: toolCall.function.arguments,
+-                    ...toolCall.thoughtSignature ? {
+-                      providerMetadata: {
+-                        [providerOptionsName]: {
+-                          thoughtSignature: toolCall.thoughtSignature
+-                        }
+-                      }
+-                    } : {}
+-                  });
+-                  toolCall.hasFinished = true;
+-                }
+               }
+             }
+           },
+@@ -858,6 +830,28 @@ var OpenAICompatibleChatLanguageModel = class {
+             for (const toolCall of toolCalls.filter(
+               (toolCall2) => !toolCall2.hasFinished
+             )) {
++              if (!toolCall.function.name) {
++                throw new InvalidResponseDataError({
++                  data: toolCall,
++                  message: `Expected 'function.name' to be a string.`
++                });
++              }
++              if (!toolCall.hasStarted) {
++                // Match doGenerate's fallback, using one ID for every tool event.
++                toolCall.id ||= generateId();
++                controller.enqueue({
++                  type: "tool-input-start",
++                  id: toolCall.id,
++                  toolName: toolCall.function.name
++                });
++                if (toolCall.function.arguments.length > 0) {
++                  controller.enqueue({
++                    type: "tool-input-delta",
++                    id: toolCall.id,
++                    delta: toolCall.function.arguments
++                  });
++                }
++              }
+               controller.enqueue({
+                 type: "tool-input-end",
+                 id: toolCall.id
+@@ -866,7 +860,7 @@ var OpenAICompatibleChatLanguageModel = class {
+                 type: "tool-call",
+                 toolCallId: (_a2 = toolCall.id) != null ? _a2 : generateId(),
+                 toolName: toolCall.function.name,
+-                input: toolCall.function.arguments,
++                input: isParsableJson(toolCall.function.arguments) ? toolCall.function.arguments : (toolCall.lastValidDelta != null ? toolCall.lastValidDelta : toolCall.function.arguments),
+                 ...toolCall.thoughtSignature ? {
+                   providerMetadata: {
+                     [providerOptionsName]: {

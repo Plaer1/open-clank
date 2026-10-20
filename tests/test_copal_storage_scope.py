@@ -30,11 +30,11 @@ def test_copal_storage_namespace_matrix():
     )
 
 
-def test_account_switch_wipes_global_state_but_preserves_scoped_copal_state():
+def test_account_switch_wipes_global_state_but_preserves_scoped_owner_state():
     for relative in ("static/login.html", "static/js/init.js", "static/js/settings.js"):
         source = (ROOT / relative).read_text(encoding="utf-8")
-        assert "key.includes(':scope:')" in source or "k.includes(':scope:')" in source
-        assert "!scopedCopalState" in source
+        assert "includes(':scope:')" in source
+        assert "!scopedOwnerState" in source
 
 
 def test_copal_status_bootstrap_retries_only_transient_failures():

@@ -1,0 +1,5 @@
+error: #[derive(FfiError)] requires #[ffi_code(N)] attribute
+ --> tests/compile_fail/ffi_derive_missing_attr.rs:2:8
+  |
+2 | struct BadFfi;
+  |        ^^^^^^

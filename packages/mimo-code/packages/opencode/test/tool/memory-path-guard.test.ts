@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import * as path from "path"
-import { assertMemoryWriteAllowed } from "../../src/tool/memory-path-guard"
+import { assertMemoryWriteAllowed, assertAgentWriteSandbox } from "../../src/tool/memory-path-guard"
 import { ProjectID } from "../../src/project/schema"
 import { SessionID } from "../../src/session/schema"
 import {
@@ -591,4 +591,142 @@ describe("assertMemoryWriteAllowed", () => {
       expect(tail).toBe(path.join("sessions", "sid", "checkpoint.md"))
     })
   })
+})
+
+describe("assertAgentWriteSandbox", () => {
+  const WORKTREE = "/repo"
+
+  test("non-sandboxed agent may write anywhere", () => {
+    expect(() =>
+      assertAgentWriteSandbox({
+        target: "/repo/src/index.ts",
+        agentName: "build",
+        memoryRoot: MEMORY_ROOT,
+        worktree: WORKTREE,
+      }),
+    ).not.toThrow()
+  })
+
+  test("checkpoint-writer may write under the memory tree", () => {
+    expect(() =>
+      assertAgentWriteSandbox({
+        target: path.join(MEMORY_ROOT, "sessions", "sid", "checkpoint.md"),
+        agentName: "checkpoint-writer",
+        memoryRoot: MEMORY_ROOT,
+        worktree: WORKTREE,
+      }),
+    ).not.toThrow()
+  })
+
+  test("checkpoint-writer may NOT write a source file", () => {
+    expect(() =>
+      assertAgentWriteSandbox({
+        target: path.join(WORKTREE, "src", "index.ts"),
+        agentName: "checkpoint-writer",
+        memoryRoot: MEMORY_ROOT,
+        worktree: WORKTREE,
+      }),
+    ).toThrow(/may only write under the memory tree/)
+  })
+
+  test("checkpoint-writer may NOT write under <worktree>/.mimocode", () => {
+    expect(() =>
+      assertAgentWriteSandbox({
+        target: path.join(WORKTREE, ".mimocode", "skills", "unsafe", "SKILL.md"),
+        agentName: "checkpoint-writer",
+        memoryRoot: MEMORY_ROOT,
+        worktree: WORKTREE,
+      }),
+    ).toThrow(/may only write under the memory tree/)
+  })
+
+  for (const agent of ["dream", "distill"] as const) {
+    test(`${agent} may write under the memory tree`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(MEMORY_ROOT, "projects", "p", "MEMORY.md"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).not.toThrow()
+    })
+
+    test(`${agent} may write under <worktree>/.mimocode`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(WORKTREE, ".mimocode", "skills", "foo", "SKILL.md"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).not.toThrow()
+    })
+
+    test(`${agent} may NOT write a source file in the worktree`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(WORKTREE, "src", "index.ts"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).toThrow(/may only write/)
+    })
+
+    test(`${agent} may NOT write an arbitrary external path`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: "/etc/passwd",
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).toThrow(/may only write/)
+    })
+
+    test(`${agent} may NOT escape .mimocode via .. into a source file`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(WORKTREE, ".mimocode", "..", "src", "index.ts"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).toThrow(/may only write/)
+    })
+
+    test(`${agent} may NOT escape the memory tree via ..`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(MEMORY_ROOT, "..", "secret.txt"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).toThrow(/may only write/)
+    })
+
+    test(`${agent} unnormalized-but-in-bounds path still passes`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: path.join(WORKTREE, ".mimocode", "skills", "..", "agent", "x.md"),
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).not.toThrow()
+    })
+
+    test(`${agent} sibling of memory root does not match by prefix`, () => {
+      expect(() =>
+        assertAgentWriteSandbox({
+          target: MEMORY_ROOT + "-evil/x.md",
+          agentName: agent,
+          memoryRoot: MEMORY_ROOT,
+          worktree: WORKTREE,
+        }),
+      ).toThrow(/may only write/)
+    })
+  }
 })

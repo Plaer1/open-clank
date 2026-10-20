@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // ============================================
 // COOKBOOK RUNNING SUB-MODULE
 // Running tasks tab: task cards, status monitoring,
@@ -9,6 +10,7 @@ import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis
 import { registerMenuDismiss } from './escMenuStack.js';
 import { computeProgressSignal } from './cookbookProgressSignal.js';
 import { portOf, nextFreePort } from './cookbookPorts.js';
+import { topPortalZ } from './toolWindowZOrder.js';
 
 // Human-friendly badge label for a task's internal status. Avoids surfacing
 // the word "error" in the sidebar — a server the user stopped or one that
@@ -20,6 +22,18 @@ function _statusLabel(status, type) {
   return status || '';
 }
 
+function _downloadBadgeText(progress) {
+  const raw = String(progress || '').trim();
+  if (!raw) return 'downloading';
+  const pct = raw.match(/(\d+)%/);
+  if (pct) return pct[0];
+  if (/^(?:Downloading|Fetching|Resuming)\s+'[^']+'\s+to\s+'[^']+/i.test(raw)
+    || /^Downloading\s*\(incomplete\b/i.test(raw)) {
+    return 'downloading';
+  }
+  return raw;
+}
+
 // Single source of truth for what a task's status badge shows + its style class.
 // Crucially, a serve task that's still coming up shows its live phase
 // ("loading 45%", "warming up", …) rather than the generic "running" — they're
@@ -29,8 +43,7 @@ function _statusLabel(status, type) {
 function _taskBadge(task) {
   if (task._unreachable && task.status === 'running') return { text: 'unreachable', cls: 'cookbook-task-error' };
   if (task.type === 'download' && task.status === 'running') {
-    const progress = String(task.progress || '').trim();
-    return { text: progress || _statusLabel(task.status, task.type), cls: 'cookbook-task-downloading' };
+    return { text: _downloadBadgeText(task.progress), cls: 'cookbook-task-downloading' };
   }
   if (task.type === 'serve' && task.status === 'running' && task.progress) {
     // Same green "running" pill — just with dynamic phase text, so it doesn't
@@ -61,9 +74,12 @@ function _downloadNameFromPayload(name, payload) {
   const rawName = String(name || '').trim();
   // Defensive: failed/restarted downloads can inherit the wrapper executable
   // name if older state was saved from a command preview. The row title should
-  // always be the model/repo, never "bash" or "python".
+  // always be the model/repo, never "bash", "python", or a live HF progress
+  // line like "Downloading 'vae/...' to '/mnt/...".
   const looksLikeLauncher = /^(?:bash|sh|zsh|python|python3|pwsh|powershell|cmd|tmux)$/i.test(rawName);
-  const base = (!rawName || looksLikeLauncher)
+  const looksLikeProgressLine = /^(?:Downloading|Fetching|Resuming)\s+'[^']+'\s+to\s+'[^']+/i.test(rawName)
+    || /^Downloading\s*\(incomplete\b/i.test(rawName);
+  const base = (!rawName || looksLikeLauncher || looksLikeProgressLine)
     ? String(payload?.repo_id || payload?.repo || '').split('/').pop()
     : rawName;
   const include = payload?.include || '';
@@ -292,7 +308,7 @@ function _buildCrashReport(task, outputText) {
   const diag = _diagnose(capturedOutput);
   const started = task?.ts ? new Date(task.ts).toISOString() : '';
   const report = [
-    '## Odysseus Cookbook crash report',
+    '## Open Clank Cookbook crash report',
     '',
     'Please review this report for secrets before posting it publicly.',
     '',
@@ -509,60 +525,48 @@ function _nextAvailablePort() {
   return nextFreePort(usedPorts);
 }
 
-// ── Endpoint cleanup ──
+// ── Managed provider lifecycle ──
 
-async function _removeEndpointByUrl(baseUrl) {
+async function _listCookbookProviders() {
   try {
-    const res = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const endpoints = await res.json();
-    const hostPort = baseUrl.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-    const ep = endpoints.find(e => e.base_url === baseUrl)
-            || endpoints.find(e => e.base_url.includes(hostPort));
-    if (ep) {
-      await fetch(`/api/model-endpoints/${ep.id}`, { method: 'DELETE', credentials: 'same-origin' });
-      _refreshModelsAfterEndpointChange();
-    }
+    const res = await fetch('/api/cookbook/provider-connections', { credentials: 'same-origin' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.connections) ? data.connections : [];
+  } catch { return []; }
+}
+
+async function _removeProviderForTask(task, providerUrl = '') {
+  try {
+    const connections = await _listCookbookProviders();
+    const expectedModel = _serveExpectedModel(task);
+    const connectionId = task?._providerConnectionId;
+    const connection = connections.find(item => item.id === connectionId)
+      || connections.find(item => item.url === providerUrl && _providerMatchesServe(item, task))
+      || connections.find(item => (item.models || []).some(model => _modelIdMatchesExpected(model, expectedModel)));
+    if (!connection) return;
+    const query = task?.sessionId ? `?session_id=${encodeURIComponent(task.sessionId)}` : '';
+    await fetch(`/api/cookbook/provider-connections/${encodeURIComponent(connection.id)}${query}`, {
+      method: 'DELETE', credentials: 'same-origin',
+    });
+    await _refreshModelsAfterProviderChange();
   } catch {}
 }
 
-function _refreshModelsAfterEndpointChange() {
+async function _refreshModelsAfterProviderChange() {
   const pickerLabel = document.getElementById('model-picker-label');
   if (pickerLabel) {
     pickerLabel.dataset.prevHtml = pickerLabel.innerHTML;
     pickerLabel.innerHTML = '<span style="opacity:0.4;">refreshing…</span>';
   }
-  if (window.modelsModule && window.modelsModule.refreshModels) {
-    window.modelsModule.refreshModels(false);
-  }
-  setTimeout(() => {
-    if (!window.sessionModule) return;
-    const currentModel = window.sessionModule.getCurrentModel ? window.sessionModule.getCurrentModel() : null;
-    if (currentModel) {
-      const items = (window.modelsModule && window.modelsModule.getCachedItems) ? window.modelsModule.getCachedItems() : [];
-      const allModels = [];
-      items.forEach(item => {
-        if (item.offline) return;
-        (item.models || []).concat(item.models_extra || []).forEach(m => allModels.push({ mid: m, url: item.url, endpointId: item.endpoint_id }));
-      });
-      const stillExists = allModels.some(m => m.mid === currentModel);
-      if (!stillExists && allModels.length > 0) {
-        const fallback = allModels[0];
-        if (window.sessionModule.createDirectChat) {
-          window.sessionModule.createDirectChat(fallback.url, fallback.mid, fallback.endpointId);
-        }
-      }
+  try {
+    if (window.modelsModule && window.modelsModule.refreshModels) {
+      await window.modelsModule.refreshModels(true);
     }
-    if (window.sessionModule.updateModelPicker) {
+  } finally {
+    if (window.sessionModule && window.sessionModule.updateModelPicker) {
       window.sessionModule.updateModelPicker();
     }
-  }, 1500);
-}
-
-function _appendCookbookEndpointScope(fd, remoteHost) {
-  const host = String(remoteHost || '').trim();
-  if (!host || host === 'local' || host === 'localhost' || host === '127.0.0.1') {
-    fd.append('container_local', 'true');
   }
 }
 
@@ -611,29 +615,57 @@ function _modelIdMatchesExpected(modelId, expected) {
   return gotBase === wantBase || got.includes(wantBase) || want.includes(gotBase);
 }
 
-function _endpointMatchesServe(ep, task) {
+function _providerMatchesServe(connection, task) {
   const expected = _serveExpectedModel(task);
-  const models = [...(ep?.models || []), ...(ep?.pinned_models || [])];
+  const models = connection?.models || [];
   if (!models.length) return true;
   return models.some(mid => _modelIdMatchesExpected(mid, expected));
 }
 
-function _markServeEndpointMismatch(task, ep, host, port) {
+function _markServeProviderMismatch(task, connection, host, port) {
   const expected = _serveExpectedModel(task);
-  const actual = (ep?.models || []).join(', ') || 'no models';
+  const actual = (connection?.models || []).join(', ') || 'no models';
   const msg = `Port ${host}:${port} answered, but it is serving ${actual}, not ${expected || task?.name || 'the launched model'}. The new serve likely failed or the port is occupied by an older server.`;
   _updateTask(task.sessionId || task.session_id, {
     status: 'error',
     _serveReady: false,
-    _endpointAdded: false,
+    _providerConnected: false,
     output: `${task.output || ''}\n\n${msg}`.trim(),
   });
   uiModule.showError(msg);
 }
 
-function _appendPinnedServeModel(fd, task) {
-  const expected = _serveExpectedModel(task);
-  if (expected) fd.append('pinned_models', expected);
+function _isImageServeTask(task) {
+  const cmd = String(task?.payload?._cmd || '');
+  return cmd.includes('diffusion_server') || cmd.includes('mlx_image_server');
+}
+
+async function _registerCookbookProvider(task, providerUrl, { supportsTools = false } = {}) {
+  const expectedModel = _serveExpectedModel(task);
+  if (!expectedModel) throw new Error('Serve task has no model ID');
+  const response = await fetch('/api/cookbook/provider-connections', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: providerUrl,
+      model_id: expectedModel,
+      name: task?.name || expectedModel.split('/').pop(),
+      model_type: _isImageServeTask(task) ? 'image' : 'llm',
+      session_id: task?.sessionId || task?.session_id || '',
+      supports_tools: !!supportsTools,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.detail || data?.error || `HTTP ${response.status}`);
+  if (!data?.id) throw new Error('Managed provider registration returned no connection ID');
+  task._providerConnected = true;
+  task._providerConnectionId = data.id;
+  _updateTask(task.sessionId || task.session_id, {
+    _providerConnected: true,
+    _providerConnectionId: data.id,
+  });
+  return data;
 }
 
 // ── Download queue — runs one at a time per server ──
@@ -1274,7 +1306,7 @@ function _autoSaveWorkingConfig(task) {
   if (task._autoSaved) return;
   const cmd = task.payload._cmd;
   // Diffusion/image servers aren't vLLM presets — skip them.
-  if (cmd.includes('diffusion_server')) { task._autoSaved = true; return; }
+  if (cmd.includes('diffusion_server') || cmd.includes('mlx_image_server')) { task._autoSaved = true; return; }
   const model = task.payload.repo_id || task.name;
   const presets = _loadPresets();
   const existing = presets.find(p => p.cmd === cmd);
@@ -1752,15 +1784,16 @@ function _promptEditServeCmd(currentCmd) {
 function _parseServeCmdToFields(cmd) {
   if (!cmd) return null;
   const ex = (re) => { const m = cmd.match(re); return m ? m[1] : ''; };
-  const fields = {
-    backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
+    const fields = {
+      backend: cmd.includes('llama_cpp') || cmd.includes('llama-server') ? 'llamacpp'
+      : cmd.includes('mlx_image_server') ? 'mlx_image'
       : cmd.includes('mlx_lm.server') ? 'mlx'
       : cmd.includes('diffusion_server') ? 'diffusers'
       : cmd.includes('sglang') ? 'sglang'
       : cmd.includes('ollama') ? 'ollama' : 'vllm',
     port: ex(/--port\s+(\d+)/) || '8000',
     tp: ex(/--tensor-parallel-size\s+(\d+)/) || '1',
-    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
+    ctx: ex(/--max-model-len\s+(\d+)/) || ex(/--context-length\s+(\d+)/) || ex(/--max-tokens\s+(\d+)/) || ex(/--n_ctx\s+(\d+)/) || ex(/-c\s+(\d+)/) || '8192',
     gpu_mem: ex(/--gpu-memory-utilization\s+([\d.]+)/) || '0.90',
     swap: ex(/--swap-space\s+(\d+)/) || '',
     dtype: ex(/--dtype\s+(\w+)/) || 'auto',
@@ -1796,7 +1829,7 @@ function _serveCmdNeedsGpuPreflight(cmd, repo) {
   const c = String(cmd || '').toLowerCase();
   const r = String(repo || '').toLowerCase();
   if (!c || /gpu-cleanup|sglang-kernel|mlx-lm|pip\s+install|python\d*\s+-m\s+pip/.test(`${r} ${c}`)) return false;
-  return /\b(vllm\s+serve|sglang(?:\.launch_server|\s+serve)|mlx_lm\.server|llama-server|llama_cpp\.server|text-generation-launcher|aphrodite|ollama\s+(?:serve|run))\b/.test(c);
+  return /\b(vllm\s+serve|sglang(?:\.launch_server|\s+serve)|mlx_lm\.server|mlx_image_server\.py|diffusion_server\.py|llama-server|llama_cpp\.server|text-generation-launcher|aphrodite|ollama\s+(?:serve|run))\b/.test(c);
 }
 
 function _selectedGpuIndexes(gpus) {
@@ -1900,6 +1933,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   const _serverMetaName = targetMeta?.serverName || _hsrv.name || (_host ? _host : 'Local');
   const _hplatform = _host ? (_hsrv.platform || '') : (_envState.hostPlatform || '');
   const _replaceTaskId = fields?._replaceTaskId || '';
+  const _launchAnyway = !!targetMeta?.launchAnyway;
   if (_replaceTaskId) {
     try {
       const _old = _loadTasks().find(t => t.sessionId === _replaceTaskId);
@@ -1917,7 +1951,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
   // servers on one port, so re-serving (or retrying) should stop & remove the
   // old one instead of leaving a dead duplicate behind. (The retry buttons
   // already removed their own task, so this is a no-op for them.)
-  try {
+  if (!_launchAnyway) try {
     const _pm = cmd.match(/--port[=\s]+(\d+)/) || cmd.match(/(?:^|\s)-p[=\s]+(\d+)/);
     const _newPort = _pm ? _pm[1] : '';
     if (_newPort) {
@@ -2001,11 +2035,16 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     // with these precise settings (not just the last-used-for-repo state).
     const payload = { repo_id: repo, remote_host: _host || undefined, remote_server_key: _serverMetaKey || undefined, remote_server_name: _serverMetaName || undefined, ssh_port: _sp || undefined, _cmd: cmd, _fields: fields || undefined, _env: _usedEnv, _envPath: _usedEnvPath, _gpus: _usedGpus };
     _addTask(data.session_id, shortName, 'serve', payload);
+    if (data.provider_connection_id) {
+      _updateTask(data.session_id, {
+        _providerConnected: true,
+        _providerConnectionId: data.provider_connection_id,
+      });
+    }
     uiModule.showToast(`Serving ${shortName}...`);
-    // Auto-register may have enabled an existing (offline) endpoint for this
-    // host:port. Refresh the picker so the row is no longer dimmed, and the
-    // user doesn't see "offline" on a serve they just started.
-    try { _refreshModelsAfterEndpointChange(); } catch (_) {}
+    // The backend may have created or re-enabled a normalized provider route.
+    // Refresh the picker so the served model is immediately selectable.
+    try { _refreshModelsAfterProviderChange(); } catch (_) {}
   } catch (e) {
     uiModule.showToast('Failed: ' + e.message);
   }
@@ -2203,7 +2242,7 @@ export function _renderRunningTab() {
       const _secDot = (key && allTasks.some(_serveTaskFailed)) ? 'fail' : 'ok';
       const _dotTitle = key ? (_secDot === 'fail' ? 'Server not responding' : 'Reachable') : 'Local (this machine)';
       const _srvColor = _serverColorForTaskGroup(key || 'local', allTasks);
-      sec.insertAdjacentHTML('afterbegin', `<div class="cookbook-section-header${_srvColor ? ' has-server-color' : ''}" data-collapse="${bodyId}"${_serverHeaderStyle(_srvColor)}><svg class="cookbook-section-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg><span class="cookbook-srv-status ${_secDot}" title="${_dotTitle}" style="flex-shrink:0;position:relative;top:0px;"></span><span class="cookbook-section-title" style="margin:0;">${esc(sg.name)}</span><button class="cookbook-btn cookbook-stop-all-btn" data-stop-server="${esc(key)}" title="Stop all running servers"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" style="vertical-align:-1px;margin-right:4px;"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg>Stop all</button><button class="cookbook-btn cookbook-clear-btn" data-clear-server="${esc(key)}" title="Clear finished tasks"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px;margin-right:4px;"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>Clear finished</button></div><div id="${bodyId}" class="cookbook-section-body"></div>`);
+      sec.insertAdjacentHTML('afterbegin', `<div class="cookbook-section-header${_srvColor ? ' has-server-color' : ''}" data-collapse="${bodyId}"${_serverHeaderStyle(_srvColor)}>${uiIcon("chevron-down", 12, {"className":"cookbook-section-chevron"})}<span class="cookbook-srv-status ${_secDot}" title="${_dotTitle}" style="flex-shrink:0;position:relative;top:0px;"></span><span class="cookbook-section-title" style="margin:0;">${esc(sg.name)}</span><button class="cookbook-btn cookbook-stop-all-btn" data-stop-server="${esc(key)}" title="Stop all running servers">${uiIcon("stop", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Stop all</button><button class="cookbook-btn cookbook-clear-btn" data-clear-server="${esc(key)}" title="Clear finished tasks">${uiIcon("trash", 11, {"style":"vertical-align:-1px;margin-right:4px;"})}Clear finished</button></div><div id="${bodyId}" class="cookbook-section-body"></div>`);
     }
   }
 
@@ -2374,17 +2413,18 @@ export function _renderRunningTab() {
     const _bdg = _taskBadge(task);
     const _bdgTitle = (task._unreachable && task.status === 'running') ? ' title="Server not responding — it may have crashed"' : '';
     const displayName = _taskDisplayName(task);
+    const logoName = task.type === 'download' ? (task.payload?.repo_id || task.name) : task.name;
     el.innerHTML = `
       <div class="cookbook-task-header">
         <span class="cookbook-task-type${(task.status === 'done' && task.type === 'download') ? ' cookbook-task-type-done' : ''}" data-type="${esc(task.type)}">${esc((task.status === 'done' && task.type === 'download') ? 'finished' : task.type)}</span>
-        <span class="cookbook-task-name">${modelLogo(task.name)}${esc(displayName)}</span>
-        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? '<button type="button" class="cookbook-task-serve-btn" title="Open in Launch"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>Launch</span></button>' : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}"><svg class="cookbook-task-check-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#50fa7b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><svg class="cookbook-task-clear-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
-        <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="8 5 19 12 8 19 8 5"/></svg><span>start now</span></button>
+        <span class="cookbook-task-name">${modelLogo(logoName)}${esc(displayName)}</span>
+        <span class="cookbook-task-indicator"><span class="cookbook-task-wave" style="display:${task.status === 'running' ? '' : 'none'}"></span>${_canLaunchDownloadedTask(task) ? "<button type=\"button\" class=\"cookbook-task-serve-btn\" title=\"Open in Launch\">" + uiIcon("play", 12) + "<span>Launch</span></button>" : ''}<span class="cookbook-task-check" title="Clear" style="display:${_canClearTask(task) ? '' : 'none'}">${uiIcon("check", 12, {"className":"cookbook-task-check-ico","role":"success"})}${uiIcon("close", 12, {"className":"cookbook-task-clear-ico"})}<span class="cookbook-task-done-label">${esc(_clearPillLabel(task))}</span><span class="cookbook-task-clear-label">clear</span></span></span>
+        <button type="button" class="cookbook-task-start-now" title="Start this queued download now" style="display:${(task.type === 'download' && task.status === 'queued') ? '' : 'none'}">${uiIcon("play", 11)}<span>start now</span></button>
         <span class="cookbook-task-status ${_bdg.cls}"${_bdgTitle}>${esc(_bdg.text)}</span>
-        <button class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
+        <button type="button" class="cookbook-task-menu-btn" title="Actions">&#8942;</button>
       </div>
       <div class="cookbook-task-sub"><span class="cookbook-task-session">${esc(task.sessionId)}</span><span class="cookbook-task-uptime" style="display:${((task.type === 'serve' || task.type === 'download') && task.status === 'running') ? '' : 'none'}"></span>${(task.type === 'download') ? `<span class="cookbook-task-dldir" title="Download destination" style="font-size:9px;color:var(--fg-muted);font-family:'Fira Code',monospace;opacity:0.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:40ch;">Dir: ${esc(task.payload?.local_dir || '~/.cache/huggingface/hub')}</span>` : ''}</div>
-      <div class="cookbook-output-wrap cookbook-task-collapsible${(_mobileCollapseDefault && !_shouldAutoExpandTaskOutput(task)) ? ' cookbook-task-collapsed' : ''}"><pre class="cookbook-output-pre">${esc(task.output || '')}</pre><button type="button" class="copy-code cookbook-output-copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>
+      <div class="cookbook-output-wrap cookbook-task-collapsible${(_mobileCollapseDefault && !_shouldAutoExpandTaskOutput(task)) ? ' cookbook-task-collapsed' : ''}"><pre class="cookbook-output-pre">${esc(task.output || '')}</pre><button type="button" class="copy-code cookbook-output-copy">${uiIcon("copy", 14)}</button></div>
     `;
 
     const _waveEl = el.querySelector('.cookbook-task-wave');
@@ -2572,8 +2612,10 @@ export function _renderRunningTab() {
       el.addEventListener('touchmove', _lpMove, { passive: true });
       el.addEventListener('touchend', _lpCancel, { passive: true });
       el.addEventListener('touchcancel', _lpCancel, { passive: true });
-      menuBtn.addEventListener('click', (e) => {
+      let _lastTouchMenuOpenAt = 0;
+      const _openTaskMenu = (e) => {
         e.stopPropagation();
+        if (e.type === 'click' && Date.now() - _lastTouchMenuOpenAt < 550) return;
         const existing = document.querySelector('.cookbook-task-dropdown');
         if (existing && existing._anchor === menuBtn) {
           if (typeof existing._dismiss === 'function') existing._dismiss();
@@ -2616,51 +2658,22 @@ export function _renderRunningTab() {
             _renderRunningTab();
           }});
         }
-        // ── Endpoint section ────────────────────────────────────────
-        // Manual endpoint registration — fallback for when auto-add fails
-        // (e.g. probe timeout on a remote that's slow). Forces adding this
-        // serve to the model-endpoints list regardless of prior flag state.
+        // ── Provider section ────────────────────────────────────────
+        // Manual normalized-provider registration — fallback for a transient
+        // managed-engine/control-plane failure during launch.
         if (task.type === 'serve' && task.payload?._cmd) {
-          items.push({ group: 'endpoint', label: 'Register endpoint', action: 'register-endpoint', custom: async () => {
+          items.push({ group: 'provider', label: 'Register provider', action: 'register-provider', custom: async () => {
             const host = _connectHostFromRemote(task.remoteHost);
             const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
             const port = portMatch ? portMatch[1] : '8000';
-            const baseUrl = `http://${host}:${port}/v1`;
+            const providerUrl = `http://${host}:${port}/v1`;
             try {
-              // Check existing first — offer to overwrite if present
-              const eps = await (await fetch('/api/model-endpoints', { credentials: 'same-origin' })).json();
-              const existing = eps.find(e => e.base_url === baseUrl);
-              if (existing) {
-                uiModule.showToast(`Already registered as "${existing.name}"`);
-                task._endpointAdded = true;
-                _updateTask(task.sessionId, { _endpointAdded: true });
-                _refreshModelsAfterEndpointChange();
-                // If it's still offline (registered before the server finished
-                // loading), keep probing until it answers instead of leaving it
-                // stuck offline until a manual delete/re-add.
-                if (existing.id && !(existing.models || []).length) _probeEndpointUntilOnline(existing.id, host, port);
-                return;
-              }
-              const fd = new FormData();
-              fd.append('base_url', baseUrl);
-              fd.append('name', task.name);
-              fd.append('skip_probe', 'true');
-              _appendCookbookEndpointScope(fd, task.remoteHost || '');
-              if (task.payload?._cmd?.includes('diffusion_server')) fd.append('model_type', 'image');
-              const res = await fetch('/api/model-endpoints', { method: 'POST', credentials: 'same-origin', body: fd });
-              if (res.ok) {
-                task._endpointAdded = true;
-                _updateTask(task.sessionId, { _endpointAdded: true });
-                uiModule.showToast(`Endpoint registered: ${host}:${port}`);
-                _refreshModelsAfterEndpointChange();
-                // Added with skip_probe → probe until the (possibly still
-                // warming) server answers, so it flips online on its own.
-                const _ep = await res.json().catch(() => ({}));
-                if (_ep && _ep.id) _probeEndpointUntilOnline(_ep.id, host, port);
-              } else {
-                const body = await res.text().catch(() => '');
-                uiModule.showError(`Register failed: ${res.status} ${body.slice(0, 140)}`);
-              }
+              const connection = await _registerCookbookProvider(task, providerUrl, {
+                supportsTools: task.payload?._cmd?.includes('--enable-auto-tool-choice'),
+              });
+              uiModule.showToast(`Provider registered: ${host}:${port}`);
+              await _refreshModelsAfterProviderChange();
+              _waitForProviderRoute(connection.id, host, port);
             } catch (e) {
               uiModule.showError(`Register failed: ${e.message || e}`);
             }
@@ -2720,20 +2733,20 @@ export function _renderRunningTab() {
         items.push({ group: 'danger', label: 'Cancel', action: 'cancel', mobileOnly: true, custom: () => {} });
 
         const _MENU_ICONS = {
-          'start-now': '<polygon points="6 4 20 12 6 20 6 4"/>',
-          reconnect: '<path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/>',
-          retry: '<path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/>',
-          stop: '<rect x="6" y="6" width="12" height="12" rx="1"/>',
-          edit: '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>',
-          'edit-panel': '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>',
-          'register-endpoint': '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
-          save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/>',
-          'copy-tmux': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-          'copy-crash-report': '<path d="M10.3 2.3 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.3a2 2 0 0 0-3.4 0z"/><path d="M12 8v5M12 17h.01"/>',
-          'copy-log': '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-          kill: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
-          cancel: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-        };
+  "start-now": "play",
+  "reconnect": "refresh",
+  "retry": "refresh",
+  "stop": "stop",
+  "edit": "edit",
+  "edit-panel": "edit",
+  "register-provider": "add",
+  "save": "save",
+  "copy-tmux": "copy",
+  "copy-crash-report": "warning",
+  "copy-log": "copy",
+  "kill": "trash",
+  "cancel": "close"
+};
         let _lastGroup = null;
         for (const item of items) {
           // Insert a thin divider whenever the group changes, so the
@@ -2753,7 +2766,7 @@ export function _renderRunningTab() {
           div.style.cssText = 'display:flex;align-items:center;gap:8px;';
           if (item.tooltip) div.title = item.tooltip;
           const ic = _MENU_ICONS[item.action] || '';
-          div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ic}</svg></span><span>${item.label}</span>`;
+          div.innerHTML = `<span style="display:inline-flex;flex-shrink:0;opacity:0.7;">${ic ? uiIcon(ic, 14) : ""}</span><span>${item.label}</span>`;
           div.addEventListener('click', () => {
             _cleanup();
             if (item.custom) { item.custom(); return; }
@@ -2764,6 +2777,7 @@ export function _renderRunningTab() {
 
         const rect = menuBtn.getBoundingClientRect();
         dropdown.style.position = 'fixed';
+        dropdown.style.zIndex = String(topPortalZ());
         dropdown.style.top = rect.bottom + 2 + 'px';
         dropdown.style.right = (window.innerWidth - rect.right) + 'px';
         document.body.appendChild(dropdown);
@@ -2811,7 +2825,13 @@ export function _renderRunningTab() {
           window.visualViewport?.addEventListener('scroll', scrollClose);
         }, 0);
         _unreg = registerMenuDismiss(_cleanup);
-      });
+      };
+      menuBtn.addEventListener('click', _openTaskMenu);
+      menuBtn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        _lastTouchMenuOpenAt = Date.now();
+        _openTaskMenu(e);
+      }, { passive: false });
     }
 
     // Hidden action buttons for menu dispatch
@@ -2845,9 +2865,9 @@ export function _renderRunningTab() {
       el.dataset.status = 'stopped';
       _updateTask(task.sessionId, { _userStopped: true });
       const outputText = el.querySelector('.cookbook-output-pre')?.textContent || task.output || '';
-      // Drop the model endpoint so the picker stops listing it.
+      // Retire this task's Cookbook-owned provider connection membership.
       if (task.type === 'serve' && task.payload) {
-        _removeEndpointByUrl(_endpointUrlForTask(task, outputText));
+        await _removeProviderForTask(task, _endpointUrlForTask(task, outputText));
       }
       const ollamaUnload = _ollamaUnloadCommand(task, outputText);
       if (ollamaUnload) {
@@ -2924,17 +2944,8 @@ export function _renderRunningTab() {
         return;  // leave the row so the user can retry
       }
       if (task.type === 'serve' && task.payload) {
-        const endpointUrl = _endpointUrlForTask(task, outputText);
-        _removeEndpointByUrl(endpointUrl);
-        const modelName = task.payload.model || task.name || '';
-        if (modelName) {
-          fetch('/api/model-endpoints', { credentials: 'same-origin' })
-            .then(r => r.json())
-            .then(eps => {
-              const ep = eps.find(e => e.name === modelName || e.base_url === endpointUrl);
-              if (ep) fetch(`/api/model-endpoints/${ep.id}`, { method: 'DELETE', credentials: 'same-origin' }).then(() => _refreshModelsAfterEndpointChange());
-            }).catch(() => {});
-        }
+        const providerUrl = _endpointUrlForTask(task, outputText);
+        await _removeProviderForTask(task, providerUrl);
       }
       _animateOutThenRemove(el, task.sessionId);
     });
@@ -2953,7 +2964,7 @@ export function _renderRunningTab() {
       _copyText(text).then(() => {
         const btn = el.querySelector('.cookbook-output-copy');
         const origHTML = btn.innerHTML;
-        btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        btn.innerHTML = uiIcon("check", 14, {"role":"success"});
         btn.classList.add('copied');
         setTimeout(() => { btn.innerHTML = origHTML; btn.classList.remove('copied'); }, 1500);
       });
@@ -3533,7 +3544,7 @@ async function _reconnectTask(el, task) {
               // server was coming up. Now that it's reachable, nudge the
               // picker to re-probe so the offline pill clears without the
               // user having to reopen Settings or refresh the page.
-              try { _refreshModelsAfterEndpointChange(); } catch (_) {}
+              try { _refreshModelsAfterProviderChange(); } catch (_) {}
             }
             if (info.phase) {
               badge.textContent = info.phase;
@@ -3573,13 +3584,11 @@ async function _reconnectTask(el, task) {
           }
           _showDiagnosis(el, diag, snapshot);
         }
-        // Detect serve ready — auto-add to model endpoints. Don't flip
-        // `_endpointAdded` until the POST succeeds; otherwise a transient
-        // error silently prevents any future retry. An in-flight guard
-        // prevents a second poll from firing a duplicate POST before the
-        // first one's dedup check can observe the newly-added row.
-        if (task.type === 'serve' && !task._endpointAdded && !task._endpointAddInFlight && task._serveReady) {
-          task._endpointAddInFlight = true;
+        // Once the process reports ready, ensure its normalized provider
+        // connection and stable model route exist. A transient engine error
+        // remains retryable; the in-flight guard prevents duplicate requests.
+        if (task.type === 'serve' && !task._providerConnected && !task._providerConnectInFlight && task._serveReady) {
+          task._providerConnectInFlight = true;
           let host = _connectHostFromRemote(task.remoteHost);
           const portMatch = task.payload?._cmd?.match(/--port[=\s]+(\d+)/)
             || task.payload?._cmd?.match(/(?:^|\s)-p[=\s]+(\d+)/)
@@ -3588,71 +3597,30 @@ async function _reconnectTask(el, task) {
             || snapshot.match(/listening on\D*?:(\d+)/i)
             || snapshot.match(/port[:=\s]+(\d+)/i);
           let port = portMatch ? portMatch[1] : '8000';
-          let baseUrl = `http://${host}:${port}/v1`;
+          let providerUrl = `http://${host}:${port}/v1`;
           const ollamaUrlMatch = snapshot.match(/Ollama API ready on port\s+\d+:\s*(http:\/\/[^\s]+)/i);
           if (ollamaUrlMatch) {
-            const endpoint = _endpointFromAdvertisedUrl(ollamaUrlMatch[1], host, '11434');
-            if (endpoint) ({ host, port, baseUrl } = endpoint);
+            const advertised = _endpointFromAdvertisedUrl(ollamaUrlMatch[1], host, '11434');
+            if (advertised) ({ host, port, baseUrl: providerUrl } = advertised);
           }
-          fetch('/api/model-endpoints', { credentials: 'same-origin' })
-            .then(r => r.json())
-            .then(async (eps) => {
-              // Match only exact base_url — don't dedup by friendly name,
-              // because other endpoints may happen to share a model name.
-              const exists = eps.some(e => e.base_url === baseUrl);
-              if (exists) {
-                // Already registered — e.g. the backend pre-registers diffusion
-                // endpoints server-side. Mark so we don't retry, but STILL
-                // refresh the picker (and probe until online) so the new model
-                // shows up without the user having to manually refresh.
-                const _ex = eps.find(e => e.base_url === baseUrl);
-                if (_ex && !_endpointMatchesServe(_ex, task)) {
-                  _markServeEndpointMismatch(task, _ex, host, port);
-                  return null;
-                }
-                task._endpointAdded = true;
-                _updateTask(task.sessionId, { _endpointAdded: true });
-                _autoSaveWorkingConfig(task);   // endpoint live → remember these settings
-                if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(false);
-                if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
-                window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl, host, port, model: task.name } }));
-                if (_ex && _ex.id && !(_ex.models || []).length) _probeEndpointUntilOnline(_ex.id, host, port);
-                return null;
-              }
-              const _isDiffusion = task.payload?._cmd?.includes('diffusion_server');
-              const fd = new FormData();
-              fd.append('base_url', baseUrl);
-              fd.append('name', task.name);
-              fd.append('skip_probe', 'true');
-              _appendCookbookEndpointScope(fd, task.remoteHost || '');
-              _appendPinnedServeModel(fd, task);
-              if (_isDiffusion) fd.append('model_type', 'image');
-              return fetch('/api/model-endpoints', { method: 'POST', credentials: 'same-origin', body: fd });
-            })
-            .then(async (res) => {
-              if (res && res.ok) {
-                // Flip the flag only on confirmed success
-                task._endpointAdded = true;
-                _updateTask(task.sessionId, { _endpointAdded: true });
-                _autoSaveWorkingConfig(task);   // endpoint live → remember these settings
-                uiModule.showToast(`Model endpoint added: ${host}:${port}`);
-                // Retry-probe until the warming server answers, so it
-                // flips online without a manual enable/disable toggle.
-                const _epData = await res.json().catch(() => ({}));
-                if (_epData && _epData.id && !(_epData.models || []).length) {
-                  _probeEndpointUntilOnline(_epData.id, host, port);
-                }
-                window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl, host, port, model: task.name } }));
+          _registerCookbookProvider(task, providerUrl, {
+            supportsTools: task.payload?._cmd?.includes('--enable-auto-tool-choice'),
+          })
+            .then(async (connection) => {
+                _autoSaveWorkingConfig(task);
+                uiModule.showToast(`Managed provider added: ${host}:${port}`);
+                await _refreshModelsAfterProviderChange();
+                _waitForProviderRoute(connection.id, host, port);
                 const _trySelectModel = async (attempt) => {
                   if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(false);
                   const items = window.modelsModule?.getCachedItems?.() || [];
                   for (const item of items) {
                     if (item.offline) continue;
-                    const url = item.url || '';
-                    if (url.includes(host) || url.includes(port)) {
-                      const mid = (item.models || [])[0];
+                    if (item.endpoint_id === connection.id) {
+                      const expected = _serveExpectedModel(task);
+                      const mid = (item.models || []).find(model => _modelIdMatchesExpected(model, expected));
                       if (mid && window.sessionModule?.createDirectChat) {
-                        window.sessionModule.createDirectChat(url, mid, item.endpoint_id);
+                        window.sessionModule.createDirectChat(item.url, mid, item.endpoint_id);
                         if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
                         uiModule.showToast(`Switched to ${mid.split('/').pop()}`);
                         return;
@@ -3662,18 +3630,13 @@ async function _reconnectTask(el, task) {
                   if (attempt < 3) setTimeout(() => _trySelectModel(attempt + 1), 2000);
                   else if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
                 };
-                setTimeout(() => _trySelectModel(0), 1000);
-              } else if (res && !res.ok) {
-                const body = await res.text().catch(() => '');
-                console.warn('Endpoint auto-add failed', res.status, body);
-                uiModule.showError(`Auto-register endpoint failed (${res.status}). Use ⋮ → Register endpoint to retry.`);
-              }
+                if (!_isImageServeTask(task)) setTimeout(() => _trySelectModel(0), 1000);
             })
             .catch((e) => {
-              console.warn('Endpoint auto-add error', e);
-              uiModule.showError(`Auto-register endpoint error: ${e.message || e}. Use ⋮ → Register endpoint to retry.`);
+              console.warn('Managed provider auto-add error', e);
+              uiModule.showError(`Auto-register provider error: ${e.message || e}. Use ⋮ → Register provider to retry.`);
             })
-            .finally(() => { task._endpointAddInFlight = false; });
+            .finally(() => { task._providerConnectInFlight = false; });
           _updateTask(task.sessionId, { status: 'running' });
           const badge = el.querySelector('.cookbook-task-status');
           if (badge) { badge.textContent = 'running'; badge.className = 'cookbook-task-status cookbook-task-running'; }
@@ -3776,16 +3739,12 @@ function _canBackgroundPoll() {
   return _claimBackgroundLeader();
 }
 
-// Reachability check for running serve tasks. The tmux pane can stay alive
-// while the model server inside it has crashed (so no "Process exited" line
-// ever appears) — leaving the card showing "running" forever. So we actively
-// probe the registered endpoint (same /probe-local the model picker uses) and
-// flag the card "unreachable" (red) when the server stops answering.
+// Reconcile running serve tasks with Cookbook-owned normalized connections.
+// Actual process health comes from the existing tmux/task-status channel; the
+// browser never probes a raw provider URL or executes against one directly.
 let _serveReachabilityInFlight = false;
 let _serveReachabilityLastAt = 0;
 async function _checkServeReachability() {
-  // This reaches out to local model servers. Keep it out of the normal chat
-  // path unless the user is actively looking at the Running tab.
   if (_foregroundChatBusy()) return;
   if (!_isRunningTabVisible()) return;
   const now = Date.now();
@@ -3803,53 +3762,18 @@ async function _checkServeReachability() {
     _serveReachabilityInFlight = false;
     return;
   }
-  let eps = [], probe = {};
   try {
-    [eps, probe] = await Promise.all([
-      fetch('/api/model-endpoints', { credentials: 'same-origin' }).then(r => r.json()).catch(() => []),
-      fetch('/api/model-endpoints/probe-local', { credentials: 'same-origin' }).then(r => r.json()).catch(() => ({})),
-    ]);
+    const connections = await _listCookbookProviders();
+    const liveIds = new Set(connections.map(connection => connection.id));
     for (const task of serveTasks) {
-      const host = _connectHostFromRemote(task.remoteHost);
-      const portMatch = task.payload?._cmd?.match(/--port\s+(\d+)/);
-      const port = portMatch ? portMatch[1] : '8000';
-      const baseUrl = `http://${host}:${port}/v1`;
-      const ep = (eps || []).find(e => e.base_url === baseUrl);
-      if (!ep) continue;                       // not registered yet — can't judge
-      const pr = probe[ep.id];
-      if (!pr || pr.alive === undefined) continue;  // not probed (non-local) — skip
-      // Record the first time it actually answers. Until then the server is still
-      // LOADING/warming (the endpoint can get registered on the 300s timeout for a
-      // big model that hasn't finished loading), and a not-yet-answering server is
-      // not "unreachable" — flagging it as such while you're launching is a false
-      // alarm. Only treat it as unreachable once it has been reachable at least once.
-      if (pr.alive === true && !task._everReachable) {
-        task._everReachable = true;
-        _updateTask(task.sessionId, { _everReachable: true });
+      if (task._providerConnectionId && !liveIds.has(task._providerConnectionId)) {
+        task._providerConnected = false;
+        task._providerConnectionId = '';
+        _updateTask(task.sessionId, {
+          _providerConnected: false,
+          _providerConnectionId: '',
+        });
       }
-      const unreachable = pr.alive === false;
-      if (unreachable && !task._everReachable) continue;  // still coming up, not crashed
-      if (!!task._unreachable !== unreachable) {
-        _updateTask(task.sessionId, { _unreachable: unreachable });
-      }
-      const el = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"]`);
-      if (el) {
-        el.classList.toggle('cookbook-task-unreachable', unreachable);
-        const badge = el.querySelector('.cookbook-task-status');
-        if (badge) {
-          if (unreachable) {
-            badge.textContent = 'unreachable';
-            badge.className = 'cookbook-task-status cookbook-task-error';
-            badge.title = pr.error || 'Server not responding — it may have crashed';
-          } else if (badge.textContent === 'unreachable') {
-            // Recovered — restore the normal running label.
-            badge.textContent = _statusLabel('running', task.type);
-            badge.className = 'cookbook-task-status cookbook-task-running';
-            badge.title = '';
-          }
-        }
-      }
-      if (unreachable) _showCookbookNotif(true);
     }
     _refreshServerDots();
   } catch {
@@ -4034,39 +3958,25 @@ function _stopBackgroundMonitor() {
   if (statusEl) statusEl.style.display = 'none';
 }
 
-// Retry-probe a freshly-added endpoint until its model server answers.
-// A model that just reached "ready" in the cookbook often can't satisfy
-// the 1s add-time probe (remote, weights still mmap-ing), so it's added
-// offline. This polls the per-endpoint /probe (which uses a longer
-// server-side timeout + persists cached_models) every few seconds until
-// the endpoint reports models, then refreshes the picker. Bounded so a
-// genuinely-dead server doesn't poll forever.
-async function _probeEndpointUntilOnline(epId, host, port) {
+// Wait until a newly-created stable provider route is visible in the managed
+// catalogue. This never probes or executes against the raw server URL.
+async function _waitForProviderRoute(connectionId, host, port) {
   if (!_isCookbookVisible() || _foregroundChatBusy()) return;
-  if (!epId) return;
-  // Big models (e.g. 70B+) can take several minutes to load weights before
-  // the server answers /v1/models. Probe for up to ~5 min, easing the
-  // interval out so we're not hammering during a long warmup.
-  const MAX_TRIES = 40;
+  if (!connectionId) return;
+  const MAX_TRIES = 12;
   for (let i = 0; i < MAX_TRIES; i++) {
-    const interval = i < 12 ? 5000 : 10000;   // 5s for the first minute, then 10s
-    await new Promise(r => setTimeout(r, interval));
+    await new Promise(r => setTimeout(r, 1500));
     if (!_isCookbookVisible() || _foregroundChatBusy()) return;
     try {
-      // Hit the probe endpoint — it re-probes server-side and updates
-      // cached_models. We consume (and discard) the SSE stream.
-      const probeRes = await fetch(`/api/model-endpoints/${epId}/probe`, { credentials: 'same-origin' }).catch(() => null);
-      if (probeRes && probeRes.status === 404) return;
-      if (probeRes) await probeRes.text().catch(() => {});
-      const eps = await fetch('/api/model-endpoints', { credentials: 'same-origin' }).then(r => r.json()).catch(() => []);
-      const ep = (eps || []).find(e => e.id === epId);
-      if (ep && (ep.models || []).length) {
+      const connections = await _listCookbookProviders();
+      const connection = connections.find(item => item.id === connectionId);
+      if (connection && (connection.models || []).length) {
         if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(false);
         if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
-        window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', {
-          detail: { baseUrl: ep.base_url || `http://${host}:${port}/v1`, host, port, model: (ep.models || [])[0] || '' },
+        window.dispatchEvent(new CustomEvent('ge:providers-updated', {
+          detail: { connectionId, host, port, model: connection.models[0] || '' },
         }));
-        uiModule.showToast(`${host}:${port} is online`);
+        uiModule.showToast(`${host}:${port} provider is ready`);
         return;
       }
     } catch (_) { /* keep retrying */ }
@@ -4231,27 +4141,27 @@ async function _pollBackgroundStatus() {
     const errorTasks = tasks.filter(t => t.status === 'error');
     const completedTasks = tasks.filter(t => t.status === 'completed');
 
-    // Auto-add serve endpoints that became ready (works even when modal is closed)
+    // Ensure ready serves have normalized provider routes (also works while
+    // the modal is closed).
     const readyServes = tasks.filter(t => t.type === 'serve' && t.status === 'ready');
     for (const t of readyServes) {
       const localTasks = _loadTasks();
       const localTask = localTasks.find(lt => lt.sessionId === t.session_id);
-      if (localTask && localTask._endpointAdded) continue;
 
       let host = _connectHostFromRemote(localTask?.remoteHost || t.remote);
       const portMatch = localTask?.payload?._cmd?.match(/--port\s+(\d+)/)
         || localTask?.payload?._cmd?.match(/OLLAMA_HOST=[^\s:]+:(\d+)/);
       let port = portMatch ? portMatch[1] : '8000';
-      let baseUrl = `http://${host}:${port}/v1`;
+      let providerUrl = `http://${host}:${port}/v1`;
       const snapshot = t.output || localTask?.output || '';
       const ollamaUrlMatch = snapshot.match(/Ollama API ready on port\s+\d+:\s*(http:\/\/[^\s]+)/i);
       if (ollamaUrlMatch) {
-        const endpoint = _endpointFromAdvertisedUrl(ollamaUrlMatch[1], host, '11434');
-        if (endpoint) ({ host, port, baseUrl } = endpoint);
+        const advertised = _endpointFromAdvertisedUrl(ollamaUrlMatch[1], host, '11434');
+        if (advertised) ({ host, port, baseUrl: providerUrl } = advertised);
       }
-      const _isDiffusion = localTask?.payload?._cmd?.includes('diffusion_server');
+      const _isDiffusion = _isImageServeTask(localTask);
 
-      _updateTask(t.session_id, { _serveReady: true, _endpointAdded: true });
+      _updateTask(t.session_id, { _serveReady: true });
       if (localTask) _autoSaveWorkingConfig(localTask);   // remember working settings (modal may be closed)
 
       // Auto-detect function-calling support from the serve cmd.
@@ -4262,46 +4172,23 @@ async function _pollBackgroundStatus() {
       const _cmd = localTask?.payload?._cmd || '';
       const _supportsTools = _cmd.includes('--enable-auto-tool-choice') || _isDiffusion === false && /(?:^|\s)(?:deepseek|gpt-[45o]|claude|gemini|qwen3|qwen2\.5|mixtral|llama-[34]|minimax|kimi|hermes|glm-4)/i.test(t.model);
 
-      fetch('/api/model-endpoints', { credentials: 'same-origin' })
-        .then(r => r.json())
-        .then(eps => {
-          const hostPort = `${host}:${port}`;
-          const existing = eps.find(e => e.base_url === baseUrl || e.base_url.includes(hostPort) || e.name === t.model);
-          if (existing) {
-            const taskForMatch = localTask || { sessionId: t.session_id, name: t.model, model: t.model, payload: { repo_id: t.model, _cmd } };
-            if (!_endpointMatchesServe(existing, taskForMatch)) {
-              _markServeEndpointMismatch(taskForMatch, existing, host, port);
-              return null;
-            }
-            // Already registered — but it may be showing offline because
-            // it was added while the server was still warming. Kick a
-            // re-probe so it flips online without manual toggle.
-            if (!(existing.models || []).length) _probeEndpointUntilOnline(existing.id, host, port);
-            return null;
-          }
-          const fd = new FormData();
-          fd.append('base_url', baseUrl);
-          fd.append('name', t.model);
-          fd.append('skip_probe', 'true');
-          _appendCookbookEndpointScope(fd, localTask?.remoteHost || t.remote || '');
-          _appendPinnedServeModel(fd, localTask || { name: t.model, model: t.model, payload: { repo_id: t.model, _cmd } });
-          if (_isDiffusion) fd.append('model_type', 'image');
-          if (_supportsTools) fd.append('supports_tools', 'true');
-          return fetch('/api/model-endpoints', { method: 'POST', credentials: 'same-origin', body: fd });
-        })
-        .then(async (res) => {
-          if (res && res.ok) {
-            uiModule.showToast(`Model endpoint added: ${host}:${port}`);
-            const data = await res.json().catch(() => ({}));
-            // A just-started server often can't answer the 1s add-time
-            // probe, so it lands "offline". Retry-probe in the background
-            // until /v1/models responds — no manual enable/disable needed.
-            if (data && data.id) _probeEndpointUntilOnline(data.id, host, port);
-            if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(false);
-            if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
-          }
-        })
-        .catch(() => {});
+      const taskForProvider = localTask || {
+        sessionId: t.session_id,
+        name: t.model,
+        model: t.model,
+        payload: { repo_id: t.model, _cmd },
+      };
+      if (!taskForProvider._providerConnected) {
+        try {
+          const connection = await _registerCookbookProvider(taskForProvider, providerUrl, {
+            supportsTools: _supportsTools,
+          });
+          uiModule.showToast(`Managed provider added: ${host}:${port}`);
+          _waitForProviderRoute(connection.id, host, port);
+          if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(false);
+          if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
+        } catch (_) { /* retry on the next bounded background poll */ }
+      }
     }
 
     if (errorTasks.length > 0) {
@@ -4328,12 +4215,8 @@ async function _pollBackgroundStatus() {
             statusEl.textContent = 'cooking';
           }
         } else {
-          var _dlProgress = '';
-          if (t.progress) {
-            var _pctMatch = t.progress.match(/(\d+)%/);
-            _dlProgress = _pctMatch ? ` ${_pctMatch[0]}` : '';
-          }
-          statusEl.textContent = `downloading${_dlProgress}`;
+          const _dlText = _downloadBadgeText(t.progress);
+          statusEl.textContent = _dlText === 'downloading' ? 'downloading' : `downloading ${_dlText}`;
         }
         statusEl.style.display = '';
       } else if (errorTasks.length > 0) {

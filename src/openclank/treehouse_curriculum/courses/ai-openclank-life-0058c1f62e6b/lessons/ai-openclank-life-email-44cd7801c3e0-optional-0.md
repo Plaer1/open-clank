@@ -1,0 +1,1 @@
+Use invented recipients and text in the exercise response, not a live mailbox. Include a recipient-resolution check, attachment check and the final authorization step. Reading this plan does not send a message or prove any mail configuration works.

@@ -1,0 +1,9 @@
+{
+  "schema":"open-clank.code-map/v1",
+  "authority":{"variant":"published","receipt":{"workspace_id":"fixture-workspace","registration_id":"fixture-registration","source_snapshot_id":"fixture-snapshot","checkout_id":"fixture-checkout","head_generation":"fixture-head","admission_epoch":1,"policy_generation":1,"config_fingerprint":"fixture-producer"},"selection_policy_digest":"fixture-policy","summary_id":"fixture-summary"},
+  "selection_id":"vm1:s:published-calls",
+  "receipt":{"workspace_id":"fixture-workspace","registration_id":"fixture-registration","source_snapshot_id":"fixture-snapshot","checkout_id":"fixture-checkout","head_generation":"fixture-head","admission_epoch":1,"policy_generation":1,"config_fingerprint":"fixture-producer"},
+  "references":[{"occurrence_id":"occ:aa01","caller_id":"decl:bb02","target_id":"decl:cc03","relation":"call","state":"exact"}],
+  "remaining":0,"complete":true,"next_cursor":null,
+  "cost":{"inspected_entries":1,"sql_vm_steps":0,"metadata_bytes":0,"retained_summary_bytes":0,"serialized_bytes":0,"source_bytes_read":0,"policy_bytes_read":0,"summary_cache_hit":false,"native_rpc_calls_completed":0}
+}

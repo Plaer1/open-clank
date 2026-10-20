@@ -1,0 +1,1 @@
+Pigeonhole: placing n+1 objects into n boxes forces a shared box. Inclusion–exclusion counts a union by correcting overlap; for two sets |A∪B|=|A|+|B|−|A∩B|.

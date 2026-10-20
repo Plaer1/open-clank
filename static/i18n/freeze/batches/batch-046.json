@@ -1,0 +1,2281 @@
+{
+  "id": "batch-046",
+  "group": "imps",
+  "surface": "imps",
+  "entry_count": 180,
+  "character_count": 13477,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.4k.3840.2160",
+      "source": "4K — 3840 × 2160",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1089"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.9825.favorite",
+      "source": "&#9825; Favorite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1630"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.9829.favorited",
+      "source": "&#9829; Favorited",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1630"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.a4.300dpi.2480.3508",
+      "source": "A4 (300dpi) — 2480 × 3508",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1087"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.tag",
+      "source": "Add a tag",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1450"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.tag",
+      "source": "Add tag…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2654"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.tag.to.selected",
+      "source": "Add tag to selected",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2780"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.added.to.album",
+      "source": "Added to album",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.generated.tag.click.to.filter.to.photos.tagged.value",
+      "source": "AI-generated tag — click to filter to photos tagged “{1}”",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1449"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tag",
+      "source": "AI Tag",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1387"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tag.all.untagged.photos.in.the.current.album.if",
+      "source": "AI-tag all untagged photos (in the current album, if any)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2110"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tagging",
+      "source": "AI tagging…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1657",
+        "static/js/gallery.js:1660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tagging.d2d12fba",
+      "source": "AI Tagging",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2097"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tagging.failed",
+      "source": "AI tagging failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1677",
+        "static/js/gallery.js:1681"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tags",
+      "source": "AI Tags",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1449"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tags.added",
+      "source": "AI tags added",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1674"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ai.tags.cleared",
+      "source": "AI tags cleared",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1674"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.cover.updated",
+      "source": "Album cover updated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1858"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.deleted",
+      "source": "Album deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:740"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.dfb4c9a1",
+      "source": "Album",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1455"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.name",
+      "source": "Album name:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:750"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.options",
+      "source": "Album options",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:595"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.album.renamed",
+      "source": "Album renamed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:718"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.albums",
+      "source": "Albums",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2043",
+        "static/js/slashCommands.js:3566"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.albums.fetch.error",
+      "source": "Albums fetch error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:140"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.alpha.58061aa5",
+      "source": "Alpha",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1097"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browse.photos",
+      "source": "Browse photos",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1101"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browsers.can.t.read.folders.dropped.from.native.file.managers",
+      "source": "Browsers can’t read folders dropped from native file managers (Thunar/Nautilus). Use the \"Upload album\" tile in the Albums tab instead.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:347"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.camera.4da9c9af",
+      "source": "Camera",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1445"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancelling",
+      "source": "Cancelling…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2367",
+        "static/js/gallery.js:2368"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cancelling.f498a5f0",
+      "source": "Cancelling...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2409",
+        "static/js/skills.js:1689"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.ai.tags",
+      "source": "Clear AI tags",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1387",
+        "static/js/gallery.js:2109"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.ai.tags.b8274d51",
+      "source": "Clear AI Tags",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2466"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.album.filter",
+      "source": "Clear album filter",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:401"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clear.failed",
+      "source": "Clear failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1677",
+        "static/js/gallery.js:1681"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cleared.ai.tags.on.value.photo.value",
+      "source": "Cleared AI tags on {0} photo{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2475"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.clearing.bc7a2b58",
+      "source": "Clearing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1657",
+        "static/js/gallery.js:1660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.edit",
+      "source": "Close edit",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2048"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.gallery.and.the.active.edit",
+      "source": "Close Gallery and the active edit?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2137"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.the.edit.any.unsaved.changes.will.be.lost",
+      "source": "Close the edit? Any unsaved changes will be lost.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2158"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.close.the.edit.tab.first",
+      "source": "Close the edit tab first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2957",
+        "static/js/galleryEditor.js:4292"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.create.album",
+      "source": "Could not create album",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.source.chat",
+      "source": "Could not open source chat",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1538"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.start.photo.chat",
+      "source": "Could not start photo chat",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1566"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.currently.showing.this.album.click.x.to.clear",
+      "source": "Currently showing this album — click X to clear",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:401"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.date.eb9a4bc1",
+      "source": "Date",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1432",
+        "static/js/tasks.js:1438"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.album.value.photos.inside.will.stay.in.your.library",
+      "source": "Delete album \"{0}\"? Photos inside will stay in your library.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:728"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.project",
+      "source": "Delete project",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:939"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.photo.this.cannot.be.undone",
+      "source": "Delete this photo? This cannot be undone.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1869"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.project",
+      "source": "Delete this project?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:968"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.album.value.photos.inside.will.stay.in.your",
+      "source": "Delete {0} album{1}? Photos inside will stay in your library.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:813"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.photo.value.this.cannot.be.undone",
+      "source": "Delete {0} photo{1}? This cannot be undone.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2691"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.value.project.value",
+      "source": "Delete {0} project{1}?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1040"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deleted.value.album.value",
+      "source": "Deleted {0} album{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:826"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dimensions",
+      "source": "Dimensions",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1437"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.discuss.photo",
+      "source": "Discuss photo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.discuss.photo.failed",
+      "source": "Discuss photo failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1565"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dismissed.value.import.batch.value",
+      "source": "Dismissed {0} import batch{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memoryImportDismiss.js:43"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.downloaded.value.photos.zip",
+      "source": "Downloaded {0} photos (zip)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2736"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.downloading.value.photo.value",
+      "source": "Downloading {0} photo{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2764"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.e.g.vacation.2026",
+      "source": "e.g. Vacation 2026",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:749"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.e",
+      "source": "Edit (E)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.name",
+      "source": "Edit name",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2182"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.photo",
+      "source": "Edit photo",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1365"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.value.3a91eb48",
+      "source": "Edit: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2192",
+        "static/js/galleryEditor.js:4285"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edited",
+      "source": "Edited",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1357"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.clear.ai.tags.value",
+      "source": "Failed to clear AI tags: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2478"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.create.album.for",
+      "source": "Failed to create album for",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:311"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.photo",
+      "source": "Failed to delete photo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1872"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.value.of.value.albums",
+      "source": "Failed to delete {0} of {1} albums",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:825"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.delete.value.of.value.photos",
+      "source": "Failed to delete {0} of {1} photos",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2694"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.fetch.gallery.library",
+      "source": "Failed to fetch gallery library",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:711"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.fetch.tag.queue",
+      "source": "Failed to fetch tag queue",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2384"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.remove.tag",
+      "source": "Failed to remove tag",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1579"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.rename",
+      "source": "Failed to rename",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1904"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.tags",
+      "source": "Failed to save tags",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.set.cover",
+      "source": "Failed to set cover",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1861",
+        "static/js/gallery.js:1864"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.update.album",
+      "source": "Failed to update album",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1978"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.favorited.value.photo.value",
+      "source": "Favorited {0} photo{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2776"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fill",
+      "source": "fill",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1636"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.filter.to.photos.tagged.value",
+      "source": "Filter to photos tagged “{1}”",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1452"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.filter.to.photos.tagged.value.5e0cd98b",
+      "source": "Filter to photos tagged “{0}”",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1955"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.filtered.to.tag.click.to.remove",
+      "source": "Filtered to tag — click × to remove",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gallery.delete.error",
+      "source": "Gallery delete error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:179"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gallery.drop.error",
+      "source": "Gallery drop error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2605",
+        "static/js/gallery.js:2627"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gallery.fetch.error",
+      "source": "Gallery fetch error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:130"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gallery.patch.error",
+      "source": "Gallery patch error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:162"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.editor",
+      "source": "Image Editor",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1097"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.dismiss.failed",
+      "source": "Import dismiss failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memoryImportDismiss.js:19",
+        "static/js/memoryImportDismiss.js:34",
+        "static/js/memoryImportDismiss.js:48"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.a671a412",
+      "source": "imported",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1435"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.instagram.1080.1080",
+      "source": "Instagram — 1080 × 1080",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1085"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.larr.back",
+      "source": "&larr; Back",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1363"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.letter.300dpi.2550.3300",
+      "source": "Letter (300dpi) — 2550 × 3300",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1088"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.name.your.new.album",
+      "source": "Name your new album.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:749"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.album",
+      "source": "+ New album",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:542"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.album.9997cb01",
+      "source": "New album",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:563",
+        "static/js/gallery.js:749"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.new.canvas.2db09cce",
+      "source": "New canvas...",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1100"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.newest.first.65ebb138",
+      "source": "↓ Newest first",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2076"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.next.b24e35e3",
+      "source": "Next (→)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1416"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.albums.match.value",
+      "source": "No albums match \"{0}\".",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:548"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.albums.yet",
+      "source": "No albums yet.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:541"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.file.provided",
+      "source": "No file provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:269"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.image",
+      "source": "No image",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:504",
+        "routes/gallery/gallery_routes.py:531"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.image.files.found.on.disk",
+      "source": "No image files found on disk",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:945"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.image.provided",
+      "source": "No image provided",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:382"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.images.found",
+      "source": "No images found",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:922"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.images.found.in.that.drop",
+      "source": "No images found in that drop",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:349"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.images.or.videos.in.that.folder",
+      "source": "No images or videos in that folder",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:773"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.images.specified",
+      "source": "No images specified",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/gallery/gallery_routes.py:913"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.photos.yet.click.upload.or.drag.and.drop.to",
+      "source": "No photos yet. Click Upload or drag-and-drop to get started!",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1201"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.untagged.photos.in.value",
+      "source": "No untagged photos in {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2386"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ocr.caption",
+      "source": "OCR Caption",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1434"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.oldest.b8901832",
+      "source": "oldest",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2077"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.oldest.first",
+      "source": "↑ Oldest first",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2077"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.chat",
+      "source": "Open chat",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1371",
+        "static/js/tasks.js:2479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.source.chat",
+      "source": "Open source chat",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.options",
+      "source": "Options",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:595",
+        "static/js/modelPicker.js:664",
+        "static/js/providerControl.js:121"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.or.blob",
+      "source": "/... or /blob/",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "services/memory/skill_importer.py:470"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.or.pick.a.template",
+      "source": "Or pick a template",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1103"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.people.in.this.photo",
+      "source": "People in this photo",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo",
+      "source": "Photo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1221",
+        "static/js/gallery.js:1783"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo.actions",
+      "source": "Photo actions",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1377"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photo.deleted",
+      "source": "Photo deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1880"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.photos",
+      "source": "Photos",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2039",
+        "static/js/slashCommands.js:3560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pick.a.chat.model.first",
+      "source": "Pick a chat model first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1547"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.pick.a.folder",
+      "source": "Pick a folder",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:574"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.portrait.1080.1920",
+      "source": "Portrait — 1080 × 1920",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1084"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.postcard.1500.1050",
+      "source": "Postcard — 1500 × 1050",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1086"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.previous.6603747f",
+      "source": "Previous (←)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1409"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.random.order",
+      "source": "↭ Random order",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2075"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.all.ai.generated.tags.from.every.photo.your.own",
+      "source": "Remove all AI-generated tags from every photo? Your own tags are kept.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2465"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.tag",
+      "source": "Remove tag",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1452",
+        "static/js/gallery.js:1959",
+        "static/js/gallery.js:1960"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remove.tag.filter",
+      "source": "Remove tag filter",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:396"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.removed.from.album",
+      "source": "Removed from album",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.album",
+      "source": "Rename album:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:709"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rename.failed",
+      "source": "Rename failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:720"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resume.value",
+      "source": "Resume {3}",
+      "placeholders": [
+        "3"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:932"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.90.clockwise",
+      "source": "Rotate 90° clockwise",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1406"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.90.counter.clockwise",
+      "source": "Rotate 90° counter-clockwise",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1403"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.failed",
+      "source": "Rotate failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1824",
+        "static/js/gallery.js:1841"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.left",
+      "source": "Rotate left",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1403",
+        "static/js/galleryEditor.js:364"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotate.right",
+      "source": "Rotate right",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1406"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rotated",
+      "source": "Rotated",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1837"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saved.projects",
+      "source": "Saved projects",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1112"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.albums",
+      "source": "Search albums...",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:462"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.photos.tags",
+      "source": "Search photos, tags...",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2067"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.projects",
+      "source": "Search projects…",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1113"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.a.size",
+      "source": "Select a size…",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.albums.first",
+      "source": "Select albums first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:503"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.for.bulk.actions",
+      "source": "Select for bulk actions",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2079",
+        "static/js/gallery.js:464"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.select.photos.first",
+      "source": "Select photos first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2685"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.set.as.album.cover",
+      "source": "Set as album cover",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1394"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shuffle.187dc570",
+      "source": "shuffle",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2075"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.square.hd.1024.1024",
+      "source": "Square HD — 1024 × 1024",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1082"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.a.blank.canvas.or.open.a.photo.from.your",
+      "source": "Start a blank canvas, or open a photo from your gallery to edit it.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.a.new.chat.with.this.photo",
+      "source": "Start a new chat with this photo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1369"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.ai.tag",
+      "source": "Start AI tag",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2111"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tag.all",
+      "source": "Tag All",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2393"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tag.value.of.value.untagged.photo.value.in.value",
+      "source": "Tag {0} of {1} untagged photo{2} in {3}?",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2392"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tagged.value.photo.value",
+      "source": "Tagged {0} photo{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2437"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tagged.value.photo.value.value",
+      "source": "Tagged {0} photo{1} “{2}”",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.to.tag",
+      "source": "to tag",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2068"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.toggle.multi.select",
+      "source": "Toggle multi-select",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1114"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.a.tag.and.press.enter.to.add.it",
+      "source": "Type a tag and press Enter to add it",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1450"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.untitled.photo.press.enter.to.save",
+      "source": "Untitled photo (press Enter to save)",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1425"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload",
+      "source": "Upload",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1196"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.album",
+      "source": "Upload album",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:573"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.here",
+      "source": "Upload here",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:601"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.photos.or.videos",
+      "source": "Upload photos or videos",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.duplicates",
+      "source": "({0} duplicates)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:226"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.failed.388d9b5a",
+      "source": "({0} failed)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2427",
+        "static/js/gallery.js:2428"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.failed.6ec796ba",
+      "source": "— {0} failed",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2423"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.photo.value",
+      "source": "{0} photo{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:357"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.photo.value.4fad0334",
+      "source": "{8} photo{9}",
+      "placeholders": [
+        "8",
+        "9"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:615"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.photo.value.deleted",
+      "source": "{0} photo{1} deleted",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2698"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.tagged",
+      "source": "{0}/{1} tagged",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:36"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vision.model",
+      "source": "vision model",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.widescreen.1920.1080",
+      "source": "Widescreen — 1920 × 1080",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:1083"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.own.tags.are.kept",
+      "source": ". Your own tags are kept.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.zipping.value.photos",
+      "source": "Zipping {0} photos…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/gallery.js:2719"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

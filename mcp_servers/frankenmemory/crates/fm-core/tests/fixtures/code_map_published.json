@@ -1,0 +1,22 @@
+{
+  "schema": "open-clank.code-map/v1",
+  "operation": "overview",
+  "authority":{"variant":"published","receipt":{"workspace_id":"fixture-workspace","registration_id":"fixture-registration","source_snapshot_id":"fixture-snapshot","checkout_id":"fixture-checkout","head_generation":"fixture-head","admission_epoch":1,"policy_generation":1,"config_fingerprint":"fixture-producer"},"selection_policy_digest":"fixture-policy","summary_id":"fixture-summary"},
+  "root": null,
+  "direction": "both",
+  "relations": ["containment","import","call"],
+  "nodes": [
+    {"id":"vm1:n:published-folder","label":"src","kind":"folder","parent":null,"source_files":2,"asset_files":1,"languages":[{"language":"python","count":2}]},
+    {"id":"vm1:n:published-caller","label":"caller.py","kind":"file","parent":"vm1:n:published-folder","source_files":1,"asset_files":0,"languages":[{"language":"python","count":1}]},
+    {"id":"vm1:n:published-target","label":"target.py","kind":"file","parent":"vm1:n:published-folder","source_files":1,"asset_files":0,"languages":[{"language":"python","count":1}]}
+  ],
+  "edges": [
+    {"id":"vm1:e:published-contains-caller","from":"vm1:n:published-folder","to":"vm1:n:published-caller","relation":"containment","state":"structure","count":1,"selection_id":null},
+    {"id":"vm1:e:published-contains-target","from":"vm1:n:published-folder","to":"vm1:n:published-target","relation":"containment","state":"structure","count":1,"selection_id":null},
+    {"id":"vm1:e:published-calls","from":"vm1:n:published-caller","to":"vm1:n:published-target","relation":"call","state":"exact","count":1,"selection_id":"vm1:s:published-calls"}
+  ],
+  "coverage":{"inventory_complete":true,"observed_entries":4,"total_entries":4,"indexed_files":2,"parse_failed_files":0,"ignored_entries":1,"unsupported_entries":1,"unavailable_entries":0,"dependencies":"complete"},
+  "page":{"returned_nodes":3,"returned_edges":3,"remaining_nodes":0,"remaining_edges":0,"complete":true,"next_cursor":null,"truncated":false},
+  "selection":null,
+  "cost":{"inspected_entries":5,"sql_vm_steps":0,"metadata_bytes":0,"retained_summary_bytes":0,"serialized_bytes":0,"source_bytes_read":0,"policy_bytes_read":0,"summary_cache_hit":false}
+}

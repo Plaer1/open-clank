@@ -1,4 +1,4 @@
-"""Search provider implementations: SearXNG, Brave, DuckDuckGo, Google PSE, Tavily, Serper."""
+"""Search provider implementations: SearXNG, Brave, Kagi, DuckDuckGo, Google PSE, Tavily, Serper."""
 
 import json
 import logging
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_INFO = {
     "searxng":  ("SearXNG",           False, True),
     "brave":    ("Brave Search",      True,  False),
+    "kagi":     ("Kagi Search",       True,  False),
     "duckduckgo": ("DuckDuckGo",      False, False),
     "google_pse": ("Google PSE",      True,  False),
     "tavily":   ("Tavily",            True,  False),
@@ -52,6 +53,7 @@ def _get_provider_key(provider: str) -> str:
     settings = _get_search_settings()
     key_map = {
         "brave": "brave_api_key",
+        "kagi": "kagi_api_key",
         "google_pse": "google_pse_key",
         "tavily": "tavily_api_key",
         "serper": "serper_api_key",
@@ -67,6 +69,7 @@ def _get_provider_key(provider: str) -> str:
         return legacy
     env_map = {
         "brave": "DATA_BRAVE_API_KEY",
+        "kagi": "KAGI_API_TOKEN",
         "google_pse": "GOOGLE_API_KEY",
         "tavily": "TAVILY_API_KEY",
         "serper": "SERPER_API_KEY",
@@ -132,12 +135,41 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 _GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,mojeek,presearch")
 
 
+def _route_timeout(route, default=REQUEST_TIMEOUT):
+    return route.remaining_timeout() if route is not None else default
+
+
+def _route_safe(route, provider):
+    if route is None:
+        return _safesearch_for(provider)
+    level = (route.safe_search or "strict").lower()
+    if provider == "searxng":
+        return {"strict": "2", "moderate": "1", "off": "0"}.get(level, "2")
+    if provider == "duckduckgo_lib":
+        return {"strict": "on", "moderate": "moderate", "off": "off"}.get(level, "on")
+    if provider == "duckduckgo_html":
+        return {"strict": "1", "moderate": "-1", "off": "-2"}.get(level, "1")
+    if provider in ("google_pse", "serper"):
+        return None if level == "off" else "active"
+    # Brave's documented enum is strict/off for both web and image search.
+    if provider == "brave":
+        return "off" if level == "off" else "strict"
+    return {"strict": "strict", "moderate": "moderate", "off": "off"}.get(level, "strict")
+
+
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
-                       time_filter: Optional[str] = None) -> List[dict]:
+                       time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using SearXNG JSON API. Returns list of {title, url, snippet}."""
     count = count if count is not None else _get_result_count()
-    instance = _get_search_instance()
-    api_key = ""
+    if route is not None:
+        route.remaining_timeout()
+    # A routed call must use the immutable endpoint captured before it entered
+    # the worker.  Re-reading settings here can send an in-flight request to a
+    # different deployment after a configuration change.
+    instance = getattr(route, "endpoint", "") if route is not None else _get_search_instance()
+    if route is not None and not instance:
+        raise RuntimeError("SearXNG endpoint is not configured")
+    api_key = getattr(route, "credential", None) if route else ""
     headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -154,17 +186,15 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
     params = {
         "q": query,
         "format": "json",
-        "language": "en",
-        "safesearch": _safesearch_for("searxng"),
+        "language": getattr(route, "locale", "en") if route else "en",
+        "safesearch": _route_safe(route, "searxng"),
     }
     q_lc = query.lower()
     is_news = time_filter is not None or any(h in q_lc for h in _NEWS_HINTS)
     if is_news and categories == "general":
         params["categories"] = "news"
         if time_filter in ("day", "week", "month", "year"):
-            # 'day' is too sparse on most SearXNG news engines — widen to a week
-            # so there's enough volume; the news category already biases recent.
-            params["time_range"] = "week" if time_filter in ("day", "week") else time_filter
+            params["time_range"] = time_filter
     else:
         params["categories"] = categories
         # Route general queries to engines that aren't blocked (default general
@@ -184,11 +214,13 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             ]
 
         def _run(search_params):
+            if route is not None:
+                route.remaining_timeout()
             response = httpx.get(
                 f"{instance}/search",
                 params=search_params,
                 headers=headers or None,
-                timeout=15,
+                timeout=_route_timeout(route, 15),
             )
             response.raise_for_status()
             data = response.json()
@@ -196,7 +228,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
 
         active_params = params
         parsed, data = _run(active_params)
-        if not parsed and is_news and categories == "general":
+        if not parsed and route is None and is_news and categories == "general":
             # Some self-hosted SearXNG configs have no working news engines.
             # Fall back to the known-good general engines before reporting an
             # empty search, otherwise common queries like "Canada news" fail.
@@ -215,7 +247,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             )
             active_params = fallback
             parsed, data = _run(active_params)
-        if not parsed and active_params.get("language"):
+        if not parsed and route is None and active_params.get("language"):
             fallback = dict(active_params)
             fallback.pop("language", None)
             logger.info(
@@ -224,7 +256,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             )
             active_params = fallback
             parsed, data = _run(active_params)
-        if not parsed and active_params.get("engines"):
+        if not parsed and route is None and active_params.get("engines"):
             fallback = dict(active_params)
             fallback.pop("engines", None)
             logger.info(
@@ -239,11 +271,13 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
                 logger.info(f"SearXNG unresponsive engines for {query!r}: {unresponsive}")
         return parsed
     except Exception as e:
-        logger.warning(f"SearXNG JSON API search failed: {e}")
+        logger.warning("SearXNG JSON API search failed: %s", type(e).__name__)
+        if route is not None:
+            raise
         html_results = searxng_search(query, max_results=count)
         if html_results:
-            logger.info(f"SearXNG HTML fallback returned {len(html_results)} results for: {query}")
-        return html_results
+            logger.info("SearXNG HTML fallback returned %d results", len(html_results))
+            return html_results
 
 
 def searxng_search(query, max_results=10):
@@ -275,37 +309,41 @@ def searxng_search(query, max_results=10):
             logger.info(f"SearXNG search (HTML) returned {len(results)} results")
             return results
     except Exception as e:
-        logger.error(f"SearXNG search failed: {e}")
+        logger.error("SearXNG HTML search failed: %s", type(e).__name__)
     return []
 
 
 # ── Brave ──
 
-def brave_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+def brave_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using Brave API with key from admin settings or env var."""
     count = count if count is not None else _get_result_count()
-    api_key = _get_provider_key("brave") or os.environ.get("DATA_BRAVE_API_KEY") or ""
-    return _brave_search_impl(query, count, time_filter, search_config={"brave_api_key": api_key})
+    api_key = (getattr(route, "credential", "") if route is not None else _get_provider_key("brave") or os.environ.get("DATA_BRAVE_API_KEY") or "")
+    return _brave_search_impl(query, count, time_filter, search_config={"brave_api_key": api_key}, route=route)
 
 
-def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None, search_config: dict = None) -> List[dict]:
+def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None, search_config: dict = None, route=None) -> List[dict]:
     """Core Brave API call. Returns a list of result dicts or an empty list on failure."""
     enhanced_query = build_enhanced_query(query, time_filter)
     config = search_config or {}
 
     brave_api_key = config.get("brave_api_key")
-    if not brave_api_key:
+    if not brave_api_key and route is None:
         brave_api_key = os.environ.get("DATA_BRAVE_API_KEY")
 
     if not brave_api_key:
         logger.warning("Brave API key not found, returning empty results for fallback")
         return []
 
+    image_intent = bool(route is not None and getattr(route, "intent", "web") == "image")
+    if image_intent:
+        return _brave_image_search_impl(query, count, time_filter, api_key=brave_api_key, route=route)
+
     headers = {"X-Subscription-Token": brave_api_key, "Accept": "application/json"}
     params = {
         "q": enhanced_query,
         "count": count,
-        "safesearch": _safesearch_for("brave"),
+        "safesearch": _route_safe(route, "brave"),
     }
     if time_filter:
         time_map = {"day": "day", "week": "week", "month": "month", "year": "year"}
@@ -318,22 +356,26 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
             "https://api.search.brave.com/res/v1/web/search",
             headers=headers,
             params=params,
-            timeout=REQUEST_TIMEOUT,
+            timeout=_route_timeout(route),
         )
         if response.status_code == 429:
             raise RateLimitError("Brave rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"NetworkError during Brave search: {e}")
+        error_logger.error("NetworkError during Brave search: %s", type(e).__name__)
+        if route is not None:
+            raise
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        if route is not None:
+            raise
         return []
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Brave API response: {e}")
+        logger.error("Failed to parse Brave API response: %s", type(e).__name__)
         return []
 
     results = []
@@ -351,6 +393,88 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
 
     logger.info(f"Brave search returned {len(results)} results")
     return results
+
+
+def _brave_image_search_impl(query: str, count: int, time_filter: Optional[str] = None,
+                             api_key: str = "", route=None) -> List[dict]:
+    """Return Brave image results with explicit page/original/thumbnail roles."""
+    params = {"q": build_enhanced_query(query, time_filter), "count": count,
+              "safesearch": _route_safe(route, "brave")}
+    try:
+        response = httpx.get("https://api.search.brave.com/res/v1/images/search",
+                             headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+                             params=params, timeout=_route_timeout(route))
+        if response.status_code == 429:
+            raise RateLimitError("Brave image rate limit hit")
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.RequestError, RateLimitError):
+        if route is not None:
+            raise
+        return []
+    except (ValueError, json.JSONDecodeError):
+        if route is not None:
+            raise
+        return []
+    rows = []
+    for item in (payload.get("results") or [])[:count]:
+        page_url = str(item.get("url") or "")
+        properties = item.get("properties") or {}
+        original_url = str(properties.get("url") or item.get("image_url") or "")
+        thumbnail = item.get("thumbnail") or {}
+        thumbnail_url = str(thumbnail.get("src") or thumbnail.get("url") or "")
+        if not page_url or not original_url:
+            continue
+        rows.append({"url": page_url, "title": item.get("title", ""),
+                     "snippet": item.get("description", "") or "",
+                     "image_url": original_url, "thumbnail_url": thumbnail_url or None,
+                     "provider_metadata": {"provider": "brave", "intent": "image",
+                                           "provenance": {"source_page": page_url,
+                                                           "original": original_url,
+                                                           "thumbnail": thumbnail_url or None}}})
+    return rows
+
+
+def kagi_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
+    """Kagi Search API v1 adapter (GET /api/v1/search, Authorization: Bot token)."""
+    count = count if count is not None else _get_result_count()
+    token = getattr(route, "credential", "") if route is not None else _get_provider_key("kagi")
+    if not token:
+        return []
+    params = {"q": query, "limit": count}
+    try:
+        response = httpx.get("https://kagi.com/api/v1/search", params=params,
+                             headers={"Authorization": f"Bot {token}", "Accept": "application/json"},
+                             timeout=_route_timeout(route))
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.RequestError, httpx.HTTPStatusError):
+        if route is not None:
+            raise
+        return []
+    if not isinstance(payload, dict) or payload.get("error") is not None:
+        if route is not None:
+            raise ValueError("Kagi returned an error envelope")
+        return []
+    data = payload.get("data")
+    if not isinstance(data, list):
+        if route is not None:
+            raise ValueError("Kagi response data is malformed")
+        return []
+    rows = []
+    for item in data:
+        if not isinstance(item, dict):
+            if route is not None:
+                raise ValueError("Kagi response contains a malformed result")
+            continue
+        if item.get("t", 0) != 0 or not item.get("url"):
+            continue
+        rows.append({"url": item.get("url", ""), "title": item.get("title", ""),
+                     "snippet": item.get("snippet", ""),
+                     "provider_metadata": {"provider": "kagi", "type": item.get("t", 0)}})
+        if len(rows) >= count:
+            break
+    return rows
 
 
 # ── DuckDuckGo (free, no key) ──
@@ -381,16 +505,16 @@ def _resolve_ddg_redirect(raw: str) -> str:
     return resolved
 
 
-def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using DuckDuckGo via the duckduckgo-search library. No API key needed."""
     count = count if count is not None else _get_result_count()
     def _html_fallback() -> List[dict]:
         try:
             response = httpx.get(
                 "https://html.duckduckgo.com/html/",
-                params={"q": query, "kp": _safesearch_for("duckduckgo_html")},
+                params={"q": query, "kp": _route_safe(route, "duckduckgo_html")},
                 headers={"User-Agent": WEB_FETCH_USER_AGENT},
-                timeout=REQUEST_TIMEOUT,
+                timeout=_route_timeout(route),
             )
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
@@ -411,13 +535,15 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
             logger.info(f"DuckDuckGo HTML search returned {len(parsed)} results")
             return parsed
         except Exception as e:
-            logger.warning(f"DuckDuckGo HTML search failed: {e}")
+            logger.warning("DuckDuckGo HTML search failed: %s", type(e).__name__)
             return []
 
     try:
         from ddgs import DDGS
     except ImportError:
         logger.warning("duckduckgo-search package not installed; using HTML fallback")
+        if route is not None:
+            raise
         return _html_fallback()
 
     timelimit = None
@@ -426,12 +552,16 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
         timelimit = time_map.get(time_filter)
 
     try:
-        ddgs = DDGS()
+        # Bind the library's own transport timeout to the immutable route
+        # snapshot.  A timeout on the surrounding worker cannot stop a DDGS
+        # request that is still occupying a bounded worker thread.
+        ddgs = DDGS(timeout=_route_timeout(route))
         raw = ddgs.text(
             query,
             max_results=count,
             timelimit=timelimit,
-            safesearch=_safesearch_for("duckduckgo_lib"),
+            safesearch=_route_safe(route, "duckduckgo_lib"),
+            backend="auto",
         )
         results = []
         for item in raw:
@@ -444,15 +574,17 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                 "snippet": item.get("body", ""),
             })
         logger.info(f"DuckDuckGo search returned {len(results)} results")
-        return results or _html_fallback()
+        return results
     except Exception as e:
-        logger.warning(f"DuckDuckGo search failed: {e}")
+        logger.warning("DuckDuckGo search failed: %s", type(e).__name__)
+        if route is not None:
+            raise
         return _html_fallback()
 
 
 # ── Google Programmable Search Engine ──
 
-def google_pse_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+def google_pse_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using Google PSE (Custom Search JSON API).
 
     Requires two keys in settings:
@@ -462,8 +594,8 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
     """
     count = count if count is not None else _get_result_count()
     settings = _get_search_settings()
-    api_key = _get_provider_key("google_pse") or os.environ.get("GOOGLE_API_KEY", "")
-    cx = (settings.get("google_pse_cx") or "").strip() or os.environ.get("GOOGLE_PSE_CX", "")
+    api_key = (getattr(route, "credential", "") if route is not None else _get_provider_key("google_pse") or os.environ.get("GOOGLE_API_KEY", ""))
+    cx = (getattr(route, "google_cx", "") if route is not None else (settings.get("google_pse_cx") or "").strip() or os.environ.get("GOOGLE_PSE_CX", ""))
 
     if not api_key or not cx:
         logger.warning("Google PSE: missing API key or CX ID")
@@ -475,7 +607,7 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
         "q": query,
         "num": min(count, 10),  # Google PSE max is 10 per request
     }
-    safe = _safesearch_for("google_pse")
+    safe = _route_safe(route, "google_pse")
     if safe:
         params["safe"] = safe
     if time_filter:
@@ -488,22 +620,26 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
         response = httpx.get(
             "https://www.googleapis.com/customsearch/v1",
             params=params,
-            timeout=REQUEST_TIMEOUT,
+            timeout=_route_timeout(route),
         )
         if response.status_code == 429:
             raise RateLimitError("Google PSE rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Google PSE search failed: {e}")
+        error_logger.error("Google PSE search failed: %s", type(e).__name__)
+        if route is not None:
+            raise
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        if route is not None:
+            raise
         return []
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Google PSE returned invalid JSON: {e}")
+        error_logger.error("Google PSE returned invalid JSON: %s", type(e).__name__)
         return []
 
     results = []
@@ -523,10 +659,10 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
 
 # ── Tavily ──
 
-def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using Tavily API. Requires search_api_key or TAVILY_API_KEY env var."""
     count = count if count is not None else _get_result_count()
-    api_key = _get_provider_key("tavily") or os.environ.get("TAVILY_API_KEY", "")
+    api_key = (getattr(route, "credential", "") if route is not None else _get_provider_key("tavily") or os.environ.get("TAVILY_API_KEY", ""))
     if not api_key:
         logger.warning("Tavily: no API key configured")
         return []
@@ -546,22 +682,26 @@ def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional
             "https://api.tavily.com/search",
             json=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
+            timeout=_route_timeout(route),
         )
         if response.status_code == 429:
             raise RateLimitError("Tavily rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Tavily search failed: {e}")
+        error_logger.error("Tavily search failed: %s", type(e).__name__)
+        if route is not None:
+            raise
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        if route is not None:
+            raise
         return []
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Tavily returned invalid JSON: {e}")
+        error_logger.error("Tavily returned invalid JSON: %s", type(e).__name__)
         return []
 
     results = []
@@ -582,10 +722,10 @@ def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional
 
 # ── Serper.dev ──
 
-def serper_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+def serper_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None, route=None) -> List[dict]:
     """Search using Serper.dev API. Requires search_api_key or SERPER_API_KEY env var."""
     count = count if count is not None else _get_result_count()
-    api_key = _get_provider_key("serper") or os.environ.get("SERPER_API_KEY", "")
+    api_key = (getattr(route, "credential", "") if route is not None else _get_provider_key("serper") or os.environ.get("SERPER_API_KEY", ""))
     if not api_key:
         logger.warning("Serper: no API key configured")
         return []
@@ -594,7 +734,7 @@ def serper_search(query: str, count: Optional[int] = None, time_filter: Optional
         "q": query,
         "num": count,
     }
-    safe = _safesearch_for("serper")
+    safe = _route_safe(route, "serper")
     if safe:
         payload["safe"] = safe
     if time_filter:
@@ -607,22 +747,26 @@ def serper_search(query: str, count: Optional[int] = None, time_filter: Optional
             "https://google.serper.dev/search",
             json=payload,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
+            timeout=_route_timeout(route),
         )
         if response.status_code == 429:
             raise RateLimitError("Serper rate limit hit")
         response.raise_for_status()
     except httpx.RequestError as e:
-        error_logger.error(f"Serper search failed: {e}")
+        error_logger.error("Serper search failed: %s", type(e).__name__)
+        if route is not None:
+            raise
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        if route is not None:
+            raise
         return []
 
     try:
         data = response.json()
     except json.JSONDecodeError as e:
-        error_logger.error(f"Serper returned invalid JSON: {e}")
+        error_logger.error("Serper returned invalid JSON: %s", type(e).__name__)
         return []
 
     results = []

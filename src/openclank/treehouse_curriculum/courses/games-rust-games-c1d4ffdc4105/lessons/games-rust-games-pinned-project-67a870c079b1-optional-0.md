@@ -1,0 +1,1 @@
+The response contains the real toolchain version, lockfile evidence and observed build result; failed setup remains pending practical work.

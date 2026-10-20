@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from '../../static/js/copal/bases.js';
+import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, canonicalSourceProperty, setFrontmatterProperty, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from '../../static/js/copal/bases.js';
 
 test('default Base is a versioned live table definition', () => {
   const base = makeDefaultBase('Projects');
   assert.equal(base.version, 1);
   assert.deepEqual(base.views[0].columns.map((column) => column.property), ['file.name', 'tags']);
   assert.equal(JSON.parse(serializeBase(base)).extensions.title, 'Projects');
+});
+
+test('canonicalSourceProperty maps editable aliases and preserves derived namespaces', () => {
+  assert.equal(canonicalSourceProperty('note.status'), 'status');
+  assert.equal(canonicalSourceProperty('properties.tags'), 'tags');
+  assert.equal(canonicalSourceProperty('file.tags'), 'file.tags');
+  assert.equal(canonicalSourceProperty('formula.total'), 'formula.total');
 });
 
 test('sort cycles asc, desc, none and preserves source definition', () => {
@@ -19,6 +26,9 @@ test('sort cycles asc, desc, none and preserves source definition', () => {
   assert.deepEqual(asc.views[0].sorts, [{ property: 'file.name', direction: 'asc' }]);
   assert.equal(desc.views[0].sorts[0].direction, 'desc');
   assert.deepEqual(none.views[0].sorts, []);
+  const priorities = { views: [{ id: 'table', sorts: [{ property: 'file.tags', direction: 'asc' }, { property: 'file.name', direction: 'asc' }] }] };
+  const changedPrimary = updateViewSort(priorities, 'table', 'file.tags', true);
+  assert.deepEqual(changedPrimary.views[0].sorts, [{ property: 'file.tags', direction: 'desc' }, { property: 'file.name', direction: 'asc' }]);
 });
 
 test('cell formatting exposes missing and compound values honestly', () => {
@@ -159,4 +169,14 @@ test('reorderBaseColumn moves a column to a new index', () => {
   // Invalid indices
   assert.equal(reorderBaseColumn(def, 'table', -1, 0), null);
   assert.equal(reorderBaseColumn(def, 'table', 0, 5), null);
+});
+
+test('setFrontmatterProperty preserves mixed source bytes and distinguishes clear from null', () => {
+  const source = '---\r\nstatus: "draft # literal" # keep\ntags: [one]\r\n---\r\n\nDraft prose — keep\r\n';
+  assert.equal(setFrontmatterProperty(source, 'status', 'ready'), '---\r\nstatus: "ready" # keep\ntags: [one]\r\n---\r\n\nDraft prose — keep\r\n');
+  const nulled = setFrontmatterProperty(source, 'status', null);
+  assert.match(nulled, /status: null # keep/);
+  assert.equal(setFrontmatterProperty(nulled, 'status', null, { clear:true }), '---\r\ntags: [one]\r\n---\r\n\nDraft prose — keep\r\n');
+  assert.equal(setFrontmatterProperty(source, 'status', null, { clear:true }), '---\r\ntags: [one]\r\n---\r\n\nDraft prose — keep\r\n');
+  assert.equal(setFrontmatterProperty('# prose', 'status', 'ready'), '---\nstatus: "ready"\n---\n# prose');
 });

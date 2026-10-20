@@ -13,6 +13,7 @@ import type {
   PermissionRequest,
   QuestionRequest,
   SessionStatus,
+  SessionGoalGetResponse,
   TextPart,
   Config as SdkConfig,
 } from "@mimo-ai/sdk/v2"
@@ -325,7 +326,8 @@ export type TuiSidebarGoalVerdict = {
 }
 
 export type TuiSidebarGoal = {
-  condition?: string
+  state?: SessionGoalGetResponse["state"]
+  analytics?: SessionGoalGetResponse["analytics"]
   verdicts: { [messageID: string]: TuiSidebarGoalVerdict }
   lastMessageID?: string
 }

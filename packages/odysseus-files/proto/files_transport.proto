@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package openclank.files.transport.v1;
+
+// Private local transport for the canonical open-clank.files/v1 JSON
+// envelope. Keeping that envelope intact lets framed stdio and Tonic run in
+// parity while typed provider handles are still being implemented.
+service FilesTransport {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Dispatch(DispatchRequest) returns (DispatchResponse);
+  rpc Read(ReadRequest) returns (stream ReadChunk);
+  rpc Thumbnail(NativeThumbnailRequest) returns (NativeThumbnailResponse);
+  rpc Watch(WatchRequest) returns (stream WatchEvent);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string transport = 2;
+  uint32 protocol_major = 3;
+  uint32 protocol_minor = 4;
+  uint32 max_unary_bytes = 5;
+  uint32 max_chunk_bytes = 6;
+  uint32 producer_queue_chunks = 7;
+  bool stable_object_handles = 8;
+  bool supports_watch = 9;
+  bool supports_watch_resume = 10;
+}
+
+message DispatchRequest {
+  bytes envelope_json = 1;
+}
+
+message DispatchResponse {
+  bytes envelope_json = 1;
+}
+
+message ReadRequest {
+  // A canonical ClientRequest whose operation is read_range. The transport
+  // supplies each bounded offset/length payload and the Rust service performs
+  // normal app/agent authorization for every emitted chunk.
+  bytes envelope_json = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+  uint32 chunk_bytes = 4;
+}
+
+message ReadChunk {
+  string request_id = 1;
+  uint64 sequence = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+  bool final_chunk = 5;
+  bool eof = 6;
+}
+
+message NativeThumbnailRequest {
+  // Canonical ClientRequest with operation=thumbnail and a server-issued
+  // ResourceHandle target. Dimensions/deadline live inside its bounded JSON
+  // payload so framed and typed contracts cannot diverge.
+  bytes envelope_json = 1;
+}
+
+message NativeThumbnailResponse {
+  bytes png = 1;
+  uint32 requested_width = 2;
+  uint32 requested_height = 3;
+  uint32 scale_milli = 4;
+}
+
+message WatchRequest {
+  // Canonical ClientRequest with operation=watch_subscribe and a directory
+  // Path target. The path stays inside the private UDS. Browser-facing events
+  // deliberately contain no host path or provider identity.
+  bytes envelope_json = 1;
+}
+
+message WatchEvent {
+  string request_id = 1;
+  uint64 sequence = 2;
+  string kind = 3;
+  bool rescan_required = 4;
+  uint64 observed_unix_ms = 5;
+  uint64 policy_generation = 6;
+}

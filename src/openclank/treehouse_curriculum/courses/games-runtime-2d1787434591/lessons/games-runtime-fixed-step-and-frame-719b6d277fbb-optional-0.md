@@ -1,0 +1,1 @@
+Positions are 2.6,3.2,3.8; movement depends on simulated elapsed time rather than the number of rendered frames.

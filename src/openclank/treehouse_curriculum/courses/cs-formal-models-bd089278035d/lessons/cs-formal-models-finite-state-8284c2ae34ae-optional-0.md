@@ -1,0 +1,1 @@
+Reject1010, accept001; retain progress toward101 and whether it has already occurred.

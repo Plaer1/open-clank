@@ -1,4 +1,6 @@
 import socket
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -34,6 +36,7 @@ def _admin_request() -> Request:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
 
@@ -57,25 +60,27 @@ async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_path):
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
+async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
-    socket_path = tmp_path / "docker.sock"
-
-    with socket.socket(socket.AF_UNIX) as unix_socket:
-        unix_socket.bind(str(socket_path))
-        available = await cookbook_routes._binary_available(
-            "docker",
-            None,
-            None,
-            in_container=True,
-            environ={"ODYSSEUS_ENABLE_HOST_DOCKER": "true"},
-            socket_path=str(socket_path),
-        )
+    with tempfile.TemporaryDirectory(prefix="oc-") as directory:
+        socket_path = Path(directory) / "docker.sock"
+        with socket.socket(socket.AF_UNIX) as unix_socket:
+            unix_socket.bind(str(socket_path))
+            available = await cookbook_routes._binary_available(
+                "docker",
+                None,
+                None,
+                in_container=True,
+                environ={"ODYSSEUS_ENABLE_HOST_DOCKER": "true"},
+                socket_path=str(socket_path),
+            )
 
     assert available is True
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 async def test_native_local_docker_still_uses_cli_presence(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
 
@@ -92,6 +97,7 @@ async def test_native_local_docker_still_uses_cli_presence(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 async def test_remote_docker_still_uses_ssh_probe(monkeypatch):
     remote_probe = AsyncMock(return_value=True)
     monkeypatch.setattr(cookbook_routes, "_remote_binary_available", remote_probe)
@@ -128,6 +134,7 @@ async def test_remote_docker_still_uses_ssh_probe(monkeypatch):
         "docker exec ollama-rocm ollama show llama3",
     ],
 )
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 async def test_local_container_serve_returns_host_docker_opt_in_hint(
     monkeypatch,
     tmp_path,
@@ -171,6 +178,7 @@ async def test_local_container_serve_returns_host_docker_opt_in_hint(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 async def test_local_container_serve_allows_generated_docker_exec_when_enabled(
     monkeypatch,
     tmp_path,
@@ -255,6 +263,7 @@ async def test_local_container_serve_allows_generated_docker_exec_when_enabled(
         "docker exec ollama-rocm ollama show llama3 | cat",
     ],
 )
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_arbitrary_docker_commands_stay_blocked(cmd):
     assert cookbook_routes._is_generated_ollama_docker_exec_cmd(cmd) is False
 
@@ -264,6 +273,7 @@ def test_arbitrary_docker_commands_stay_blocked(cmd):
     assert exc.value.status_code == 400
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_generated_ollama_import_shape_is_narrowly_allowed():
     assert cookbook_routes._is_generated_ollama_docker_exec_cmd(
         "docker exec ollama-test ollama-import org/model model 8192 model.gguf"
@@ -276,12 +286,14 @@ def test_generated_ollama_import_shape_is_narrowly_allowed():
     )
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_generated_ollama_show_shape_is_narrowly_allowed():
     assert cookbook_routes._is_generated_ollama_docker_exec_cmd(
         "docker exec ollama-rocm ollama show llama3:latest"
     )
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_local_ollama_docker_access_blocked_in_container_cli_only(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
 
@@ -292,6 +304,7 @@ def test_local_ollama_docker_access_blocked_in_container_cli_only(monkeypatch, t
     ) is True
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_local_ollama_docker_access_not_blocked_for_native_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
 
@@ -302,6 +315,7 @@ def test_local_ollama_docker_access_not_blocked_for_native_cli(monkeypatch, tmp_
     ) is False
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_local_ollama_download_probe_omits_docker_commands_when_blocked():
     lines = []
 
@@ -322,6 +336,7 @@ def test_local_ollama_download_probe_omits_docker_commands_when_blocked():
     assert "exit 127" in rendered
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_local_ollama_download_probe_keeps_docker_fallback_when_allowed():
     lines = []
 

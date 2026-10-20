@@ -11,6 +11,7 @@ import { errors } from "../../error"
 import { lazy } from "@/util/lazy"
 import { Effect } from "effect"
 import { jsonRequest } from "./trace"
+import { Auth } from "@/auth"
 
 export const ProviderRoutes = lazy(() =>
   new Hono()
@@ -34,6 +35,7 @@ export const ProviderRoutes = lazy(() =>
       async (c) =>
         jsonRequest("ProviderRoutes.list", c, function* () {
           const svc = yield* Provider.Service
+          const auth = yield* Auth.Service
           const cfg = yield* Config.Service
           const config = yield* cfg.get()
           const all = yield* Effect.promise(() => ModelsDev.get())
@@ -55,6 +57,7 @@ export const ProviderRoutes = lazy(() =>
             all: Object.values(providers),
             default: Provider.defaultModelIDs(internal),
             connected: Object.keys(connected),
+            authenticated: Object.keys(yield* auth.all().pipe(Effect.orDie)),
           }
         }),
     )
@@ -109,12 +112,15 @@ export const ProviderRoutes = lazy(() =>
       async (c) =>
         jsonRequest("ProviderRoutes.oauth.authorize", c, function* () {
           const providerID = c.req.valid("param").providerID
-          const { method, inputs } = c.req.valid("json")
+          const { method, inputs, flowID, redirectURI, state } = c.req.valid("json")
           const svc = yield* ProviderAuth.Service
           return yield* svc.authorize({
             providerID,
             method,
             inputs,
+            flowID,
+            redirectURI,
+            state,
           })
         }),
     )
@@ -146,13 +152,31 @@ export const ProviderRoutes = lazy(() =>
       async (c) =>
         jsonRequest("ProviderRoutes.oauth.callback", c, function* () {
           const providerID = c.req.valid("param").providerID
-          const { method, code } = c.req.valid("json")
+          const { method, code, flowID } = c.req.valid("json")
           const svc = yield* ProviderAuth.Service
           yield* svc.callback({
             providerID,
             method,
             code,
+            flowID,
           })
+          return true
+        }),
+    )
+    .delete(
+      "/:providerID/oauth/:flowID",
+      validator(
+        "param",
+        z.object({
+          providerID: ProviderID.zod,
+          flowID: z.string().min(16).max(128),
+        }),
+      ),
+      async (c) =>
+        jsonRequest("ProviderRoutes.oauth.cancel", c, function* () {
+          const { providerID, flowID } = c.req.valid("param")
+          const svc = yield* ProviderAuth.Service
+          yield* svc.cancel({ providerID, flowID })
           return true
         }),
     ),

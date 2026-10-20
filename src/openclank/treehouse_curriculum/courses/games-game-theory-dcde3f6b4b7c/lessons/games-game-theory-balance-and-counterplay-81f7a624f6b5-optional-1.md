@@ -1,0 +1,1 @@
+Compare within each opponent column; do not average away the counter.

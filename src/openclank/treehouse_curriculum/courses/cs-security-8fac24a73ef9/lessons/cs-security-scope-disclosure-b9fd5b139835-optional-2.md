@@ -1,0 +1,1 @@
+A coordinated disclosure process includes evidence handling, remediation, and publication timing. Keep the target and permitted actions explicit; if the experiment reaches a different system or unexpected personal data, stop and clarify scope. Applicable legal, contractual, and organizational rules must be checked for the actual situation.

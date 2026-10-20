@@ -1,0 +1,1 @@
+Salt is not encryption, and hiding the algorithm is not the main defense.

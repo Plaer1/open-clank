@@ -1,0 +1,19 @@
+{
+  "id": "nl",
+  "name": "Nederlands",
+  "dir": "ltr",
+  "catalog": "nl",
+  "html_lang": "nl",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4845,
+    "english_fallback": 4777
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

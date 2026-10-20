@@ -1,0 +1,1 @@
+Adding clone can make code compile while changing cost and ownership intent.

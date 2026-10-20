@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Clank Shell Admission",
+  "version": "0.1.0",
+  "identifier": "dev.openclank.shell-admission",
+  "build": {
+    "frontendDist": "../../static"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "capabilities": ["main-window-no-native-api"]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["../../static/icons/icon-512.png"]
+  }
+}

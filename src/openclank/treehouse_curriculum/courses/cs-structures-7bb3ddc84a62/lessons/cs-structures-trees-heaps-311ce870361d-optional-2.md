@@ -1,0 +1,1 @@
+For a binary heap, access-min is O(1), insertion/removal O(log n); arbitrary membership is generally O(n). A trie follows key components and supports prefixes; its cost depends on key length and representation. Balanced search trees preserve ordering; rotations repair shape without changing key order.

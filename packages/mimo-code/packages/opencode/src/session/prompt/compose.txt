@@ -113,13 +113,11 @@ Instructions say WHAT, not HOW. "Add X" or "Fix Y" doesn't mean skip workflows.
 
 ## Compose Skills Visibility
 
-The `<available_skills>` block below lists additional skills exclusive to compose mode. They are invoked via the skill tool identically to any other skill.
+Compose skills (compose:ask, compose:worktree, compose:tdd, etc.) are listed in the normal skills section above. They are invoked via the skill tool identically to any other skill.
 
-**Dispatching subagents with skills:**
+**Dispatching subagents:**
 
-Subagents do not automatically see compose skills. To have a subagent follow a compose skill, pass the relevant `<available_skills>` block (or subset) in the subagent's prompt.
-
-{{compose_skills}}
+Subagents are leaf workers that execute specific instructions. When dispatching a subagent, distill the relevant skill's guidance into concrete instructions in its prompt.
 
 ## Output Directories
 

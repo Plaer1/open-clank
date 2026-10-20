@@ -1,0 +1,1 @@
+Toy values [2,4,8] with weights [0.5,0.3,0.2] combine to 3.8. Changing weights to [0.2,0.3,0.5] gives 5.6. This is arithmetic illustrating information combination, not inspected real attention or an explanation of an answer’s correctness.

@@ -1,0 +1,1 @@
+Original is reflexive, antisymmetric and transitive, but not symmetric because (1,0) is absent: a partial order. Adding (1,0) makes symmetry hold but breaks antisymmetry for0≠1; transitivity holds because all four pairs on {0,1} plus(2,2) exist. Equivalence classes {0,1} and {2}.

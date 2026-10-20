@@ -10,6 +10,7 @@ class _FakeRag:
     def search(self, query, k=5):
         return [
             {"text": "alpha", "source": "a.txt", "score": 0.9},
+            {"document": "beta", "metadata": None, "similarity": 0.8},
             "corrupt-row",
             None,
         ]
@@ -22,5 +23,7 @@ def test_query_skips_non_dict_rag_rows():
     svc.rag = _FakeRag()
     out = asyncio.run(svc.query("anything"))
     # old code called r.get(...) on the str/None rows and raised AttributeError.
-    assert [c.text for c in out] == ["alpha"]
+    assert [c.text for c in out] == ["alpha", "beta"]
     assert out[0].source == "a.txt"
+    assert out[1].source == "unknown"
+    assert out[1].metadata == {}

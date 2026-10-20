@@ -1,0 +1,1 @@
+A coefficient counts arrangements, not the size of the total represented by its exponent.

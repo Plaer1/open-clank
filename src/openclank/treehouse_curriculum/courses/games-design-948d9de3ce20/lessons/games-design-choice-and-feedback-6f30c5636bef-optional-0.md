@@ -1,0 +1,1 @@
+Choices have different consequences; prediction and result cues are distinguishable; critical information is available without color alone.

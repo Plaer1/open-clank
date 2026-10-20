@@ -1,0 +1,1 @@
+Original {A}→{A,B}→{A,B,C}→{A,B,C,D,E}; route A-B-C-E. Cut BC stops at {A,B}. Add BD then cut BC: {A}→{A,B}→{A,B,D}→all; route A-B-D-E. Forgetting/refusal/contact duration are omitted. CDE is a local triangle, not a statistical community proof.

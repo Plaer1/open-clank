@@ -1,8 +1,15 @@
-// Native MiMo provider authentication, surfaced inside Odysseus Settings.
+// Provider-account connections inside the original Local/API model workflow.
+
+import modelSharing from './modelSharing.js';
+import { spriteLogo } from './providers.js';
 
 let root;
+let _bound = false;
 let providers = [];
+let selectedProviderId = '';
+let explicitSelection = false;
 let activeAbort;
+let activeFlowId;
 let onCatalogChanged = async () => {};
 
 function node(tag, attrs = {}, text = '') {
@@ -16,11 +23,39 @@ function node(tag, attrs = {}, text = '') {
   return el;
 }
 
-function setStatus(message, error = false) {
-  const status = root?.querySelector('#mimo-provider-status');
+function providerId(provider) {
+  return String(provider?.id || '').trim().toLowerCase();
+}
+
+function providerName(provider) {
+  if (providerId(provider) === 'xiaomi') return 'Xiaomi';
+  return String(provider?.name || provider?.id || 'Provider').trim();
+}
+
+function isPublicProvider(provider) {
+  const id = providerId(provider);
+  return Boolean(id) && id !== 'mimo' && !id.startsWith('ody-');
+}
+
+function providerFamilyLabel(provider) {
+  const name = providerName(provider);
+  const family = providerId(provider) === 'xiaomi'
+    ? 'MiMo'
+    : String(provider?.family || '').trim();
+  if (!family || family.toLowerCase() === name.toLowerCase()) return '';
+  return `${family} models`;
+}
+
+function writeStatus(id, message, error = false) {
+  const status = document.getElementById(id);
   if (!status) return;
   status.textContent = message || '';
   status.style.color = error ? 'var(--red, #ff5555)' : '';
+}
+
+function setStatus(message, error = false) {
+  writeStatus('mimo-provider-status', message, error);
+  writeStatus('mimo-connected-provider-status', message, error);
 }
 
 async function request(path, options = {}) {
@@ -40,18 +75,35 @@ async function changed(message) {
   await load();
 }
 
-function closeFlow() {
+function closeFlow({ cancel = true } = {}) {
   if (activeAbort) activeAbort.abort();
   activeAbort = undefined;
-  const flow = root?.querySelector('#mimo-provider-flow');
-  if (flow) flow.replaceChildren();
+  if (cancel && activeFlowId) {
+    const flowId = activeFlowId;
+    activeFlowId = undefined;
+    request('/oauth/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ flow_id: flowId }),
+    }).catch(() => {});
+  } else {
+    activeFlowId = undefined;
+  }
+  ['mimo-provider-flow', 'mimo-connected-provider-flow'].forEach(id => {
+    document.getElementById(id)?.replaceChildren();
+  });
+}
+
+function visibleFlow() {
+  const addedPanel = document.querySelector('[data-settings-panel="added-models"]:not(.hidden)');
+  return addedPanel?.querySelector('#mimo-connected-provider-flow')
+    || document.getElementById('mimo-provider-flow');
 }
 
 function flowShell(provider, title) {
   closeFlow();
-  const flow = root.querySelector('#mimo-provider-flow');
+  const flow = visibleFlow();
   const card = node('div', { class: 'admin-card' });
-  const heading = node('h2', {}, `${provider.name} — ${title}`);
+  const heading = node('h2', {}, `${providerName(provider)} — ${title}`);
   const body = node('div', { class: 'settings-col' });
   const actions = node('div', { class: 'settings-row' });
   const cancel = node('button', { type: 'button', class: 'btn secondary' }, 'Cancel');
@@ -62,53 +114,149 @@ function flowShell(provider, title) {
   return { body, actions };
 }
 
+function openClientLoginWindow() {
+  const popup = window.open('about:blank', '_blank');
+  if (!popup) return null;
+  try {
+    popup.opener = null;
+    popup.document.title = 'Open Clank provider login';
+    popup.document.body.textContent = 'Starting provider login…';
+  } catch (_) {}
+  return popup;
+}
+
+function showLoginLink(body, url) {
+  const link = node('a', {
+    class: 'btn secondary',
+    href: url,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+  }, 'Open provider login');
+  body.append(link);
+}
+
+function sendLoginWindow(popup, url) {
+  if (!popup || popup.closed) return false;
+  try {
+    popup.location.replace(url);
+    return true;
+  } catch (_) {
+    try {
+      popup.location.href = url;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+async function pollOAuthFlow(flowId) {
+  activeAbort = new AbortController();
+  while (!activeAbort.signal.aborted) {
+    const result = await request(`/oauth/status?flow_id=${encodeURIComponent(flowId)}`, {
+      signal: activeAbort.signal,
+    });
+    if (result.status === 'connected') return result;
+    if (result.status === 'failed' || result.status === 'expired' || result.status === 'cancelled') {
+      throw new Error(result.error || `Provider login ${result.status}.`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+  throw new DOMException('Provider login cancelled', 'AbortError');
+}
+
 function promptVisible(prompt, values) {
   if (!prompt.when) return true;
   const match = values[prompt.when.key] === prompt.when.value;
   return prompt.when.op === 'eq' ? match : !match;
 }
 
-async function beginOAuth(provider, method) {
-  const values = {};
-  const { body, actions } = flowShell(provider, method.label);
+function appendPromptFields(body, prompts, values) {
   const fields = [];
-  (method.prompts || []).forEach(prompt => {
+  (prompts || []).forEach(prompt => {
     const row = node('label', { class: 'settings-row' });
     row.append(node('span', { class: 'settings-label' }, prompt.message || prompt.key));
     let input;
     if (prompt.type === 'select') {
       input = node('select', { class: 'settings-select' });
       (prompt.options || []).forEach(option => {
-        const opt = node('option', { value: option.value }, option.hint ? `${option.label} — ${option.hint}` : option.label);
+        const opt = node(
+          'option',
+          { value: option.value },
+          option.hint ? `${option.label} — ${option.hint}` : option.label,
+        );
         input.append(opt);
       });
     } else {
-      input = node('input', { class: 'settings-input', type: 'text', placeholder: prompt.placeholder || '' });
+      input = node('input', {
+        class: 'settings-input',
+        type: 'text',
+        placeholder: prompt.placeholder || '',
+        autocomplete: 'off',
+      });
     }
     values[prompt.key] = input.value;
     input.addEventListener('input', () => {
       values[prompt.key] = input.value;
-      fields.forEach(item => { item.row.hidden = !promptVisible(item.prompt, values); });
+      fields.forEach(item => {
+        item.row.hidden = !promptVisible(item.prompt, values);
+      });
     });
     fields.push({ prompt, row, input });
     row.append(input);
     body.append(row);
   });
-  fields.forEach(item => { item.row.hidden = !promptVisible(item.prompt, values); });
+  fields.forEach(item => {
+    item.row.hidden = !promptVisible(item.prompt, values);
+  });
+  return fields;
+}
+
+function authActionLabel(provider, method) {
+  const name = providerName(provider);
+  if (method.type === 'api') return `Add ${name} API key`;
+  if (providerId(provider) === 'xiaomi' && method.type === 'oauth') {
+    return 'Sign in with Xiaomi';
+  }
+  return String(method.label || (method.type === 'oauth' ? `Sign in with ${name}` : 'Connect'));
+}
+
+function appendAuthActions(actions, provider) {
+  const seen = new Set();
+  (provider.methods || []).forEach(method => {
+    const label = authActionLabel(provider, method);
+    const key = `${method.type}:${label.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const button = node('button', { type: 'button', class: 'btn secondary' }, label);
+    button.addEventListener('click', () => (
+      method.type === 'oauth' ? beginOAuth(provider, method) : beginApiKey(provider, method)
+    ));
+    actions.append(button);
+  });
+}
+
+async function beginOAuth(provider, method) {
+  const values = {};
+  const actionLabel = authActionLabel(provider, method);
+  const { body, actions } = flowShell(provider, 'Sign in');
+  const fields = appendPromptFields(body, method.prompts, values);
   const start = node('button', { type: 'button', class: 'btn primary' }, 'Continue');
   actions.prepend(start);
   start.addEventListener('click', async () => {
     start.disabled = true;
-    setStatus(`Starting ${method.label}…`);
+    setStatus(`Starting ${actionLabel}…`);
+    const loginWindow = openClientLoginWindow();
     try {
       const inputs = Object.fromEntries(fields.filter(item => !item.row.hidden).map(item => [item.prompt.key, item.input.value]));
       const authorization = await request(`/${encodeURIComponent(provider.id)}/oauth/authorize`, {
         method: 'POST',
         body: JSON.stringify({ method: method.index, ...(fields.length ? { inputs } : {}) }),
       });
-      if (authorization.url) window.open(authorization.url, '_blank', 'noopener,noreferrer');
+      sendLoginWindow(loginWindow, authorization.url);
       await finishOAuth(provider, method, authorization);
     } catch (error) {
+      if (loginWindow && !loginWindow.closed) loginWindow.close();
       setStatus(error.message, true);
       start.disabled = false;
     }
@@ -117,8 +265,11 @@ async function beginOAuth(provider, method) {
 
 async function finishOAuth(provider, method, authorization) {
   const { body, actions } = flowShell(provider, 'Finish sign-in');
+  activeFlowId = authorization.flow_id;
   if (authorization.instructions) body.append(node('p', { class: 'admin-toggle-sub' }, authorization.instructions));
-  if (authorization.method === 'code') {
+  showLoginLink(body, authorization.url);
+  const capability = authorization.capability || method.capability;
+  if (capability === 'paste_code') {
     const row = node('label', { class: 'settings-row' });
     row.append(node('span', { class: 'settings-label' }, 'Authorization code'));
     const code = node('input', { class: 'settings-input', type: 'text', autocomplete: 'off' });
@@ -132,10 +283,11 @@ async function finishOAuth(provider, method, authorization) {
       try {
         await request(`/${encodeURIComponent(provider.id)}/oauth/callback`, {
           method: 'POST',
-          body: JSON.stringify({ method: method.index, code: code.value.trim() }),
+          body: JSON.stringify({ flow_id: authorization.flow_id, code: code.value.trim() }),
         });
-        closeFlow();
-        await changed(`${provider.name} connected.`);
+        activeFlowId = undefined;
+        closeFlow({ cancel: false });
+        await changed(`${providerName(provider)} connected.`);
       } catch (error) {
         setStatus(error.message, true);
         complete.disabled = false;
@@ -144,41 +296,73 @@ async function finishOAuth(provider, method, authorization) {
     return;
   }
 
-  body.append(node('p', { class: 'admin-toggle-sub' }, 'Waiting for authorization in your browser…'));
-  activeAbort = new AbortController();
+  body.append(node(
+    'p',
+    { class: 'admin-toggle-sub' },
+    capability === 'device_code'
+      ? 'Waiting for you to finish the device login…'
+      : 'Waiting for the provider to return to Open Clank…',
+  ));
   try {
-    await request(`/${encodeURIComponent(provider.id)}/oauth/callback`, {
-      method: 'POST',
-      body: JSON.stringify({ method: method.index }),
-      signal: activeAbort.signal,
-    });
+    await pollOAuthFlow(authorization.flow_id);
     activeAbort = undefined;
-    closeFlow();
-    await changed(`${provider.name} connected.`);
+    activeFlowId = undefined;
+    closeFlow({ cancel: false });
+    await changed(`${providerName(provider)} connected.`);
   } catch (error) {
     if (error.name !== 'AbortError') setStatus(error.message, true);
   }
 }
 
-function beginApiKey(provider) {
+function beginApiKey(provider, method) {
   const { body, actions } = flowShell(provider, 'API key');
+  const prompts = Array.isArray(method?.prompts) ? method.prompts : [];
+  const credentialPrompt = prompts.find(prompt => (
+    ['key', 'token', 'apikey', 'api_key'].includes(String(prompt?.key || '').toLowerCase())
+  ));
   const row = node('label', { class: 'settings-row' });
-  row.append(node('span', { class: 'settings-label' }, 'API key'));
-  const key = node('input', { class: 'settings-input', type: 'password', autocomplete: 'off' });
+  row.append(node(
+    'span',
+    { class: 'settings-label' },
+    credentialPrompt?.message || method?.label || 'API key',
+  ));
+  const key = node('input', {
+    class: 'settings-input',
+    type: 'password',
+    autocomplete: 'off',
+    placeholder: credentialPrompt?.placeholder || '',
+  });
   row.append(key);
-  body.append(row, node('p', { class: 'admin-toggle-sub' }, 'Stored securely and never shown again.'));
+  body.append(row);
+  const values = {};
+  const fields = appendPromptFields(
+    body,
+    prompts.filter(prompt => prompt !== credentialPrompt),
+    values,
+  );
+  body.append(node('p', { class: 'admin-toggle-sub' }, 'Stored securely and never shown again.'));
   const save = node('button', { type: 'button', class: 'btn primary' }, 'Connect');
   actions.prepend(save);
   save.addEventListener('click', async () => {
     if (!key.value.trim()) return setStatus('Enter an API key.', true);
+    const inputs = Object.fromEntries(
+      fields
+        .filter(item => !item.row.hidden && item.input.value.trim())
+        .map(item => [item.prompt.key, item.input.value.trim()]),
+    );
     save.disabled = true;
     try {
       await request(`/${encodeURIComponent(provider.id)}/api-key`, {
-        method: 'PUT', body: JSON.stringify({ key: key.value.trim() }),
+        method: 'PUT',
+        body: JSON.stringify({
+          key: key.value.trim(),
+          method: method?.index,
+          ...(Object.keys(inputs).length ? { inputs } : {}),
+        }),
       });
       key.value = '';
       closeFlow();
-      await changed(`${provider.name} connected.`);
+      await changed(`${providerName(provider)} connected.`);
     } catch (error) {
       key.value = '';
       setStatus(error.message, true);
@@ -191,47 +375,334 @@ async function disconnect(provider, button) {
   button.disabled = true;
   try {
     await request(`/${encodeURIComponent(provider.id)}`, { method: 'DELETE' });
-    await changed(`${provider.name} disconnected.`);
+    await changed(`${providerName(provider)} disconnected.`);
   } catch (error) {
     setStatus(error.message, true);
     button.disabled = false;
   }
 }
 
-function render() {
-  const list = root.querySelector('#mimo-provider-list');
-  const query = (root.querySelector('#mimo-provider-search')?.value || '').trim().toLowerCase();
-  list.replaceChildren();
-  providers.filter(provider => !query || `${provider.name} ${provider.id}`.toLowerCase().includes(query)).forEach(provider => {
-    const card = node('div', { class: 'admin-card' });
-    const title = node('h2', {}, provider.family ? `${provider.name} — serves “${provider.family}” models` : provider.name);
-    let statusText = provider.id;
-    if (provider.connected) {
-      statusText = 'Connected';
-      if (provider.chat_models) statusText += ` · ${provider.chat_models} chat model${provider.chat_models === 1 ? '' : 's'}`;
-      if (provider.served_by && provider.served_by.endpoint_name) {
-        statusText += ` · standing by — “${provider.served_by.endpoint_name}” serves these models directly`;
-      } else if (provider.active) {
-        statusText += ' · live in the model picker';
-      }
+function providerCard(provider, connectedView = false) {
+  const card = node('div', { class: 'admin-user-row' });
+  const models = connectedView && Array.isArray(provider.models)
+    ? provider.models.filter(modelId => typeof modelId === 'string' && modelId)
+    : [];
+  // Unified connection-row style: same logo + badge treatment as the
+  // Added Models endpoint rows (admin.js rowHtml) so old and new
+  // connections read as one list.
+  const logo = node('span', {
+    class: 'adm-ep-row-logo',
+    style: 'display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;',
+  });
+  logo.innerHTML = spriteLogo(providerId(provider)) || spriteLogo(providerName(provider)) || '';
+  const title = node('strong', { class: 'admin-user-name' }, providerName(provider));
+  const familyLabel = providerFamilyLabel(provider);
+  const family = familyLabel
+    ? node('span', { class: 'admin-toggle-sub' }, familyLabel)
+    : null;
+  let badgeText = 'Not connected';
+  let badgeOff = true;
+  let statusText = 'Not connected';
+  if (connectedView && !provider.connected) {
+    badgeText = 'Included';
+    statusText = 'MiMo Auto included';
+  } else if (provider.connected) {
+    badgeText = 'Connected';
+    badgeOff = false;
+    statusText = provider.free_tier ? 'Connected · Free access' : 'Connected';
+    if (provider.chat_models) {
+      statusText += ` · ${provider.chat_models} chat model${provider.chat_models === 1 ? '' : 's'}`;
     }
-    const status = node('span', { class: 'admin-toggle-sub' }, statusText);
-    const actions = node('div', { class: 'settings-row' });
-    if (provider.connected) {
-      const remove = node('button', { type: 'button', class: 'btn secondary' }, 'Disconnect');
-      remove.addEventListener('click', () => disconnect(provider, remove));
-      actions.append(remove);
-    } else {
-      (provider.methods || []).forEach(method => {
-        const button = node('button', { type: 'button', class: 'btn secondary' }, method.label);
-        button.addEventListener('click', () => method.type === 'oauth' ? beginOAuth(provider, method) : beginApiKey(provider));
-        actions.append(button);
+    if (provider.served_by?.endpoint_name) {
+      statusText += ` · also available through “${provider.served_by.endpoint_name}”`;
+    } else if (provider.active) {
+      statusText += ' · available in the model picker';
+    }
+  }
+  const hiddenIds = connectedView && Array.isArray(provider.hidden_model_ids)
+    ? provider.hidden_model_ids.filter(modelId => typeof modelId === 'string' && modelId)
+    : [];
+  const toggleableModels = [...models, ...hiddenIds];
+  const toggleableTotal = toggleableModels.length;
+  const badges = node('span', { style: 'display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;' });
+  badges.append(node(
+    'span',
+    { class: `admin-badge${badgeOff ? ' admin-badge-off' : ''}`, title: statusText },
+    badgeText,
+  ));
+  let countBadge = null;
+  if (connectedView && toggleableTotal) {
+    countBadge = node(
+      'span',
+      { class: 'admin-badge' },
+      `${models.length}/${toggleableTotal} models enabled`,
+    );
+    badges.append(countBadge);
+  }
+  const status = node('span', { class: 'admin-toggle-sub' }, statusText);
+  const authNote = provider.auth_note
+    ? node('p', { class: 'admin-toggle-sub' }, provider.auth_note)
+    : provider.free_tier
+      ? node('p', { class: 'admin-toggle-sub' }, 'Free access is active. Connect your own account or API key whenever you want.')
+      : null;
+  const actions = node('div', { class: 'settings-row' });
+  if (!connectedView && (!provider.connected || provider.free_tier)) {
+    appendAuthActions(actions, provider);
+  }
+  if (provider.connected) {
+    const remove = node('button', { type: 'button', class: 'btn secondary' }, 'Disconnect');
+    remove.addEventListener('click', () => disconnect(provider, remove));
+    actions.append(remove);
+  }
+  const modelToggle = toggleableTotal
+    ? node('button', {
+        type: 'button',
+        class: 'admin-btn-sm',
+        'aria-expanded': 'false',
+      }, `Show models (${toggleableTotal})`)
+    : null;
+  if (modelToggle) actions.append(modelToggle);
+  const heading = node('div', { class: 'admin-user-info' });
+  heading.append(logo, title);
+  if (family) heading.append(family);
+  heading.append(badges);
+  card.append(heading, status);
+  if (authNote) card.append(authNote);
+  if (actions.children.length) card.append(actions);
+
+  if (connectedView) {
+    if (toggleableTotal) {
+      const list = node('div', { class: 'mcp-tools-list hidden' });
+      toggleableModels.forEach(modelId => {
+        const isHidden = hiddenIds.includes(modelId);
+        const modelRow = node('div', {
+          class: 'adm-model-cap-row',
+          'data-share-model-id': modelId,
+          'data-share-disabled': isHidden ? 'true' : 'false',
+        });
+        const rowLabel = node('label', { class: 'adm-model-row', title: modelId });
+        const switchWrap = node('span', { class: 'admin-switch' });
+        const toggle = node('input', {
+          type: 'checkbox',
+          class: 'adm-cb-hidden',
+          'data-mimo-model-id': modelId,
+        });
+        toggle.checked = !isHidden;
+        switchWrap.append(toggle, node('span', { class: 'admin-slider', 'aria-hidden': 'true' }));
+        rowLabel.append(switchWrap);
+        rowLabel.append(node('span', {}, modelId.split('/').slice(1).join('/') || modelId));
+        modelRow.append(rowLabel);
+        list.append(modelRow);
+      });
+      const saveVisibility = async () => {
+        const hidden = [];
+        let enabledCount = 0;
+        list.querySelectorAll('input[data-mimo-model-id]').forEach(input => {
+          if (input.checked) enabledCount += 1;
+          else hidden.push(input.dataset.mimoModelId);
+          const rowEl = input.closest('[data-share-model-id]');
+          if (rowEl) rowEl.dataset.shareDisabled = input.checked ? 'false' : 'true';
+        });
+        try {
+          const response = await fetch(`/api/model-endpoints/mimo:${providerId(provider)}/models`, {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hidden }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (countBadge) {
+            countBadge.textContent = `${enabledCount}/${toggleableTotal} models enabled`;
+          }
+          // Same refresh fan-out admin.js uses after endpoint model saves so
+          // the chat picker drops the hidden models without a page reload.
+          try {
+            if (window.modelsModule && window.modelsModule.refreshModels) {
+              window.modelsModule.refreshModels(true);
+            }
+          } catch (_) {}
+          try {
+            if (window.sessionModule && window.sessionModule.updateModelPicker) {
+              window.sessionModule.updateModelPicker();
+            }
+          } catch (_) {}
+        } catch (_) { /* silent */ }
+      };
+      list.querySelectorAll('input[data-mimo-model-id]').forEach(input => {
+        input.addEventListener('change', saveVisibility);
+      });
+      card.append(list);
+      modelSharing.mountOwnerControls(
+        list,
+        String(provider.connection_id || `mimo:${providerId(provider)}`),
+      );
+      modelToggle.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const expanded = list.classList.toggle('hidden') === false;
+        modelToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        modelToggle.textContent = `${expanded ? 'Hide' : 'Show'} models (${toggleableTotal})`;
       });
     }
-    card.append(title, status, actions);
-    list.append(card);
-  });
-  if (!list.children.length) list.append(node('p', { class: 'admin-toggle-sub' }, 'No matching providers.'));
+  }
+  return card;
+}
+
+function renderList(list, items, emptyText, connectedView = false) {
+  if (!list) return;
+  list.replaceChildren(...items.map(provider => providerCard(provider, connectedView)));
+  if (!items.length) {
+    list.append(node('p', { class: 'admin-toggle-sub' }, emptyText));
+  }
+}
+
+function publicProviders() {
+  return providers.filter(isPublicProvider);
+}
+
+function providerSearchText(provider) {
+  return `${providerName(provider)} ${provider.id} ${providerFamilyLabel(provider)}`.toLowerCase();
+}
+
+function publishCatalog() {
+  const catalogue = publicProviders();
+  window.__openClankProviderCatalog = catalogue;
+  if (typeof document.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    document.dispatchEvent(new CustomEvent('open-clank:provider-catalog', {
+      detail: { providers: catalogue },
+    }));
+  }
+}
+
+function renderProviderMenu(query = '') {
+  const menu = document.getElementById('mimo-provider-menu');
+  if (!menu) return;
+  const needle = String(query || '').trim().toLowerCase();
+  const available = publicProviders().filter(provider => (
+    !provider.connected
+    && (!needle || providerSearchText(provider).includes(needle))
+  ));
+  menu.replaceChildren(...available.map(provider => {
+    const item = node('button', {
+      type: 'button',
+      class: 'mimo-provider-option',
+      role: 'option',
+      'data-provider-id': providerId(provider),
+      'aria-selected': providerId(provider) === selectedProviderId ? 'true' : 'false',
+    });
+    const label = node('span', { class: 'mimo-provider-option-name' }, providerName(provider));
+    const methodTypes = new Set((provider.methods || []).map(method => method.type));
+    const hint = node(
+      'span',
+      { class: 'mimo-provider-option-hint' },
+      methodTypes.has('oauth') && methodTypes.has('api')
+        ? 'Browser login or API key'
+        : methodTypes.has('oauth')
+          ? 'Browser login'
+          : 'API key',
+    );
+    item.append(label, hint);
+    item.addEventListener('click', () => selectProvider(providerId(provider)));
+    return item;
+  }));
+  if (!available.length) {
+    menu.append(node(
+      'p',
+      { class: 'admin-toggle-sub mimo-provider-no-results' },
+      needle ? 'No matching providers.' : 'No more providers to connect.',
+    ));
+  }
+}
+
+function hideProviderMenu() {
+  const menu = document.getElementById('mimo-provider-menu');
+  const input = document.getElementById('mimo-provider-search');
+  menu?.classList.add('hidden');
+  input?.setAttribute('aria-expanded', 'false');
+}
+
+function showProviderMenu(query = '') {
+  const menu = document.getElementById('mimo-provider-menu');
+  const input = document.getElementById('mimo-provider-search');
+  renderProviderMenu(query);
+  menu?.classList.remove('hidden');
+  input?.setAttribute('aria-expanded', 'true');
+}
+
+function selectProvider(id, { scroll = false } = {}) {
+  const provider = publicProviders().find(item => providerId(item) === String(id || '').toLowerCase());
+  if (!provider) return;
+  selectedProviderId = providerId(provider);
+  explicitSelection = true;
+  const input = document.getElementById('mimo-provider-search');
+  if (input) input.value = providerName(provider);
+  hideProviderMenu();
+  renderList(
+    document.getElementById('mimo-provider-list'),
+    [provider],
+    'No provider selected.',
+  );
+  renderProviderMenu('');
+  if (scroll) {
+    root?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    input?.focus?.();
+    input?.select?.();
+  }
+}
+
+function render() {
+  const catalogue = publicProviders();
+  const available = catalogue.filter(provider => !provider.connected);
+  const connected = catalogue.filter(provider => (
+    provider.connected || Number(provider.included_free_models || 0) > 0
+  ));
+  // Directory-by-default: show every unconnected provider until the user
+  // explicitly picks one (search menu or deep link). Auto-selecting the
+  // first provider collapsed the directory into a single card and made the
+  // rest of the catalogue invisible.
+  const selected = explicitSelection
+    ? available.find(provider => providerId(provider) === selectedProviderId)
+    : null;
+  if (!selected) {
+    explicitSelection = false;
+    selectedProviderId = '';
+  }
+  const search = document.getElementById('mimo-provider-search');
+  if (search && document.activeElement !== search) {
+    search.value = selected ? providerName(selected) : '';
+  }
+  renderList(
+    document.getElementById('mimo-provider-list'),
+    selected ? [selected] : available,
+    'No more providers to connect.',
+  );
+  renderProviderMenu('');
+  renderList(
+    document.getElementById('mimo-connected-provider-list'),
+    connected,
+    'No connected API providers.',
+    true,
+  );
+  return {
+    available: available.length,
+    connected: catalogue.filter(provider => provider.connected).length,
+    included: connected.filter(provider => !provider.connected).reduce(
+      (total, provider) => total + Number(provider.included_free_models || 0),
+      0,
+    ),
+  };
+}
+
+function setProviderCounts(counts) {
+  writeStatus(
+    'mimo-provider-status',
+    `${counts.available} provider${counts.available === 1 ? '' : 's'} available to connect`,
+  );
+  writeStatus(
+    'mimo-connected-provider-status',
+    `${counts.connected} API provider${counts.connected === 1 ? '' : 's'} connected`
+      + (counts.included ? ` · ${counts.included} model included` : ''),
+  );
 }
 
 export async function load() {
@@ -240,22 +711,49 @@ export async function load() {
   try {
     const data = await request('');
     providers = Array.isArray(data.providers) ? data.providers : [];
-    setStatus(`${providers.length} provider${providers.length === 1 ? '' : 's'} available`);
-    render();
+    publishCatalog();
+    await modelSharing.load();
+    setProviderCounts(render());
   } catch (error) {
     providers = [];
-    setStatus(error.message, true);
+    publishCatalog();
     render();
+    setStatus(error.message, true);
   }
 }
 
 export function init(options = {}) {
-  root = document.getElementById('mimo-providers-section');
-  if (!root || root.dataset.bound === '1') return;
-  root.dataset.bound = '1';
+  root = document.getElementById('mimo-provider-directory');
+  if (!root || _bound) return;
+  _bound = true;
   onCatalogChanged = options.onCatalogChanged || onCatalogChanged;
-  root.querySelector('#mimo-provider-refresh')?.addEventListener('click', load);
-  root.querySelector('#mimo-provider-search')?.addEventListener('input', render);
+  document.getElementById('mimo-provider-refresh')?.addEventListener('click', load);
+  const search = document.getElementById('mimo-provider-search');
+  search?.addEventListener('focus', () => {
+    search.select?.();
+    showProviderMenu('');
+  });
+  search?.addEventListener('click', () => showProviderMenu(''));
+  search?.addEventListener('input', () => {
+    selectedProviderId = '';
+    explicitSelection = false;
+    showProviderMenu(search.value);
+  });
+  search?.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      hideProviderMenu();
+      const selected = publicProviders().find(provider => providerId(provider) === selectedProviderId);
+      search.value = selected ? providerName(selected) : '';
+      search.blur?.();
+    }
+  });
+  document.addEventListener?.('click', event => {
+    if (!root?.contains?.(event.target)) hideProviderMenu();
+  });
+  document.addEventListener?.('open-clank:select-provider-account', event => {
+    selectProvider(event.detail?.providerId, { scroll: true });
+  });
 }
 
-export default { init, load };
+export default { init, load, selectProvider };

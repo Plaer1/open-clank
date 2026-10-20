@@ -1,5 +1,6 @@
 """DB-backed ChatGPT Subscription endpoint provisioning tests."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -241,7 +242,7 @@ def test_delete_endpoint_route_revokes_orphaned_provider_auth(monkeypatch):
         db.close()
 
     delete_endpoint = _delete_route(monkeypatch, TestSessionLocal)
-    result = delete_endpoint("ep1", _alice_request())
+    result = asyncio.run(delete_endpoint("ep1", _alice_request()))
 
     assert result["deleted"] is True
     # The last (only) endpoint backed by auth1 is gone, so the route revokes it.
@@ -263,7 +264,7 @@ def test_delete_endpoint_route_keeps_auth_when_shared(monkeypatch):
         db.close()
 
     delete_endpoint = _delete_route(monkeypatch, TestSessionLocal)
-    result = delete_endpoint("ep1", _alice_request())
+    result = asyncio.run(delete_endpoint("ep1", _alice_request()))
 
     assert result["deleted"] is True
     # ep2 still references auth1, so deleting ep1 must NOT revoke the credentials.

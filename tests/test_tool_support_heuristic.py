@@ -1,166 +1,127 @@
-"""Regression tests for the tool-support heuristic in stream_agent_loop.
+"""Managed-route capability regressions for the compatibility agent loop."""
 
-Verifies two critical cases:
-  1. local Ollama endpoints must NOT enable native tool schemas by default
-     (some models terminate after one token with schemas).
-  2. api.deepseek.com must still be treated as tool-capable via the host
-     allow-list (_API_HOSTS), so cloud deepseek users keep working.
-"""
-import pytest
-from src.agent_loop import _API_HOSTS, _endpoint_lookup_keys, _is_ollama_openai_compat_url
-from src.llm_core import _is_ollama_native_url
+import asyncio
+import json
+from types import SimpleNamespace
+
+import src.agent_loop as agent_loop
+from src.agent_loop import _managed_agent_target, _normalized_context_length
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL
 
 
-def _compute_is_api_model(model: str, endpoint_url: str, endpoint_supports=None) -> bool:
-    """Replicate the heuristic from stream_agent_loop without side effects."""
-    model_lc = model.lower()
-
-    model_supports_tools = any(kw in model_lc for kw in (
-        "gpt-4", "gpt-5", "gpt-o", "claude", "gemini", "gemma",
-        "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
-        "llama-3.3", "llama-4", "llama3.1", "llama3.2", "llama3.3", "llama4",
-        "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
-        "glm-4", "internlm", "hermes",
-        "deepseek-v", "deepseek-chat",
-    ))
-    model_no_tools = any(kw in model_lc for kw in (
-        "deepseek-r1",
-        "gpt-oss",
-    ))
-
-    if endpoint_supports is True:
-        return True
-    if (
-        endpoint_supports is False
-        or model_no_tools
-        or _is_ollama_native_url(endpoint_url)
-        or _is_ollama_openai_compat_url(endpoint_url)
-    ):
-        return False
-    return any(h in endpoint_url for h in _API_HOSTS) or model_supports_tools
+def _route(**capabilities):
+    return SimpleNamespace(
+        runtime_model="connection-1/model-1",
+        connection_id="connection-1",
+        capabilities=capabilities,
+    )
 
 
-class TestDeepSeekToolSupport:
-    # --- local Ollama cases (must NOT get native tool schemas by default) ---
+def test_managed_agent_target_retains_normalized_connection_identity():
+    target = _managed_agent_target(_route(tools=False, vision=True))
 
-    def test_deepseek_r1_7b_local_ollama_no_tools(self):
-        result = _compute_is_api_model(
-            "deepseek-r1:7b", "http://localhost:11434/v1"
-        )
-        assert result is False, (
-            "deepseek-r1:7b on Ollama must not enable tool schemas "
-            "(Ollama returns HTTP 400 for this model)"
-        )
+    assert target.transport == "acp"
+    assert target.endpoint_url == MANAGED_ENGINE_PUBLIC_URL
+    assert target.model_id == "connection-1/model-1"
+    assert target.endpoint_id == "connection-1"
+    assert target.provider_id == "connection-1"
+    assert target.headers == {}
+    assert target.capabilities["tools"] is False
+    assert target.capabilities["vision"] is True
 
-    def test_deepseek_r1_14b_local_no_tools(self):
-        assert _compute_is_api_model("deepseek-r1:14b", "http://localhost:11434/v1") is False
 
-    def test_deepseek_r1_70b_local_no_tools(self):
-        assert _compute_is_api_model("deepseek-r1:70b", "http://127.0.0.1:11434/v1") is False
+def test_managed_agent_target_defaults_unspecified_tools_on():
+    assert _managed_agent_target(_route()).capabilities["tools"] is True
 
-    def test_deepseek_r1_via_docker_no_tools(self):
-        assert _compute_is_api_model(
-            "deepseek-r1:7b", "http://host.docker.internal:11434/v1"
-        ) is False
 
-    def test_qwen_local_ollama_defaults_to_fenced_tools(self):
-        assert _compute_is_api_model(
-            "qwen3.5:4b", "http://localhost:11434/v1"
-        ) is False
+def test_normalized_context_length_prefers_catalog_metadata():
+    assert _normalized_context_length(_route(context_window="65536"), 8192) == 65536
 
-    def test_gemma_local_ollama_defaults_to_fenced_tools(self):
-        assert _compute_is_api_model(
-            "gemma4:e4b", "http://host.docker.internal:11434/v1"
-        ) is False
 
-    def test_gpt_oss_local_openai_compat_defaults_to_fenced_tools(self):
-        assert _compute_is_api_model(
-            "gpt-oss-20b", "http://localhost:8000/v1"
-        ) is False
+def test_normalized_context_length_uses_supplied_value_when_catalog_is_silent():
+    assert _normalized_context_length(_route(), 8192) == 8192
 
-    def test_qwen_native_ollama_defaults_to_fenced_tools(self):
-        assert _compute_is_api_model(
-            "qwen3.5:4b", "http://localhost:11434/api/chat"
-        ) is False
 
-    # --- cloud API cases (must still get tool schemas) ---
+def test_normalized_context_length_rejects_malformed_or_negative_values():
+    assert _normalized_context_length(_route(context_length="unknown"), -1) == 0
 
-    def test_deepseek_cloud_api_gets_tools(self):
-        result = _compute_is_api_model(
-            "deepseek-chat", "https://api.deepseek.com/v1"
-        )
-        assert result is True, (
-            "api.deepseek.com must be treated as tool-capable via _API_HOSTS"
+
+def test_agent_loop_has_no_legacy_provider_dispatch_source():
+    from pathlib import Path
+
+    source = Path("src/agent_loop.py").read_text()
+    forbidden = (
+        "stream_llm_with_fallback",
+        "from src.llm_core",
+        "ModelEndpoint",
+        "httpx.post",
+        "requests.post",
+    )
+    assert not any(token in source for token in forbidden)
+    assert "resolve_chat_route(" in source
+    assert "stream_agent_target(" in source
+
+
+def test_low_signal_stream_propagates_only_normalized_authority(monkeypatch):
+    captured = {}
+
+    def resolve(**kwargs):
+        captured["resolve"] = kwargs
+        return SimpleNamespace(
+            provider_model_id="model-1",
+            model_route_id="route-1",
+            provider_grant_id="grant-1",
+            connection_id="connection-1",
+            runtime_model="connection-1/model-1",
+            capabilities={"tools": True},
         )
 
-    def test_deepseek_v3_cloud_gets_tools(self):
-        assert _compute_is_api_model("deepseek-v3", "https://api.deepseek.com/v1") is True
+    async def stream(target, messages, **kwargs):
+        captured["target"] = target
+        captured["messages"] = messages
+        captured["stream"] = kwargs
+        yield f'data: {json.dumps({"delta": "Hey."})}\n\n'
+        yield "data: [DONE]\n\n"
 
-    def test_deepseek_v2_cloud_gets_tools(self):
-        assert _compute_is_api_model("deepseek-v2.5", "https://api.deepseek.com/v1") is True
+    monkeypatch.setattr(agent_loop, "resolve_chat_route", resolve)
+    monkeypatch.setattr(agent_loop, "stream_agent_target", stream)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(agent_loop, "get_setting", lambda _key, default=None: default)
+    monkeypatch.setattr(agent_loop, "blocked_tools_for_owner", lambda _owner: set())
+    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *_args, **_kwargs: 1)
 
-    # --- endpoint_supports override takes priority ---
+    async def collect():
+        return [
+            event
+            async for event in agent_loop.stream_agent_loop(
+                "https://legacy.invalid/v1",
+                "legacy-model",
+                [{"role": "user", "content": "yo"}],
+                headers={"Authorization": "must-not-cross"},
+                fallbacks=[("https://fallback.invalid", "other", {"X-Key": "secret"})],
+                owner="Alice",
+                session_id="session-1",
+                provider_model_route_id="route-1",
+                provider_grant_id="grant-1",
+                root_operation_id="root-1",
+            )
+        ]
 
-    def test_endpoint_supports_true_overrides_blocklist(self):
-        """A user who explicitly sets supports_tools=True on their endpoint
-        can force tool schemas even for deepseek-r1 (e.g. custom server)."""
-        result = _compute_is_api_model(
-            "deepseek-r1:7b", "http://localhost:11434/v1", endpoint_supports=True
-        )
-        assert result is True
+    events = asyncio.run(collect())
 
-    def test_endpoint_supports_true_overrides_ollama_default(self):
-        """A user can still explicitly opt a known-good Ollama endpoint into
-        native schemas."""
-        result = _compute_is_api_model(
-            "qwen3.5:4b", "http://localhost:11434/v1", endpoint_supports=True
-        )
-        assert result is True
-
-    def test_endpoint_supports_true_overrides_native_ollama_default(self):
-        result = _compute_is_api_model(
-            "qwen3.5:4b", "http://localhost:11434/api/chat", endpoint_supports=True
-        )
-        assert result is True
-
-    def test_endpoint_supports_true_overrides_gpt_oss_default(self):
-        result = _compute_is_api_model(
-            "gpt-oss-20b", "http://localhost:8000/v1", endpoint_supports=True
-        )
-        assert result is True
-
-    def test_endpoint_supports_false_overrides_cloud(self):
-        """supports_tools=False on an endpoint gates even cloud APIs."""
-        result = _compute_is_api_model(
-            "deepseek-chat", "https://api.deepseek.com/v1", endpoint_supports=False
-        )
-        assert result is False
-
-    # --- other local models unaffected ---
-
-    def test_qwen_local_non_ollama_still_gets_tools(self):
-        assert _compute_is_api_model("qwen2.5:14b", "http://localhost:8000/v1") is True
-
-    def test_llama_local_non_ollama_gets_tools_via_host(self):
-        assert _compute_is_api_model("llama3.2:3b", "http://localhost:8000/v1") is True
-
-
-class TestApiHostsContainsDeepSeek:
-    def test_api_deepseek_com_in_api_hosts(self):
-        assert "api.deepseek.com" in _API_HOSTS
-
-    def test_deepseek_com_in_api_hosts(self):
-        assert "deepseek.com" in _API_HOSTS
-
-
-class TestEndpointLookupKeys:
-    def test_chat_completions_url_matches_endpoint_base(self):
-        keys = _endpoint_lookup_keys("http://localhost:11434/v1/chat/completions")
-
-        assert "http://localhost:11434/v1" in keys
-        assert "http://localhost:11434/v1/" in keys
-
-    def test_native_ollama_chat_url_matches_api_base(self):
-        keys = _endpoint_lookup_keys("http://host.docker.internal:11434/api/chat")
-
-        assert "http://host.docker.internal:11434/api" in keys
+    assert any('"delta": "Hey."' in event for event in events)
+    assert captured["resolve"] == {
+        "owner": "alice",
+        "endpoint_id": "share:grant-1",
+        "model_id": None,
+        "model_route_id": "route-1",
+    }
+    assert captured["target"].headers == {}
+    assert captured["target"].endpoint_url == MANAGED_ENGINE_PUBLIC_URL
+    assert captured["stream"]["owner"] == "alice"
+    assert captured["stream"]["turn_envelope"] == {
+        "allowed_tools": [],
+        "provider_model_route_id": "route-1",
+        "provider_grant_id": "grant-1",
+        "root_operation_id": "root-1",
+    }

@@ -1,0 +1,1 @@
+A and B; explicit budget/latency preference plus stated uncertainty.

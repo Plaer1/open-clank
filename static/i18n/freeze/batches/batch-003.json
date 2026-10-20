@@ -1,0 +1,3216 @@
+{
+  "id": "batch-003",
+  "group": "chat",
+  "surface": "chat",
+  "entry_count": 241,
+  "character_count": 17882,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.2.digit",
+      "source": "2-digit",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:908"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.add.a.custom.option",
+      "source": "Add a custom option",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2375"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.adjusting",
+      "source": "Adjusting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2070"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.prep",
+      "source": "Agent prep",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1950"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.agent.requests.permission.value",
+      "source": "Agent requests permission: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2432"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.allow.in.this.chat",
+      "source": "Allow in this chat",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2520"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.allow.in.this.workspace",
+      "source": "Allow in this workspace",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2521"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.allow.once",
+      "source": "Allow once",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2519"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.always.allow",
+      "source": "Always allow",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2522"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.analyzing.question.planning.research.strategy",
+      "source": "Analyzing question & planning research strategy",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2740",
+        "static/js/chat.js:5522"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.analyzing.sources",
+      "source": "Analyzing sources",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1842"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.answer",
+      "source": "Answer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2251"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.answer.every.question.before.continuing",
+      "source": "Answer every question before continuing.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2264"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.answered.by",
+      "source": "— answered by",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2885"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.approved.command.needs.your.sudo.password",
+      "source": "Approved command needs your sudo password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2431"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.assistant.27a9612b",
+      "source": "assistant",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1339",
+        "static/js/chat.js:1350",
+        "static/js/chat.js:4030",
+        "static/js/chat.js:4384",
+        "static/js/chat.js:4631",
+        "static/js/group.js:991",
+        "static/js/sessions.js:2081",
+        "static/js/tasks.js:2580"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.attach.image.to.new.prompt",
+      "source": "Attach image to new prompt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1340"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.background.stream.error",
+      "source": "Background stream error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3865"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.block",
+      "source": "block",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:136",
+        "static/js/gallery.js:1508",
+        "static/js/gallery.js:1609",
+        "static/js/settings.js:5205",
+        "static/js/settings.js:5889"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.browsing",
+      "source": "Browsing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2061",
+        "static/js/chat.js:2069"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.caption.3428d97e",
+      "source": "Caption",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:168",
+        "static/js/copal/notesFeature.js:1929"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.context",
+      "source": "Chat Context",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:146"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.chat.history.element.not.found",
+      "source": "Chat history element not found",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2595"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.child.of.value",
+      "source": "Child of {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2574"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.click.for.details",
+      "source": "Click for details",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1906",
+        "static/js/emailLibrary.js:694"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.click.to.open.memory.manager",
+      "source": "Click to open memory manager",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1698"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compact.4f44e2cf",
+      "source": "compact",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:237",
+        "static/js/copal/notesFeature.js:2624"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compact.context",
+      "source": "Compact context",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compact.failed",
+      "source": "Compact failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:194"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compact.failed.value",
+      "source": "Compact failed: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:240"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.compacting",
+      "source": "Compacting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:190"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.configured.04896c7f",
+      "source": "(configured)",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confirm.btn.confirm.btn.primary",
+      "source": "confirm-btn confirm-btn-primary",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2250",
+        "static/js/dialogPrimitives.js:181",
+        "static/js/ui.js:648"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.confirm.btn.confirm.btn.primary.ask.user.other.send",
+      "source": "confirm-btn confirm-btn-primary ask-user-other-send",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2378"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context",
+      "source": "Context",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1954",
+        "static/js/chatRenderer.js:712",
+        "static/js/chatRenderer.js:716",
+        "static/js/cookbook.js:3121",
+        "static/js/cookbook.js:3157"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.compacted",
+      "source": "Context compacted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:234"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.compacted.older.messages.summarized",
+      "source": "Context compacted — older messages summarized",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3019"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.trimmed.for.this.model.value",
+      "source": "Context trimmed for this model{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3027"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.context.window",
+      "source": "Context Window",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2016"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.continue",
+      "source": "Continue",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1141",
+        "static/js/chat.js:3975",
+        "static/js/chatRenderer.js:2959",
+        "static/js/codeEditor.js:802",
+        "static/js/codeEditor.js:843"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.continue.b72e4895",
+      "source": "Continue ▸",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2920"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.continue.pick.up.where.it.left.off",
+      "source": "Continue — pick up where it left off",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3608"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.continue.the.task",
+      "source": "Continue the task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copied.3b348838",
+      "source": "copied",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4790",
+        "static/js/chat.js:4791",
+        "static/js/chat.js:4794",
+        "static/js/codeRunner.js:129",
+        "static/js/codeRunner.js:130",
+        "static/js/cookbook-diagnosis.js:965",
+        "static/js/cookbook-diagnosis.js:966",
+        "static/js/cookbookDownload.js:332",
+        "static/js/cookbookDownload.js:335",
+        "static/js/cookbookRunning.js:2967",
+        "static/js/cookbookRunning.js:2968",
+        "static/js/cookbookServe.js:3734",
+        "static/js/cookbookServe.js:3735",
+        "static/js/emailLibrary.js:749",
+        "static/js/emailLibrary.js:784",
+        "static/js/emailLibrary.js:788",
+        "static/js/notes.js:4700",
+        "static/js/notes.js:4703",
+        "static/js/slashCommands.js:586",
+        "static/js/slashCommands.js:587"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.message",
+      "source": "Copy message",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1555",
+        "static/js/chatRenderer.js:1774",
+        "static/js/slashCommands.js:447"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.copy.prompt",
+      "source": "Copy prompt",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1304",
+        "static/js/compare/stream.js:471"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.cost",
+      "source": "Cost",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1917"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.attach.image",
+      "source": "Could not attach image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1367"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.find.the.user.message.to.regenerate",
+      "source": "Could not find the user message to regenerate",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5176"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.load.ocr.text.type.your.correction.and.save",
+      "source": "Could not load OCR text — type your correction and save.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:403"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.could.not.open.attachment",
+      "source": "Could not open attachment",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:6134"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.creating",
+      "source": "Creating…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1081",
+        "static/js/documentLibrary.js:3039"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.custom.answer",
+      "source": "Custom answer…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2241"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.deep.research.mode.active",
+      "source": "Deep research mode active...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1814"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.default.7505d64a",
+      "source": "default",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2812",
+        "static/js/chatRenderer.js:2829",
+        "static/js/cookbook.js:2898",
+        "static/js/copal.js:2621",
+        "static/js/copal/treehouse.js:58"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.failed",
+      "source": "Delete failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5782",
+        "static/js/chat.js:5783",
+        "static/js/cookbookServe.js:3896",
+        "static/js/rag.js:100",
+        "static/js/skills.js:1180"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.failed.64513b47",
+      "source": "Delete failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1447",
+        "static/js/chatRenderer.js:1452",
+        "static/js/document.js:9972",
+        "static/js/gallery.js:742",
+        "static/js/settings.js:670",
+        "static/js/settings.js:671",
+        "static/js/slashCommands.js:908"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.image",
+      "source": "Delete image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1429"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.message",
+      "source": "Delete message",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1582",
+        "static/js/chatRenderer.js:1770"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.image",
+      "source": "Delete this image?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1433"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.delete.this.message",
+      "source": "Delete this message?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5670"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dig.deeper.activate.research.again.and.type.a.follow.up",
+      "source": "Dig deeper? Activate Research again and type a follow-up question to continue this research.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1051"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dismiss",
+      "source": "Dismiss",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1622",
+        "static/js/chat.js:1623",
+        "static/js/compare/index.js:1277",
+        "static/js/cookbook-diagnosis.js:974",
+        "static/js/cookbookServe.js:1492",
+        "static/js/emailLibrary.js:5754",
+        "static/js/research/panel.js:1075",
+        "static/js/slashCommands.js:461",
+        "static/js/ui.js:379",
+        "static/js/ui.js:380",
+        "static/js/ui.js:459",
+        "static/js/ui.js:460"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.dismiss.question",
+      "source": "Dismiss question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2310"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.doc.edit.1",
+      "source": "Doc edit: $1",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2921"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.document.e214b8a2",
+      "source": "Document",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:6121",
+        "static/js/modalManager.js:159"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.done.editing",
+      "source": "Done editing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4848"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.download.image",
+      "source": "Download image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1317",
+        "static/js/compare/stream.js:487"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.failed",
+      "source": "Edit failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5047",
+        "static/js/chat.js:5048",
+        "static/js/chat.js:5867",
+        "static/js/chat.js:5868"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.in.image.editor",
+      "source": "Edit in image editor",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1376"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.message",
+      "source": "Edit message",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1766"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edit.text.and.save.new.chats.will.have.the.new",
+      "source": "Edit text and save, new chats will have the new context. Regenerate or continue from there.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:311"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.editing.3b9ba1a2",
+      "source": "Editing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2054",
+        "static/js/chat.js:2058"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.in.addmessage",
+      "source": "Error in addMessage:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:3102"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.processing.request",
+      "source": "Error processing request",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/chat_helpers.py:314"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.reading.uploaded.file",
+      "source": "Error reading uploaded file",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/chat_helpers.py:228"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.error.value.b12e0c8e",
+      "source": "Error {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1932",
+        "static/js/chat.js:2389"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.estimated.token.count",
+      "source": "~ estimated token count",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1956"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.execute",
+      "source": "Execute",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:852"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.explain",
+      "source": "explain",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1574"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.explain.simpler",
+      "source": "Explain simpler",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1574"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.answered.by",
+      "source": "failed — answered by",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2878"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.save.ocr.text",
+      "source": "Failed to save OCR text",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:350",
+        "static/js/chatRenderer.js:375"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.send.answer.value.request.may.have.expired",
+      "source": "Failed to send answer ({0}) — request may have expired.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2456"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fallback.464e3ea2",
+      "source": "(fallback)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2883"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fetching.top.results",
+      "source": "Fetching top results...",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1811"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fieldset",
+      "source": "fieldset",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2208"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.finish.the.current.response.before.queueing.messages.with.attachments",
+      "source": "Finish the current response before queueing messages with attachments.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1007"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fork",
+      "source": "fork",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1578"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fork.conversation",
+      "source": "Fork conversation",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1578"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.fork.failed",
+      "source": "Fork failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5422",
+        "static/js/chat.js:5423"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.forked.value",
+      "source": "Forked → {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5420"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.function",
+      "source": "function",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1738",
+        "static/js/files.js:272",
+        "static/js/workspace.js:312"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.generated.image.634c1c0c",
+      "source": "Generated image",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1280",
+        "static/js/chatRenderer.js:1281",
+        "static/js/chatRenderer.js:1399"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.generating",
+      "source": "Generating",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2062",
+        "static/js/chat.js:2063",
+        "static/js/editor/ai-inpaint.js:263"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.group.64292b1c",
+      "source": "group",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2300",
+        "static/js/chatRenderer.js:2425",
+        "static/js/copal/notesFeature.js:1445",
+        "static/js/copal/planning.js:357",
+        "static/js/copal/planning.js:386",
+        "static/js/copal/planning.js:547",
+        "static/js/copal/planning.js:551",
+        "static/js/copal/treehouse.js:279",
+        "static/js/editor/explorerTree.js:558",
+        "static/js/emailLibrary.js:5597",
+        "static/js/presets.js:792"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.image.attached",
+      "source": "Image attached",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.value.files.to.document.library",
+      "source": "Import {0} files to document library?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1590"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.import.value.to.document.library",
+      "source": "Import \"{0}\" to document library?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1589"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.imported.value.file.value",
+      "source": "Imported {0} file{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1615"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.importing.820599da",
+      "source": "Importing…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1598",
+        "static/js/settings.js:4805"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.initializing",
+      "source": "Initializing...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1805"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.input.b568d47f",
+      "source": "Input",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1940",
+        "static/js/chatRenderer.js:747"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.internal.stop",
+      "source": "internal stop",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3490"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.interrupted",
+      "source": "interrupted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4068"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.legend",
+      "source": "legend",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2210"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.max.tokens.4bd246e3",
+      "source": "Max tokens",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:743"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.mdash",
+      "source": "&mdash;",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatStream.js:236"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.message.deleted",
+      "source": "Message deleted",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5768",
+        "static/js/chat.js:5780"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.message.edited.36ad229a",
+      "source": "Message edited",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5865"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.message.stats",
+      "source": "Message Stats",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1938"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.metrics",
+      "source": "metrics",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3043"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.model.value.offline.switched.to.value",
+      "source": "Model {0} offline — switched to {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.model.wait",
+      "source": "Model wait",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1946"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.more.actions",
+      "source": "More actions",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1623",
+        "static/js/chatRenderer.js:1814",
+        "static/js/emailLibrary.js:5309",
+        "static/js/emailLibrary.js:6939",
+        "static/js/emailLibrary.js:7094",
+        "static/js/notes.js:2001"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.msg.action.btn.msg.delete.btn",
+      "source": "msg-action-btn msg-delete-btn",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1582",
+        "static/js/chatRenderer.js:1770"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.active.stream.for.this.session",
+      "source": "No active stream for this session",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/chat_routes.py:2589"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.file.uploaded.or.invalid.filename",
+      "source": "No file uploaded or invalid filename",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/chat_helpers.py:195"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.pricing.data.available",
+      "source": "No pricing data available",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:749"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.retained.run.for.this.session",
+      "source": "No retained run for this session",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "routes/chat_routes.py:2319"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.text.to.rewrite",
+      "source": "No text to rewrite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5887"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.not.recorded",
+      "source": "not recorded",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2553"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.to.regenerate.the.user.message.has.no.text.and",
+      "source": "Nothing to regenerate — the user message has no text and no attachments",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5216"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nothing.to.resend.message.has.no.text.and.no.attachments",
+      "source": "Nothing to resend — message has no text and no attachments yet (try again after the upload finishes).",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5108"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nudge.it",
+      "source": "Nudge it",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4266"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.ol",
+      "source": "ol",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2562",
+        "static/js/documentLibrary.js:2107"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.a.chat.first",
+      "source": "Open a chat first",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:228"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.attachment.as.document.failed",
+      "source": "open attachment as document failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:6133"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.protocol.error",
+      "source": "Open Clank agent protocol error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3415"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.clank.agent.question",
+      "source": "Open Clank agent question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2168"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.in.gallery",
+      "source": "Open in gallery",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1411",
+        "static/js/chatRenderer.js:1412"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.open.visual.report",
+      "source": "Open Visual Report",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1065"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.organizing",
+      "source": "Organizing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2067"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.original",
+      "source": "original",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5230",
+        "static/js/chat.js:5895",
+        "static/js/theme.js:53"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.other.added.to.selection",
+      "source": "Other (added to selection)…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2374"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.other.type.your.own.answer",
+      "source": "Other… (type your own answer)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2374"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.output",
+      "source": "Output",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3218",
+        "static/js/chatRenderer.js:1941",
+        "static/js/chatRenderer.js:2711",
+        "static/js/chatRenderer.js:748",
+        "static/js/compare/stream.js:395",
+        "static/js/tasks.js:1243"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.paused.mid.task",
+      "source": "Paused mid-task",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3604"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.plan.approval.failed.the.plan.was.not.executed",
+      "source": "Plan approval failed; the plan was not executed.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:879"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.plan.clear.failed",
+      "source": "Plan clear failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:895"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.polite",
+      "source": "polite",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2172",
+        "static/js/contextualHelp.js:222",
+        "static/js/copal.js:1348",
+        "static/js/copal/notesFeature.js:1823",
+        "static/js/copal/notesFeature.js:1922",
+        "static/js/copal/planning.js:783",
+        "static/js/copal/planning.js:860",
+        "static/js/providerControl.js:1188",
+        "static/js/sessions.js:65"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.prep",
+      "source": "Prep",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1945"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.processing.request",
+      "source": "Processing request...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1816"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.processing.request.d28cd301",
+      "source": "Processing request",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1844"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.processing.results",
+      "source": "Processing results",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1839"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.query.value.value.6e543f7e",
+      "source": "Query: \"{1}{2}\"",
+      "placeholders": [
+        "1",
+        "2"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1810"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.question.value",
+      "source": "Question {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2212"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.queued.for.after.this.response",
+      "source": "Queued for after this response",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:997"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.queued.send.failed",
+      "source": "queued send failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:952"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.queued.send.failed.4201b23b",
+      "source": "Queued send failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:953"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.quiet.for.value.still.working",
+      "source": "Quiet for {0} — still working?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4263"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reached.the.value.step.limit.not.finished",
+      "source": "Reached the {0}-step limit — not finished.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2915"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.read.aloud",
+      "source": "Read aloud",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3792",
+        "static/js/tts-ai.js:479",
+        "static/js/tts-ai.js:492"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reading.cffa2af0",
+      "source": "Reading",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2053",
+        "static/js/chat.js:2055"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reading.value",
+      "source": "Reading: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2746",
+        "static/js/chat.js:5528"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.readonly",
+      "source": "readonly",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1512",
+        "static/js/compare/index.js:549",
+        "static/js/compare/index.js:557",
+        "static/js/compare/selector.js:431",
+        "static/js/document.js:654",
+        "static/js/emailLibrary.js:659",
+        "static/js/research/panel.js:433",
+        "static/js/settings.js:5121",
+        "static/js/settings.js:6154"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.recalling",
+      "source": "Recalling",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2066"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.regen",
+      "source": "regen",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5249",
+        "static/js/chat.js:5282",
+        "static/js/chatRenderer.js:1566"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.regenerate.failed",
+      "source": "Regenerate failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5259",
+        "static/js/chat.js:5260"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.regenerate.from.here",
+      "source": "Regenerate from here",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1566"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.regenerate.message",
+      "source": "Regenerate message",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:359"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reject.2b03b592",
+      "source": "Reject",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2523",
+        "static/js/copal/treehouse.js:664",
+        "static/js/memory.js:1207"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reject.question",
+      "source": "Reject question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2198"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.remembering",
+      "source": "Remembering",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2064",
+        "static/js/chat.js:2065"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.repair.the.endpoint.credentials.in.settings.added.models",
+      "source": "Repair the endpoint credentials in Settings → Added Models.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2384"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.2c7bf1b7",
+      "source": "research",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:953",
+        "static/js/documentLibrary.js:3124",
+        "static/js/documentLibrary.js:3693",
+        "static/js/research/panel.js:194",
+        "static/js/research/panel.js:697",
+        "static/js/research/panel.js:717",
+        "static/js/research/panel.js:745",
+        "static/js/research/panel.js:805",
+        "static/js/sessions.js:3237",
+        "static/js/slashCommands.js:4439",
+        "static/js/tasks.js:1228",
+        "static/js/tasks.js:1284",
+        "static/js/tasks.js:1297",
+        "static/js/tasks.js:2633"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.48c9d01d",
+      "source": "(Research)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2814"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.clarification.timed.out.toggle.research.again.to.start.over",
+      "source": "Research clarification timed out. Toggle research again to start over.",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4140"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.poll.error",
+      "source": "Research poll error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5642"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.research.sources",
+      "source": "Research sources",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:953"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.researching",
+      "source": "Researching",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1841",
+        "static/js/chat.js:2068"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resend",
+      "source": "resend",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1781"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resend.failed",
+      "source": "Resend failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5145",
+        "static/js/chat.js:5146"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.resend.message",
+      "source": "Resend message",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1781"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.response.ready.in",
+      "source": "Response ready in",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatStream.js:235"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retrying.attempt.value",
+      "source": "Retrying (attempt {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3425"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.retrying.value.value",
+      "source": "Retrying ({0}/{1})",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3424"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.reviewing",
+      "source": "Reviewing",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2060"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.revision.value",
+      "source": "Revision {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:607",
+        "static/js/copal/planning.js:495"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rewrite",
+      "source": "rewrite",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5899",
+        "static/js/slashCommands.js:4705"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rewrite.failed",
+      "source": "Rewrite failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:6025",
+        "static/js/chat.js:6029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rewrite.shorter",
+      "source": "Rewrite shorter",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1570"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.rewriting",
+      "source": "Rewriting",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2059"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.round.value.analyzing.value.findings",
+      "source": "Round {0}: Analyzing {1} findings",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2748",
+        "static/js/chat.js:5530"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.round.value.reading.value.pages.value.sources.total",
+      "source": "Round {0}: Reading {1} pages · {2} sources total",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2746",
+        "static/js/chat.js:5528"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.round.value.searching.value.value",
+      "source": "Round {0}: Searching{1}{2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2744",
+        "static/js/chat.js:5526"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.run.without.password",
+      "source": "Run without password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2497"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.running.73989d9c",
+      "source": "Running",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2051",
+        "static/js/chat.js:2052",
+        "static/js/cookbook.js:3553",
+        "static/js/cookbook.js:3575",
+        "static/js/cookbook.js:3587",
+        "static/js/cookbookRunning.js:2119",
+        "static/js/cookbookRunning.js:2127",
+        "static/js/cookbookRunning.js:2147",
+        "static/js/cookbookRunning.js:3693",
+        "static/js/slashCommands.js:2875",
+        "static/js/slashCommands.js:2876",
+        "static/js/tasks.js:2764"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s",
+      "source": "([\\s\\S]*?)",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/chat_helpers.py:910",
+        "routes/chat_helpers.py:926",
+        "src/tool_parsing.py:119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.s.s.s",
+      "source": "\\s*([\\s\\S]*?)(?:",
+      "placeholders": [],
+      "kind": "server-html-text",
+      "status": "live",
+      "locations": [
+        "routes/chat_helpers.py:798"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.and.regenerate.the.message",
+      "source": "Save and regenerate the message",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:358"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.save.failed.69efb810",
+      "source": "save failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:333"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.saving.56a2285c",
+      "source": "Saving…",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:342",
+        "static/js/cookbookSchedule.js:275",
+        "static/js/copal.js:474",
+        "static/js/copal/notesFeature.js:2227",
+        "static/js/document.js:1910",
+        "static/js/emailLibrary.js:313",
+        "static/js/emailLibrary.js:361",
+        "static/js/galleryEditor.js:3276",
+        "static/js/galleryEditor.js:3656",
+        "static/js/galleryEditor.js:3659",
+        "static/js/goals.js:259",
+        "static/js/historySettings.js:255",
+        "static/js/settings.js:3019",
+        "static/js/settings.js:5445",
+        "static/js/settings.js:5787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.screenshot",
+      "source": "Screenshot",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3273",
+        "static/js/chatRenderer.js:2715"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.error",
+      "source": "Search error",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2752"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.search.error.5bb8eaab",
+      "source": "Search error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/search-chat.js:193"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching",
+      "source": "Searching",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2050"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.searching.web.with",
+      "source": "Searching web with",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1838"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.9bc2575c",
+      "source": "Send",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5002",
+        "static/js/chatRenderer.js:2380",
+        "static/js/document.js:5038"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.answer",
+      "source": "Send answer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2379"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.anyway",
+      "source": "Send anyway",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1362",
+        "static/js/document.js:3890"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.send.selection",
+      "source": "Send selection",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2380"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sending",
+      "source": "Sending…",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2268",
+        "static/js/emailLibrary.js:1711"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sending.queued.request.now",
+      "source": "Sending queued request now",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:980"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.session",
+      "source": "session",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2826",
+        "static/js/slashCommands.js:5336"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.session.f7f1997c",
+      "source": "Session",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1932",
+        "static/js/gallery.js:1448",
+        "static/js/tasks.js:1245",
+        "static/js/tasks.js:199"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shorten",
+      "source": "shorten",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1570"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.shorter",
+      "source": "shorter",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5900"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.simpler",
+      "source": "simpler",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:5901"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skill.learned",
+      "source": "Skill learned:",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3527"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.skill.not.saved",
+      "source": "Skill not saved",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3537"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sources.value.documents",
+      "source": "Sources ({0} documents)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3724"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.status.48a3661d",
+      "source": "status",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2171",
+        "static/js/contextualHelp.js:221",
+        "static/js/copal.js:1348",
+        "static/js/copal.js:1742",
+        "static/js/copal/notesFeature.js:1575",
+        "static/js/copal/notesFeature.js:1823",
+        "static/js/copal/notesFeature.js:1922",
+        "static/js/copal/notesFeature.js:1923",
+        "static/js/copal/notesFeature.js:2237",
+        "static/js/copal/planning.js:1065",
+        "static/js/copal/planning.js:860",
+        "static/js/copal/treehouse.js:122",
+        "static/js/copal/treehouse.js:179",
+        "static/js/copal/windows.js:43",
+        "static/js/document.js:42",
+        "static/js/editor/explorerTree.js:565",
+        "static/js/editor/explorerTree.js:601",
+        "static/js/editor/explorerTree.js:611",
+        "static/js/notes.js:38",
+        "static/js/sessions.js:64",
+        "static/js/settings.js:2957"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stop.9e253470",
+      "source": "Stop",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3803",
+        "static/js/chat.js:4279",
+        "static/js/compare/index.js:402",
+        "static/js/compare/panes.js:509",
+        "static/js/settings.js:1222",
+        "static/js/settings.js:1238",
+        "static/js/tts-ai.js:300"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stop.the.stalled.stream.and.ask.it.to.continue",
+      "source": "Stop the stalled stream and ask it to continue",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:4267"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stopped",
+      "source": "stopped",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1091"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.stream.error",
+      "source": "Stream error:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.string",
+      "source": "string",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2382",
+        "static/js/copal.js:131",
+        "static/js/copal/notesFeature.js:2323",
+        "static/js/markdown/tableRow.js:13",
+        "static/js/memory.js:3265",
+        "static/js/memory.js:347",
+        "static/js/memory.js:360",
+        "static/js/memory.js:3726",
+        "static/js/modelSharing.js:45",
+        "static/js/sessions.js:745",
+        "static/js/skills.js:1198",
+        "static/js/workspace.js:137",
+        "static/js/workspace.js:152"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sub.agent",
+      "source": "Sub-agent",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2573"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sub.agents.value",
+      "source": "Sub-agents: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2553",
+        "static/js/chatRenderer.js:2554"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.submit.password",
+      "source": "Submit password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2496"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sudo.password.never.stored",
+      "source": "sudo password (never stored)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2489"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.summarize.older.messages.to.free.up.context",
+      "source": "Summarize older messages to free up context",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2029"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.teacher.could.not.solve.it",
+      "source": "Teacher could not solve it",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3537"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.teacher.takeover",
+      "source": "Teacher takeover:",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3512"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.think.42c1c80b",
+      "source": "<think",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2677"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.think.time",
+      "source": "<think time=\"",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2340",
+        "static/js/chat.js:2637"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.thinking.a60d9c9c",
+      "source": "Thinking…",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2545",
+        "static/js/document.js:1841"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.chat.s.workspace.is.no.longer.usable.running.without",
+      "source": "This chat’s Workspace is no longer usable; running without confinement",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:2838"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.looks.like.an.api.key.sending.it.to.the",
+      "source": "This looks like an API key. Sending it to the AI could expose it. Did you mean to use /setup instead?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1362"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.this.plan.has.not.been.persisted.yet.wait.for.the",
+      "source": "This plan has not been persisted yet. Wait for the plan state to sync, then try Execute again.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:860"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.time",
+      "source": "Time",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1944",
+        "static/js/tasks.js:1383"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tokens",
+      "source": "tokens",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:728",
+        "static/js/slashCommands.js:5657"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.tool.budget.reached.value.value.calls.agent.stopped",
+      "source": "Tool budget reached ({0}/{1} calls). Agent stopped.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:3479"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.total",
+      "source": "Total",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:1942"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.type.a.custom.answer",
+      "source": "Type a custom answer",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2375"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.bc7819b3",
+      "source": "Unknown",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:140",
+        "static/js/chatRenderer.js:1874",
+        "static/js/copal/planning.js:1266",
+        "static/js/gallery.js:1344",
+        "static/js/gallery.js:1347",
+        "static/js/models.js:289",
+        "static/js/providerControl.js:712",
+        "static/js/settings.js:2473",
+        "static/js/slashCommands.js:1876"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.failed.attachment.kept.so.you.can.retry",
+      "source": "Upload failed. Attachment kept so you can retry.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1546"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.failed.c2a7d692",
+      "source": "upload failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1540"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.usage",
+      "source": "Usage",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/chatRenderer.js:2026"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.help.to.see.all.available.commands",
+      "source": "- Use `/help` to see all available commands",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/chat.js:1343",
+        "static/js/chat.js:1354"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

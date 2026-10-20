@@ -1,0 +1,1 @@
+Different derived records/precomputation reuse; each account's weak password can still be guessed.

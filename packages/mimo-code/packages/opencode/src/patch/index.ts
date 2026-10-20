@@ -307,13 +307,21 @@ interface ApplyPatchFileUpdate {
   content: string
 }
 
-export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFileChunk[]): ApplyPatchFileUpdate {
+export function deriveNewContentsFromChunks(
+  filePath: string,
+  chunks: UpdateFileChunk[],
+  observedContent?: string,
+): ApplyPatchFileUpdate {
   // Read original file content
   let originalContent: string
-  try {
-    originalContent = readFileSync(filePath, "utf-8")
-  } catch (error) {
-    throw new Error(`Failed to read file ${filePath}: ${error}`, { cause: error })
+  if (observedContent !== undefined) {
+    originalContent = observedContent
+  } else {
+    try {
+      originalContent = readFileSync(filePath, "utf-8")
+    } catch (error) {
+      throw new Error(`Failed to read file ${filePath}: ${error}`, { cause: error })
+    }
   }
 
   let originalLines = originalContent.split("\n")

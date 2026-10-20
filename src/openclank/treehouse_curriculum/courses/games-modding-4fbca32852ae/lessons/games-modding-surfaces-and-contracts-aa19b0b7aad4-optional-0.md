@@ -1,0 +1,1 @@
+The examples enforce required fields, types, identifier policy and numeric bounds, rather than trusting a filename.

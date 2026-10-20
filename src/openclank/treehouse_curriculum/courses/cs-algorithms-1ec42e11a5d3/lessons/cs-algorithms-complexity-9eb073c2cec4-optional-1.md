@@ -1,0 +1,1 @@
+'Big O means worst case' confuses the bound notation with the chosen case.

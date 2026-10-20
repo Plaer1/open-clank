@@ -1,0 +1,1 @@
+Add `var untimed_assist := true` with the other script fields; in reset_round immediately after `$RoundTimer.start(20.0)`, add `if untimed_assist: $RoundTimer.stop()`. Movement/collection stay unchanged. Test win and restart; set false to compare timed behavior. This is one explicit assist, not a full accessibility audit.

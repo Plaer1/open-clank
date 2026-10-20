@@ -1,0 +1,23 @@
+WEBVTT
+
+NOTE Historical native 4K step-cut frames; demonstration fixture; not continuous runtime recording or current Beta 1 persistence evidence.
+
+1
+00:00:00.000 --> 00:00:01.500
+Wiki recipes. Demonstration data; no model requests.
+
+2
+00:00:01.500 --> 00:00:03.000
+Wiki link target. Demonstration data; no model requests.
+
+3
+00:00:03.000 --> 00:00:04.500
+Editable copy dialog. Demonstration data; no model requests.
+
+4
+00:00:04.500 --> 00:00:06.000
+Editable copy. Demonstration data; no model requests.
+
+5
+00:00:06.000 --> 00:00:07.500
+Editable copy save attempted; the toolbar shows a save-response action identity error and the tab remains dirty. Historical demonstration data; persistence is not established.

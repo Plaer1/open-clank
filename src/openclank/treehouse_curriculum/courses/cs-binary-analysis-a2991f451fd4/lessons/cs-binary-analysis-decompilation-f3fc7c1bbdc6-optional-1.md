@@ -1,0 +1,1 @@
+Plausible C-like output is not proof of the original type or behavior for every input.

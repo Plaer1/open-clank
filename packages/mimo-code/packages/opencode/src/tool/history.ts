@@ -5,6 +5,8 @@ import DESCRIPTION from "./history.txt"
 import * as Tool from "./tool"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import { SessionCwd } from "./session-cwd"
+import { ManagedProvider } from "@/acp/managed-provider"
 
 const KIND = z.enum([
   "user_text",
@@ -23,20 +25,26 @@ const KIND = z.enum([
 const AROUND_MAX_BYTES = 20 * 1024
 
 const parameters = z.object({
-  operation: z.enum(["search", "around"]).describe("search: FTS BM25; around: pull message context"),
+  operation: z.enum(["search", "around", "get", "media"]).describe(
+    "search: FTS BM25; around: pull message context; get: full part body; media: attachment locators",
+  ),
   // search params
   query: z.string().optional().describe("FTS query (BM25 over text/tool bodies). Required for operation=search."),
-  scope: z.enum(["project", "global"]).optional().describe("Default project."),
-  session_id: z.string().optional(),
+  scope: z.enum(["project", "global"]).optional().describe("Standalone: project (default) or global. Managed: omit for the bound chat, or use global; project is unavailable."),
+  session_id: z.string().optional().describe("Target chat id from a history search result. In managed mode, callback admission still uses the current engine session."),
   kind: z.array(KIND).optional(),
   tool_name: z.string().optional().describe("Filter to a specific tool (e.g. Bash, Read)"),
   time_after: z.number().optional().describe("Unix ms"),
   time_before: z.number().optional(),
   limit: z.number().optional().describe("Max 50, default 10"),
   // around params
-  message_id: z.string().optional().describe("Anchor message id. Required for operation=around."),
+  message_id: z.string().optional().describe("Anchor message id. Required for operation=around/get/media."),
   before: z.number().optional().describe("Default 5"),
   after: z.number().optional().describe("Default 5"),
+  // get / media params
+  part_id: z.string().optional().describe("Part id. Required for operation=get/media."),
+  length: z.number().optional().describe("Max 8000 UTF-16 units for get."),
+  offset: z.number().optional().describe("UTF-16 cursor into the part body."),
 })
 
 export const HistoryTool = Tool.define(
@@ -61,7 +69,9 @@ export const HistoryTool = Tool.define(
             const hits = yield* history.search({
               query: args.query,
               scope: args.scope,
-              session_id: args.session_id,
+              // In managed mode this is the admitted engine session; callers
+              // cannot select a different chat or owner through tool args.
+              session_id: ManagedProvider.enabled() ? ctx.sessionID : args.session_id,
               kind: args.kind,
               tool_name: args.tool_name,
               time_after: args.time_after,
@@ -90,6 +100,71 @@ export const HistoryTool = Tool.define(
             }
           }
 
+          if (args.operation === "get") {
+            if (!args.message_id || !args.part_id) {
+              return {
+                title: "History get: missing ids",
+                output: "operation=get requires `message_id` and `part_id`.",
+                metadata: { count: 0 },
+              }
+            }
+            const part = yield* history.get({
+              session_id: ctx.sessionID,
+              chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
+              message_id: args.message_id,
+              part_id: args.part_id,
+              length: args.length,
+              offset: args.offset,
+            })
+            if (!part) {
+              return {
+                title: "History get: not found",
+                output: `No part ${args.part_id} on message ${args.message_id}.`,
+                metadata: { count: 0 },
+              }
+            }
+            return {
+              title: `History get ${args.part_id}`,
+              output:
+                `${part.type}${part.tool_name ? ` (${part.tool_name})` : ""}:\n${part.text}` +
+                (part.has_more ? `\n\n[continued at offset ${part.next_offset}]` : ""),
+              metadata: { count: 1 },
+            }
+          }
+
+          if (args.operation === "media") {
+            if (!args.message_id || !args.part_id) {
+              return {
+                title: "History media: missing ids",
+                output: "operation=media requires `message_id` and `part_id`.",
+                metadata: { count: 0 },
+              }
+            }
+            const attachments = yield* history.media({
+              session_id: ctx.sessionID,
+              chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
+              message_id: args.message_id,
+              part_id: args.part_id,
+            })
+            if (attachments.length === 0) {
+              return {
+                title: "History media: none",
+                output: "That part has no attachment locators.",
+                metadata: { count: 0 },
+              }
+            }
+            return {
+              title: `History media: ${attachments.length} attachment(s)`,
+              output: attachments
+                .map(
+                  (a) =>
+                    `- ${a.filename ?? a.asset_id} (${a.mime_type ?? "unknown"}, ${a.byte_size ?? "?"} bytes) id=${a.asset_id}`,
+                )
+                .join("\n"),
+              metadata: { count: attachments.length },
+            }
+          }
+
           // operation=around
           if (!args.message_id) {
             return {
@@ -99,6 +174,8 @@ export const HistoryTool = Tool.define(
             }
           }
           const around = yield* history.around({
+            session_id: ctx.sessionID,
+            chat_id: ManagedProvider.enabled() ? args.session_id : undefined,
             message_id: args.message_id,
             before: args.before,
             after: args.after,
@@ -130,7 +207,17 @@ export const HistoryTool = Tool.define(
           // metadata.truncated set here also opts us out of tool.ts wrap's
           // global truncate call (see tool.ts:110).
           const agent = yield* agents.get(ctx.agent)
-          const truncated = yield* truncate.output(rawOutput, { maxBytes: AROUND_MAX_BYTES }, agent)
+          const truncated = yield* truncate.output(
+            rawOutput,
+            { maxBytes: AROUND_MAX_BYTES },
+            agent,
+            {
+              owner: ManagedProvider.managedSessionOwner(ctx.sessionID, process.env.OPEN_CLANK_OWNER ?? ""),
+              workspace: SessionCwd.get(ctx.sessionID),
+              sessionID: ctx.sessionID,
+              ...(ctx.callID ? { callID: ctx.callID } : {}),
+            },
+          )
           return {
             title: `History around ${args.message_id}`,
             output: truncated.content,

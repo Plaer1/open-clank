@@ -1,0 +1,1 @@
+Give 1 and 0 bits; there are fewer shorter strings than n-bit strings, so a one-to-one encoding for all is impossible.

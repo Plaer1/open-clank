@@ -1,0 +1,1 @@
+Define first occurrence, None for empty/absent, and no mutation, with expected results.

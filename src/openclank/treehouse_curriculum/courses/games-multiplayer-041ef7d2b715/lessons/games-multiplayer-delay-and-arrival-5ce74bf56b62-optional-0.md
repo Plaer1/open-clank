@@ -1,0 +1,1 @@
+A: constant 100 ms. B: 100,130,105,160 ms; declared variation metric 60 ms. C: known drop. Payload 2000 B/s = 16000 bit/s before overhead. RTT 200 ms; one-way 100 ms assumes symmetric paths. Capacity does not erase delay.

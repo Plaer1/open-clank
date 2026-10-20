@@ -1,0 +1,1 @@
+First:1+3z+3z²+z³; total-two triples110,101,011. Second:(1+z)²(1+z²)=1+2z+2z²+2z³+z⁴; total-two triples110,002. Slots are distinguished, so arrangements can count separately.

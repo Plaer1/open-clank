@@ -1,0 +1,1 @@
+Original helper returns 5 and print writes `5` followed by a newline. With second argument 0 it writes `2`. With original arguments and subtraction it writes `-1`. Returning alone does not print.

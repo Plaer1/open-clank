@@ -3,6 +3,7 @@ import mimetypes
 import os
 import sys
 import asyncio
+import json
 import time
 
 # On Windows, asyncio.create_subprocess_exec/shell require the ProactorEventLoop.
@@ -40,17 +41,24 @@ if os.name == "nt":
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from dotenv import load_dotenv
-# encoding="utf-8-sig" tolerates a UTF-8 BOM in .env — a common Windows gotcha
-# when the file is saved from Notepad. Without this, the first key parses as
-# "﻿AUTH_ENABLED" instead of "AUTH_ENABLED", so AUTH_ENABLED=false (etc.)
-# is silently ignored and the user is unexpectedly forced to log in (issue #142).
-# utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
-load_dotenv(encoding="utf-8-sig")
+# Windows editors may prepend a UTF-8 BOM to configuration files.
+# The same encoding also reads ordinary UTF-8 without changing its meaning.
+if not getattr(sys, "frozen", False):
+    # Frozen installs admit explicit launch configuration only. Searching cwd
+    # ancestors could select an unrelated account/data/native helper profile.
+    load_dotenv(encoding="utf-8-sig")
+
+# Resolve the built source/bundled worker before imports bind the FM command.
+# Explicit environment and .env choices retain precedence.
+if not os.environ.get("FM_MCP_COMMAND", "").strip():
+    from src.runtime_paths import resolve_fm_mcp
+    os.environ["FM_MCP_COMMAND"] = resolve_fm_mcp().path
 
 import asyncio
 import logging
 import secrets
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict
 
 from contextlib import asynccontextmanager
@@ -67,7 +75,18 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    INTERNAL_TOOL_HEADER,
+    INTERNAL_TOOL_OWNER_HEADER,
+    INTERNAL_TOOL_TOKEN,
+    INTERNAL_TOOL_USER,
+    INTERNAL_TOOL_WORKSPACE_HEADER,
+    SecurityHeadersMiddleware,
+    get_application_route_path,
+    is_cors_preflight,
+    path_is_route_or_child,
+    with_asgi_root_path,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -77,8 +96,16 @@ from core.exceptions import (
 import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
-from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.generated_images import (
+    GENERATED_IMAGE_HEADERS,
+    gallery_owner_key,
+    resolve_gallery_image_path,
+)
 from src.shutdown_lifecycle import run_shutdown_phase as _run_shutdown_phase
+from src.openclank.account_request_barrier import (
+    AccountRequestBarrier,
+    AccountRequestFenced,
+)
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -103,7 +130,7 @@ try:
     _log_file = os.path.join(_log_dir, "app.log")
 
     # RotatingFileHandler is not multi-process safe (e.g. if uvicorn is run with --workers N).
-    # Odysseus is single-process by convention, so this is acceptable, but be aware that
+    # Open Clank is single-process by convention, so this is acceptable, but be aware that
     # concurrent log rotation issues can arise if multiple workers are configured.
     _file_h = logging.handlers.RotatingFileHandler(
         _log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
@@ -139,8 +166,9 @@ app.add_middleware(
         "Content-Type",
         "X-API-Key",
         "X-Auth-Token",
-        "X-Odysseus-Internal-Token",
-        "X-Odysseus-Owner",
+        INTERNAL_TOOL_HEADER,
+        INTERNAL_TOOL_OWNER_HEADER,
+        INTERNAL_TOOL_WORKSPACE_HEADER,
         "X-Requested-With",
         "X-TZ-Offset",
     ],
@@ -150,8 +178,8 @@ app.add_middleware(
 # The frontend's text assets (style.css, index.html, the JS bundles) shipped
 # uncompressed on every cold load. gzip cuts CSS/JS/HTML by ~75-85% on the wire
 # with no behavioural change. Starlette's GZipMiddleware excludes
-# `text/event-stream` by default, so the SSE streams (chat, shell, research,
-# model-probe — all served with media_type="text/event-stream") are never
+# `text/event-stream` by default, so the SSE streams (chat, shell, and research,
+# all served with media_type="text/event-stream") are never
 # compressed or buffered; only complete bodies over minimum_size are. The
 # security-header middleware composes cleanly on top.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
@@ -176,19 +204,47 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/shell/stream",    # SSE
     "/api/research",        # multi-minute jobs
     "/api/model/download",  # tmux setup may run pip installs
-    "/api/model/probe",     # SSE; iterates models with up to 8s timeout each
-    "/api/model-endpoints", # /probe sub-route also iterates models
     "/api/cookbook/setup",  # remote pacman/apt installs
     "/api/upload",          # large files
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
     "/api/memory/audit",    # retains own 120s LLM inactivity timeout
+    "/api/memory/import-batches",  # durable per-file work has no outer elapsed-time deadline
 )
+
+
+def _is_timeout_exempt(path: str, method: str) -> bool:
+    if any(path.startswith(prefix) for prefix in _TIMEOUT_EXEMPT_PREFIXES):
+        return True
+    normalized_method = str(method or "GET").upper()
+    # Current resolution is a bounded compound operation with repeated native
+    # authority/source fences, not a fixed-duration lookup. Keep those bounds
+    # and explicit cancellation; do not impose the generic elapsed deadline.
+    if normalized_method == "POST" and path == "/api/memory/code/resource":
+        return True
+    # Durable account convergence deliberately uses unbounded request/writer
+    # drains and may cross several local stores.  Cancelling it at 45 seconds
+    # can strand a live-PID claim that the recovery route then cannot acquire.
+    if normalized_method == "DELETE" and path == "/api/auth/users":
+        return True
+    if (
+        normalized_method == "PUT"
+        and path.startswith("/api/auth/users/")
+        and path.endswith("/rename")
+    ):
+        return True
+    if (
+        normalized_method == "POST"
+        and path.startswith("/api/auth/account-operations/")
+        and path.endswith("/resume")
+    ):
+        return True
+    return False
 
 
 class _RequestTimeoutMiddleware(_BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path or ""
-        if any(path.startswith(p) for p in _TIMEOUT_EXEMPT_PREFIXES):
+        if _is_timeout_exempt(path, request.method):
             return await call_next(request)
         try:
             return await _asyncio.wait_for(call_next(request), timeout=REQUEST_HARD_TIMEOUT)
@@ -246,233 +302,76 @@ app.add_middleware(_SlowRequestLogMiddleware)
 
 # ========= AUTH =========
 from routes.auth_routes import setup_auth_routes, SESSION_COOKIE
+from src.desktop_shell_readiness import (
+    DESKTOP_SHELL_CHALLENGE_HEADER,
+    DESKTOP_SHELL_READY_PATH,
+    DesktopShellBinding,
+)
 
 auth_manager = AuthManager()
 app.state.auth_manager = auth_manager
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
-LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
-if LOCALHOST_BYPASS:
-    logger.warning("LOCALHOST_BYPASS is enabled, loopback requests bypass authentication. Do not expose this instance to a network.")
+from src.openclank.conversation_archive import configure_conversation_archive_owner_resolver, get_conversation_archive
+configure_conversation_archive_owner_resolver(
+    auth_manager.account_id, auth_manager.username_for_account_id,
+)
+_account_request_barrier = AccountRequestBarrier(
+    auth_manager.is_account_lifecycle_fenced
+)
+app.state.drain_account_owner_requests = _account_request_barrier.drain
 
-if AUTH_ENABLED:
-    AUTH_EXEMPT_EXACT = {
-        "/api/auth/setup",
-        "/api/auth/signup",
-        "/api/auth/login",
-        "/api/auth/logout",
-        "/api/auth/status",
-        "/api/auth/features",
-        "/api/auth/settings",
-        "/api/auth/integrations/presets",
-        "/api/health",
-        "/api/version",
-        "/login",
-    }
-    AUTH_EXEMPT_PREFIXES = ["/static"]
-    # Dynamic paths whose own handler proves identity via a path-embedded
-    # secret instead of the session/bearer auth. The route handler at
-    # routes/task_routes.py validates the per-task `webhook_token` itself
-    # and returns 404 on mismatch, so the path is the credential — the
-    # UI labels these URLs "no auth needed" precisely because external
-    # callers (Zapier, n8n, curl) can't supply a session cookie. Without
-    # this exemption AuthMiddleware rejects every POST with 401 before
-    # the token is ever checked.
-    import re as _re
-    AUTH_EXEMPT_PATTERNS = [
-        _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
-    ]
 
-    def _is_auth_exempt(path: str) -> bool:
-        if path in AUTH_EXEMPT_EXACT:
-            return True
-        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
-            return True
-        return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
+async def _call_next_for_account_owner(request, call_next, owner):
+    """Admit one owner request and retain it through any streaming body."""
+    try:
+        return await _account_request_barrier.track_response(
+            owner,
+            lambda: call_next(request),
+        )
+    except AccountRequestFenced:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "Account lifecycle operation in progress"},
+        )
 
-    # In-memory token cache: prefix → list[(token_id, token_hash, owner, scopes)]. The DB
-    # query was running on every API-bearer request and scanning bcrypt
-    # checks linearly. With this cache, we hit the DB only when the cache
-    # version bumps (token created/revoked) — see _token_cache_invalidate
-    # in app.state, called by routes/api_token_routes.
-    _token_cache: dict = {}
-    _token_cache_lock = _asyncio.Lock()
-    _token_cache_dirty = True
 
-    def _token_cache_invalidate():
-        nonlocal_dict = app.state.__dict__
-        nonlocal_dict["_token_cache_dirty"] = True
-    app.state.invalidate_token_cache = _token_cache_invalidate
-    app.state._token_cache = _token_cache
-    app.state._token_cache_dirty = True
+_DESKTOP_SHELL_BINDING = DesktopShellBinding.capture()
 
-    def _refresh_token_cache():
-        """Rebuild the prefix→[(id,hash)] map from the DB."""
-        from collections import defaultdict
-        new_map = defaultdict(list)
-        db = SessionLocal()
-        try:
-            rows = db.query(ApiToken).filter(ApiToken.is_active == True).all()
-            for r in rows:
-                owner_key = normalize_known_username(auth_manager.users, getattr(r, "owner", None))
-                if not owner_key:
-                    logger.warning(
-                        "Ignoring active API token '%s' for unknown auth user '%s'",
-                        getattr(r, "id", ""),
-                        getattr(r, "owner", None),
-                    )
-                    continue
-                scopes = [s.strip() for s in (getattr(r, "scopes", "") or "chat").split(",") if s.strip()]
-                new_map[r.token_prefix].append((r.id, r.token_hash, owner_key, scopes))
-        finally:
-            db.close()
-        _token_cache.clear()
-        _token_cache.update(new_map)
-        app.state._token_cache_dirty = False
+# Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
+# nginx, Caddy, Tailscale Funnel, …). cloudflared connects to the app FROM
+# 127.0.0.1, so without this check every tunneled request would look local.
+_PROXY_FWD_HEADERS = (
+    "cf-connecting-ip", "cf-ray", "cf-visitor",
+    "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+)
 
-    # Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
-    # nginx, Caddy, Tailscale Funnel, …). cloudflared connects to the app FROM
-    # 127.0.0.1, so without this check every tunneled request would look like
-    # loopback and could bypass auth.
-    _PROXY_FWD_HEADERS = (
-        "cf-connecting-ip", "cf-ray", "cf-visitor",
-        "x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded",
+
+def _is_trusted_loopback(request: Request) -> bool:
+    """Accept only a direct loopback connection, never a proxied one."""
+    host = request.client.host if request.client else None
+    return host in ("127.0.0.1", "::1") and not any(
+        request.headers.get(header) for header in _PROXY_FWD_HEADERS
     )
 
-    def _is_trusted_loopback(request: Request) -> bool:
-        """True ONLY for a DIRECT loopback connection with no proxy/tunnel
-        forwarding headers. A bare ``client.host in ('127.0.0.1','::1')`` check is
-        unsafe behind a Cloudflare tunnel / reverse proxy: those connect from
-        loopback, so a remote visitor would otherwise inherit local trust and
-        slip past LOCALHOST_BYPASS or spoof the internal-tool path. Odysseus's own
-        in-process agent loopback calls carry none of these headers, so they still
-        qualify."""
-        host = request.client.host if request.client else None
-        if host not in ("127.0.0.1", "::1"):
-            return False
-        for _h in _PROXY_FWD_HEADERS:
-            if request.headers.get(_h):
-                return False
-        return True
 
-    class AuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            path = request.url.path
-            # A genuine CORS preflight (OPTIONS + Access-Control-Request-Method)
-            # carries no credentials by design and must reach CORSMiddleware to be
-            # answered. AuthMiddleware is the outermost middleware, so gating the
-            # preflight on auth 401s it before CORS can respond -- which blocks
-            # every cross-origin browser/WebView client before the real request
-            # is sent. Let real preflights through (only OPTIONS w/ the ACRM
-            # header; never a credentialed request).
-            if is_cors_preflight(request.method, request.headers):
-                return await call_next(request)
-            if _is_auth_exempt(path):
-                return await call_next(request)
-            # In-process internal-tool token bypass. Used by the agent
-            # tool layer when it HTTP-loopbacks to admin-gated routes
-            # (no admin cookie available in that context). Restricted to
-            # loopback clients + matching token to keep it locked down.
-            try:
-                from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT, INTERNAL_TOOL_USER
-                _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
-                if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
-                    # Impersonation: when the agent's loopback call sets
-                    # X-Odysseus-Owner, attribute the request to that user only
-                    # if they exist. Authorization checks remain separate; this
-                    # is just owner attribution for notes/calendar/etc.
-                    _impersonate = (request.headers.get("X-Odysseus-Owner") or "").strip()
-                    _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
-                    if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
-                        request.state.current_user = _impersonate
-                    else:
-                        request.state.current_user = INTERNAL_TOOL_USER
-                    request.state.api_token = False
-                    return await call_next(request)
-            except Exception as _e:
-                logger.warning("Internal tool auth header check failed", exc_info=_e)
-            # Allow DIRECT localhost requests (internal service calls from
-            # heartbeats etc.). Tunnel/proxy-forwarded requests are excluded by
-            # _is_trusted_loopback so LOCALHOST_BYPASS can't be abused over a
-            # Cloudflare tunnel / reverse proxy. Keep LOCALHOST_BYPASS=false for
-            # network-exposed deployments regardless.
-            if LOCALHOST_BYPASS and _is_trusted_loopback(request):
-                return await call_next(request)
-            if not auth_manager.is_configured:
-                # No users yet — redirect to login for first-time setup
-                if not path.startswith("/api/"):
-                    return RedirectResponse(url="/login", status_code=302)
-                return JSONResponse(status_code=401, content={"error": "Setup required"})
+from src.openclank.request_auth import install_request_auth
 
-            # --- Bearer token auth (API tokens for external integrations) ---
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith("Bearer ody_"):
-                raw_token = auth_header[7:]
-                # Sanity check: tokens are "ody_" + 43 chars of base64
-                if len(raw_token) < 12 or len(raw_token) > 100:
-                    return JSONResponse(status_code=401, content={"error": "Invalid API token"})
-                prefix = raw_token[:8]
-                try:
-                    if app.state._token_cache_dirty:
-                        async with _token_cache_lock:
-                            if app.state._token_cache_dirty:
-                                await _asyncio.to_thread(_refresh_token_cache)
-                    candidates = list(_token_cache.get(prefix, ()))
-                    matched_id = None
-                    matched_owner = None
-                    matched_scopes = []
-                    for tid, thash, owner, scopes in candidates:
-                        if _bcrypt.checkpw(raw_token.encode(), thash.encode()):
-                            matched_id = tid
-                            matched_owner = owner
-                            matched_scopes = scopes or []
-                            break
-                    if matched_id:
-                        # Update last_used_at off the hot path. Doing it
-                        # inline used to keep the request open across an
-                        # extra commit; do it fire-and-forget instead.
-                        async def _touch_last_used(tid: str):
-                            def _do():
-                                _db = SessionLocal()
-                                try:
-                                    _db.query(ApiToken).filter(ApiToken.id == tid).update(
-                                        {"last_used_at": datetime.utcnow()}
-                                    )
-                                    _db.commit()
-                                finally:
-                                    _db.close()
-                            try:
-                                await _asyncio.to_thread(_do)
-                            except Exception as _e:
-                                logger.debug("Failed to update token last_used_at", exc_info=_e)
-                        _asyncio.create_task(_touch_last_used(matched_id))
-                        # Keep bearer-token callers out of normal cookie/user
-                        request.state.current_user = "api"
-                        request.state.api_token = True
-                        request.state.api_token_id = matched_id
-                        request.state.api_token_owner = matched_owner
-                        request.state.api_token_scopes = matched_scopes
-                        return await call_next(request)
-                except Exception:
-                    logger.warning("API token auth error", exc_info=False)
-                # Invalid bearer token — reject immediately
-                return JSONResponse(status_code=401, content={"error": "Invalid API token"})
+install_request_auth(
+    app,
+    auth_manager=auth_manager,
+    session_factory=SessionLocal,
+    api_token_model=ApiToken,
+    account_call_next=_call_next_for_account_owner,
+    trusted_loopback=_is_trusted_loopback,
+    desktop_ready_path=DESKTOP_SHELL_READY_PATH,
+    session_cookie=SESSION_COOKIE,
+)
 
-            # --- Cookie-based session auth ---
-            token = request.cookies.get(SESSION_COOKIE)
-            if not auth_manager.validate_token(token):
-                if path.startswith("/api/"):
-                    return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-                return RedirectResponse(url="/login", status_code=302)
 
-            # Attach current username to request state for downstream routes
-            request.state.current_user = auth_manager.get_username_for_token(token)
-            request.state.api_token = False
-            return await call_next(request)
+# The provider hard cut deliberately leaves no compatibility handlers. Keep
+# this guard outside authentication so retired route names are uniformly 404.
+from src.openclank.retired_provider_routes import RetiredProviderRouteMiddleware
 
-    app.add_middleware(AuthMiddleware)
-    logger.info("Auth middleware enabled (AUTH_ENABLED=true)")
-else:
-    logger.info("Auth middleware disabled (set AUTH_ENABLED=true to enable)")
+app.add_middleware(RetiredProviderRouteMiddleware)
 
 # ========= STATIC FILES =========
 os.makedirs(STATIC_DIR, exist_ok=True)
@@ -494,34 +393,37 @@ class _RevalidatingStatic(StaticFiles):
         return resp
 
 
+@app.get("/docs", include_in_schema=False)
+@app.get("/docs/", include_in_schema=False)
+@app.get("/docs/index.html", include_in_schema=False)
+@app.get("/static/docs/index.html", include_in_schema=False)
+async def retired_official_guide():
+    # Documentation lives in the existing Copal and Wiki handbook. Register
+    # the retired static reader before the generic mount so it stays retired.
+    raise HTTPException(status_code=404, detail="Not found")
+
+
 app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")
 
 # ========= GENERATED IMAGES =========
 @app.get("/api/generated-image/{filename}")
 async def serve_generated_image(filename: str, request: Request):
-    """Serve generated images from the data directory."""
-    img_path = resolve_generated_image_path(filename)
-    # SECURITY: filename is the only key, so anyone who knows / guesses a
-    # 12-hex content hash could pull another user's image bytes. Require
-    # auth and verify ownership via the gallery row (when one exists).
-    try:
-        from src.auth_helpers import get_current_user
-        from core.database import SessionLocal as _SL, GalleryImage as _GI
-        _user = get_current_user(request)
-        if _user:
-            _db = _SL()
-            try:
-                _row = _db.query(_GI).filter(_GI.filename == filename).first()
-                # Generated-but-not-yet-imported images have no row → allow.
-                # Row exists with a different owner → 404 (don't confirm existence).
-                if _row is not None and _row.owner and _row.owner != _user:
-                    raise HTTPException(status_code=404, detail="Image not found")
-            finally:
-                _db.close()
-    except HTTPException:
-        raise
-    except Exception as _e:
-        logger.warning("Image ownership verification failed for %r", filename, exc_info=_e)
+    """Serve only an active image with exact durable owner provenance."""
+    from src.auth_helpers import effective_user
+    from core.database import SessionLocal as _SL
+    from src.openclank.files_image_store import FilesImageStore
+
+    owner = gallery_owner_key(effective_user(request))
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Prove owner provenance before resolving or touching the byte path.  A
+    # missing/foreign row and any provenance-store failure deliberately share
+    # the same response, and none of them are allowed to fall through to disk.
+    if not FilesImageStore(session_factory=_SL).owns_locator(owner, filename):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    img_path = resolve_gallery_image_path(filename, require_exists=True)
     ext = filename.rsplit('.', 1)[-1].lower()
     mime = {
         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
@@ -529,10 +431,7 @@ async def serve_generated_image(filename: str, request: Request):
         "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
         "mkv": "video/x-matroska", "m4v": "video/mp4",
     }.get(ext, "application/octet-stream")
-    # Generated-image filenames are content hashes → the bytes for a given
-    # filename never change. Cache them hard so the gallery doesn't
-    # re-download every full-size image each time it's opened. `immutable`
-    # tells the browser it never needs to revalidate within the max-age.
+    # Personalized bytes are never placed in a shared/browser-persistent cache.
     return FileResponse(
         str(img_path),
         media_type=mime,
@@ -544,25 +443,15 @@ from services.youtube import init_youtube
 init_youtube()
 
 # ========= RAG (vector document RAG) =========
-# VectorRAG (ChromaDB-backed personal-document semantic search). Initialized
-# lazily via get_rag_manager() — returns None if ChromaDB isn't reachable
-# (no server running on the configured host:port), in which case personal-doc
-# routes return a clean 503 instead of busy-retrying every request.
-#
-# Note: this was previously hardcoded off because chromadb 1.4.1 / pydantic
-# 2.12 were mutually incompatible at the time. With the current pins
-# (chromadb 1.5.x + pydantic 2.13.x) the init works and Personal Docs
-# (POST /api/personal/add_directory etc.) is functional again.
+# Canonical Frankenmemory SQLite personal-document RAG. Initialized lazily via
+# get_rag_manager(); it does not require ChromaDB or another vector service.
 from src.rag_singleton import get_rag_manager
 rag_manager = get_rag_manager()
 rag_available = rag_manager is not None
 if rag_available:
     logger.info("Vector document RAG initialized")
 else:
-    logger.info(
-        "Vector document RAG not available at startup "
-        "(ChromaDB may not be reachable yet — routes will retry lazily)"
-    )
+    logger.info("Frankenmemory document RAG not available at startup; routes will retry lazily")
 
 # ========= IMPORT CONFIG =========
 from src.config import config
@@ -585,18 +474,49 @@ memory_provider_registry = components.get("memory_provider_registry")
 # Provider-always: app_initializer guarantees a provider object (never None).
 memory_provider   = components["memory_provider"]
 app.state.memory_provider = memory_provider
+# Routes and authenticated agent tools share the current lifecycle owners.
+session_manager.lifecycle_context = app.state
 upload_handler    = components["upload_handler"]
 app.state.upload_handler = upload_handler
 personal_docs_mgr = components["personal_docs_manager"]
 app.state.personal_docs_manager = personal_docs_mgr
 api_key_manager   = components["api_key_manager"]
 preset_manager    = components["preset_manager"]
+from src.openclank.account_lifecycle import build_account_owner_lifecycle
+account_owner_lifecycle = build_account_owner_lifecycle(
+    preset_manager,
+    session_factory=SessionLocal,
+    artifact_root=Path(DATA_DIR) / "model-artifacts",
+)
+app.state.account_owner_lifecycle = account_owner_lifecycle
+auth_manager.configure_account_lifecycle_fence(
+    account_owner_lifecycle.owner_has_active_operation
+)
 chat_processor    = components["chat_processor"]
 research_handler  = components["research_handler"]
 app.state.research_handler = research_handler
 chat_handler      = components["chat_handler"]
 model_discovery   = components["model_discovery"]
 skills_manager    = components["skills_manager"]
+
+# One app-owned fm-mcp child serves Python, lifetools, and MiMo through this
+# authenticated loopback boundary. The broker credential stays in this process
+# and scoped lifetools descriptors; it is never exported host-wide.
+_memory_broker_base = os.getenv(
+    "OPEN_CLANK_INTERNAL_BASE_URL",
+    f"http://127.0.0.1:{int(os.getenv('APP_PORT', '7777'))}",
+).rstrip("/")
+_memory_broker_url = f"{_memory_broker_base}/api/internal/frankenmemory/tool"
+from src.openclank.acp_bridge import (
+    configure_copal_broker,
+    configure_frankenmemory_broker,
+    frankenmemory_broker_token,
+)
+configure_frankenmemory_broker(_memory_broker_url, INTERNAL_TOOL_TOKEN)
+app.state.memory_broker_url = _memory_broker_url
+_copal_broker_url = f"{_memory_broker_base}/api/internal/copal/tool"
+configure_copal_broker(_copal_broker_url, INTERNAL_TOOL_TOKEN)
+app.state.copal_broker_url = _copal_broker_url
 
 # TTS
 from services.tts import get_tts_service
@@ -629,8 +549,18 @@ webhook_manager = WebhookManager(api_key_manager=api_key_manager)
 # ========= INCLUDE ROUTERS =========
 
 # Auth
-auth_router = setup_auth_routes(auth_manager)
+auth_router = setup_auth_routes(
+    auth_manager,
+    account_lifecycle=account_owner_lifecycle,
+)
 app.include_router(auth_router)
+
+# Register the literal history settings path before the legacy session
+# history parameter route (``/api/history/{sid}``). Starlette evaluates
+# routes in registration order, so leaving this until the later History block
+# makes ``GET /api/history/settings`` look like a session lookup.
+from routes.history.history_routes import setup_history_settings_routes
+app.include_router(setup_history_settings_routes())
 
 
 @app.post("/api/activity/heartbeat")
@@ -652,6 +582,10 @@ upload_router, upload_cleanup_func = setup_upload_routes(upload_handler)
 app.include_router(upload_router)
 upload_cleanup_task = None
 
+# Agent-published downloads share one owner-scoped, revocable lifecycle.
+from routes.published_file_routes import setup_published_file_routes
+app.include_router(setup_published_file_routes())
+
 # Emoji SVG proxy (same-origin, lazy-cached Twemoji) — lets the chat render
 # emojis as flat SVG instead of system color glyphs.
 from routes.emoji_routes import setup_emoji_routes
@@ -668,25 +602,294 @@ app.include_router(setup_session_routes(
 ))
 
 # Admin Danger Zone wipes (Settings → System → Danger Zone)
-from routes.admin_wipe_routes import setup_admin_wipe_routes
+from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager, memory_provider=memory_provider))
 
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
-memory_router = setup_memory_routes(memory_manager, session_manager, memory_provider=memory_provider)
+from services.memory.forget_coordinator import require_memory_lifecycle_convergence
+from src.memory_provider import MemoryRequestRejectedError
+memory_router = setup_memory_routes(
+    memory_manager,
+    session_manager,
+    memory_provider=memory_provider,
+    skills_manager=skills_manager,
+)
+memory_lifecycle = getattr(memory_router, "memory_lifecycle", None)
+memory_skill_forget = getattr(memory_router, "memory_skill_forget", None)
 app.include_router(memory_router)
+
+
+@app.post("/api/internal/frankenmemory/tool", include_in_schema=False)
+async def internal_frankenmemory_tool(request: Request, body: Dict[str, object]):
+    """Private loopback broker for the single app-supervised fm-mcp process."""
+    token = request.headers.get(INTERNAL_TOOL_HEADER, "")
+    owner = (request.headers.get(INTERNAL_TOOL_OWNER_HEADER) or "").strip()
+    workspace_id = (
+        request.headers.get(INTERNAL_TOOL_WORKSPACE_HEADER) or ""
+    ).strip()
+    try:
+        expected_token = frankenmemory_broker_token(
+            INTERNAL_TOOL_TOKEN, owner, workspace_id
+        )
+    except ValueError:
+        expected_token = ""
+    if (
+        not token
+        or not expected_token
+        or not secrets.compare_digest(token, expected_token)
+        or not _is_trusted_loopback(request)
+        or (
+            owner not in getattr(auth_manager, "users", {})
+        )
+    ):
+        raise HTTPException(status_code=403, detail="Internal memory broker only")
+    name = str(body.get("name") or "")
+    arguments = body.get("arguments")
+    from src.frankenmemory_provider import BROKER_MEMORY_TOOLS
+
+    if name not in BROKER_MEMORY_TOOLS or not isinstance(arguments, dict):
+        raise HTTPException(status_code=400, detail="Invalid memory tool request")
+    if name == "code_query":
+        # Code authority is purpose-tagged and session-bound in addition to
+        # the existing global-memory transport credential. Model input never
+        # supplies root, private native scope or an arbitrary other chat.
+        from src.openclank.code_query import code_binding_token, query_code, finalize_error
+        from src.openclank.transcript_projection import get_managed_binding
+        from src.openclank.file_policy import FilePolicyRepository
+        if set(arguments) != {"query", "session_id", "binding_revision"} or not isinstance(arguments.get("query"), dict):
+            raise HTTPException(status_code=400, detail="Invalid code query request")
+        sid, revision = arguments.get("session_id"), arguments.get("binding_revision")
+        if not isinstance(sid, str) or not sid or len(sid) > 256 or type(revision) is not int:
+            raise HTTPException(status_code=403, detail="Code chat binding unavailable")
+        try:
+            managed = get_managed_binding(sid, owner=owner)
+            authority_workspace = managed.get("authorityWorkspaceID")
+            if (managed.get("owner") != owner or managed.get("stableChatID") != sid
+                    or managed.get("workspaceRevision") != revision or managed.get("transition") is not None
+                    or not isinstance(authority_workspace, str) or not authority_workspace):
+                raise ValueError("binding unavailable")
+            expected_code = code_binding_token(INTERNAL_TOOL_TOKEN, owner=owner, session_id=sid, workspace_id=authority_workspace, binding_revision=revision)
+            received_code = request.headers.get("X-OpenClank-Code-Binding", "")
+            if not received_code or not secrets.compare_digest(received_code, expected_code):
+                raise ValueError("binding unavailable")
+        except Exception:
+            raise HTTPException(status_code=403, detail="Code chat binding unavailable") from None
+        result = None
+        try:
+            async with _account_request_barrier.admitted(owner):
+                session = session_manager.get_session(sid)
+                if (session is None or session.owner != owner or session.workspace_id != authority_workspace
+                        or getattr(session, "archived", False)):
+                    raise ValueError("session unavailable")
+                async def disconnected():
+                    while True:
+                        if (await request.receive()).get("type") == "http.disconnect":
+                            return
+                query_task = asyncio.create_task(query_code(repository=FilePolicyRepository(), provider=memory_provider, auth_manager=auth_manager,
+                    owner=owner, workspace_id=authority_workspace, purpose="agent_workspace", session=session, query=arguments["query"]))
+                disconnect_task = asyncio.create_task(disconnected())
+                try:
+                    done, _ = await asyncio.wait({query_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+                    if disconnect_task in done:
+                        query_task.cancel()
+                        await asyncio.gather(query_task, return_exceptions=True)
+                        return finalize_error(arguments["query"], "cancelled", "Code request disconnected")
+                    result = await query_task
+                finally:
+                    disconnect_task.cancel()
+                    if not query_task.done():
+                        query_task.cancel()
+                    await asyncio.gather(disconnect_task, query_task, return_exceptions=True)
+                current = get_managed_binding(sid, owner=owner)
+                if (current != managed or session_manager.get_session(sid) is not session or session.owner != owner
+                        or session.workspace_id != authority_workspace or getattr(session, "archived", False)):
+                    return finalize_error(arguments["query"], "denied", "Code chat binding changed", observed_cost=result.get("cost"))
+                return result
+        except AccountRequestFenced:
+            return finalize_error(arguments["query"], "denied", "Code account lifecycle unavailable")
+        except Exception:
+            return finalize_error(arguments["query"], "denied", "Code chat binding unavailable", observed_cost=(result or {}).get("cost"))
+    if name == "memory_quality":
+        # Scoped broker credentials only need the read-only startup handshake.
+        # Never let them project global rebuild/maintenance controls into the
+        # app-owned Frankenmemory process.
+        requested_rebuild = arguments.get("rebuild_graph_fts")
+        if requested_rebuild is not None and requested_rebuild is not False:
+            raise HTTPException(
+                status_code=400,
+                detail="Memory quality rebuild is unavailable through the broker",
+            )
+        scoped_arguments = {"rebuild_graph_fts": False}
+    else:
+        scoped_arguments = dict(arguments)
+        scoped_arguments["owner"] = owner
+        scoped_arguments["workspace_id"] = workspace_id
+    invoke = getattr(memory_provider, "invoke_tool", None)
+    if not callable(invoke):
+        raise HTTPException(status_code=503, detail="Frankenmemory broker unavailable")
+    try:
+        async with _account_request_barrier.admitted(owner):
+            result = await invoke(name, scoped_arguments)
+            if name == "memory_quality":
+                return {
+                    key: result[key]
+                    for key in ("schema_version", "database_id")
+                    if key in result
+                }
+            return result
+    except AccountRequestFenced as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Account lifecycle operation in progress",
+        ) from exc
+    except MemoryRequestRejectedError as exc:
+        from src.memory_provider import code_node_forget_refusal_detail
+        detail = code_node_forget_refusal_detail(exc) if name == "memory_forget" else None
+        if detail is not None:
+            raise HTTPException(status_code=409, detail=detail) from exc
+        logger.info("internal frankenmemory tool %s rejected: %s", name, exc)
+        raise HTTPException(
+            status_code=409,
+            detail="Frankenmemory rejected the memory operation",
+        ) from exc
+    except Exception as exc:
+        logger.warning("internal frankenmemory tool %s failed: %s", name, exc)
+        raise HTTPException(status_code=502, detail="Frankenmemory tool failed") from exc
+
+
+@app.post("/api/internal/copal/tool", include_in_schema=False)
+async def internal_copal_tool(request: Request, body: Dict[str, object]):
+    """Private loopback broker for the single app-supervised Copal bridge."""
+    owner = (request.headers.get(INTERNAL_TOOL_OWNER_HEADER) or "").strip()
+    workspace = (request.headers.get("X-Open-Clank-Copal-Workspace") or "").strip()
+    token = request.headers.get("X-Open-Clank-Copal-Token", "")
+    from src.openclank.acp_bridge import copal_broker_token
+
+    try:
+        expected_token = copal_broker_token(INTERNAL_TOOL_TOKEN, owner, workspace)
+    except ValueError:
+        expected_token = ""
+    if (
+        not token
+        or not expected_token
+        or not secrets.compare_digest(token, expected_token)
+        or not _is_trusted_loopback(request)
+        or owner not in getattr(auth_manager, "users", {})
+    ):
+        raise HTTPException(status_code=403, detail="Internal Copal broker only")
+
+    operation = str(body.get("operation") or "").strip()
+    args = body.get("args")
+    allowed_operations = {
+        "status", "scoped_status", "index", "get", "history", "ops",
+        "create", "write", "checkpoint", "rename", "trash", "restore",
+        "restore_deleted", "delete", "asset_path", "export_snapshot",
+    }
+    if operation not in allowed_operations or not isinstance(args, dict):
+        raise HTTPException(status_code=400, detail="Invalid Copal broker request")
+    scoped_args = dict(args)
+    if "owner" in scoped_args and str(scoped_args["owner"] or "").strip() != owner:
+        raise HTTPException(status_code=403, detail="Copal owner scope mismatch")
+    if "workspace" in scoped_args and str(scoped_args["workspace"] or "").strip() not in {"", workspace}:
+        raise HTTPException(status_code=403, detail="Copal workspace scope mismatch")
+    if "workspace_id" in scoped_args and str(scoped_args["workspace_id"] or "").strip() not in {"", workspace}:
+        raise HTTPException(status_code=403, detail="Copal workspace scope mismatch")
+    bridge = getattr(request.app.state, "copal_bridge", None)
+    if bridge is None:
+        raise HTTPException(status_code=503, detail="Copal broker unavailable")
+    try:
+        async with _account_request_barrier.admitted(owner):
+            result = await bridge.call(operation, scoped_args)
+            return {"ok": True, "result": result}
+    except AccountRequestFenced as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Account lifecycle operation in progress",
+        ) from exc
+    except Exception as exc:
+        logger.warning("internal Copal tool failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Copal tool failed") from exc
+
+
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
 # Chat
 from routes.chat_routes import setup_chat_routes
-app.include_router(setup_chat_routes(
+_chat_router = setup_chat_routes(
     session_manager, chat_handler, chat_processor,
     memory_manager, research_handler, upload_handler,
     memory_vector=memory_vector,
     webhook_manager=webhook_manager,
     skills_manager=skills_manager,
-))
+)
+app.state.openclank_chat_stream_handler = getattr(
+    _chat_router,
+    "openclank_chat_stream_handler",
+)
+app.include_router(_chat_router)
+
+
+async def _quiesce_account_owner_writers(owner: str) -> dict[str, object]:
+    """Close every detached late-writer seam before account inventory."""
+
+    owner = str(owner or "").strip()
+    if not owner:
+        raise ValueError("account owner is required for writer quiescence")
+
+    from routes.chat_helpers import drain_owner_background_tasks
+    from routes.skills_routes import quiesce_owner_skill_job_handles
+    from src import agent_runs as _agent_runs
+    from src.memory_maintenance import drain_owner_grooms
+
+    receipts: dict[str, object] = {}
+    # Detached agent cancellation can itself finish persistence or dispatch
+    # post-response work, so join it before taking the chat-task snapshot.
+    receipts["agent_runs"] = await _agent_runs.quiesce_owner(owner)
+    receipts["chat_background"] = await drain_owner_background_tasks(owner)
+
+    scheduler_quiesce = getattr(
+        globals().get("task_scheduler"),
+        "quiesce_owner_lifecycle",
+        None,
+    )
+    if not callable(scheduler_quiesce):
+        raise RuntimeError("account scheduler writer drain is unavailable")
+    receipts["task_scheduler"] = await scheduler_quiesce(owner)
+    receipts["skill_jobs"] = await quiesce_owner_skill_job_handles(owner)
+
+    email_drain = getattr(
+        globals().get("email_router"),
+        "drain_owner_writers",
+        None,
+    )
+    if not callable(email_drain):
+        raise RuntimeError("account email writer drain is unavailable")
+    receipts["email_writers"] = await email_drain(owner)
+
+    drain_reconcile = getattr(
+        memory_lifecycle,
+        "drain_owner_reconcile_tasks",
+        None,
+    )
+    receipts["memory_reconcile"] = (
+        await drain_reconcile(owner)
+        if callable(drain_reconcile)
+        else {"available": False}
+    )
+    receipts["memory_groom"] = await drain_owner_grooms(owner)
+
+    # Deep-research quiescence persists the owner fence.  Run it last so no
+    # later drain failure can leave a fresh operation fenced without a receipt.
+    research_quiesce = getattr(research_handler, "quiesce_owner", None)
+    if not callable(research_quiesce):
+        raise RuntimeError("account research writer drain is unavailable")
+    receipts["research"] = await research_quiesce(owner)
+    return receipts
+
+
+app.state.quiesce_account_owner_writers = _quiesce_account_owner_writers
 
 # Research (background deep-research tasks)
 from routes.research.research_routes import setup_research_routes
@@ -708,8 +911,30 @@ app.include_router(setup_preset_routes(preset_manager))
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
+from routes.stats_routes import setup_stats_routes
+app.include_router(setup_stats_routes())
+from routes.stats_analysis_routes import setup_stats_analysis_routes
+app.include_router(setup_stats_analysis_routes())
+from routes.stats_activity_routes import setup_stats_activity_routes
+app.include_router(setup_stats_activity_routes())
+from routes.stats_preferences_routes import setup_stats_preferences_routes
+app.include_router(setup_stats_preferences_routes())
+
+# Core database admission owns logging schema; pending capture recovery is lifecycle repair.
+from src.openclank.logging_models import recover_pending_captures
+from core.database import engine as _logging_schema_engine
+recover_pending_captures(_logging_schema_engine)
+from routes.logging_routes import setup_logging_routes
+from routes.logging_settings_routes import setup_logging_settings_routes
+from src.openclank.logging_capture_store import CAPTURE as _logging_capture
+from services.logging.projection import resolve_archive_owner
+app.include_router(setup_logging_routes(session_manager=session_manager, advanced_pruner=_logging_capture.prune,
+                                      archive_owner_resolver=resolve_archive_owner,
+                                      semantic_index=rag_manager))
+app.include_router(setup_logging_settings_routes())
+
 # Cleanup
-from routes.cleanup_routes import setup_cleanup_routes
+from routes.cleanup.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
 
 # Personal docs
@@ -720,25 +945,26 @@ app.include_router(setup_personal_routes(personal_docs_mgr, rag_manager, rag_ava
 from routes.embedding_routes import setup_embedding_routes
 app.include_router(setup_embedding_routes())
 
-# Models
-from routes.model_routes import setup_model_routes
-app.include_router(setup_model_routes(model_discovery))
-
-# Native provider credentials for the supervised MiMo ACP child.
-from routes.mimo_provider_routes import setup_mimo_provider_routes
-app.include_router(setup_mimo_provider_routes())
+# Normalized provider control plane and its read-only model compatibility
+# projections. This is the only provider authority registered by the app.
+from routes.provider_v1_routes import setup_provider_v1_routes
+app.include_router(setup_provider_v1_routes())
 
 # Copal's first-party Redb workspace adapter.
 from routes.copal_routes import setup_copal_routes
-app.include_router(setup_copal_routes())
+from src.openclank.file_policy import FilePolicyRepository
 
-# GitHub Copilot device-flow login
-from routes.copilot_routes import setup_copilot_routes
-app.include_router(setup_copilot_routes())
+# Files and semantic attachment consumers share one application-scoped policy
+# authority. A route-local repository can observe a different generation after
+# a reset/revocation and would make preparation/final CAS inconsistent.
+def _files_identity_users():
+    return {name: record for name, record in getattr(auth_manager, "users", {}).items() if normalize_known_username(auth_manager.users, name)}
 
-# ChatGPT Subscription device-flow login
-from routes.chatgpt_subscription_routes import setup_chatgpt_subscription_routes
-app.include_router(setup_chatgpt_subscription_routes())
+
+files_policy_repository = FilePolicyRepository()
+files_policy_repository.sync_subjects(_files_identity_users())
+app.state.files_policy_repository = files_policy_repository
+app.include_router(setup_copal_routes(policy_repository=files_policy_repository))
 
 # TTS
 from routes.tts_routes import setup_tts_routes
@@ -760,17 +986,20 @@ app.include_router(document_router)
 from routes.signature_routes import setup_signature_routes
 app.include_router(setup_signature_routes())
 
-# Gallery (image library)
-from routes.gallery.gallery_routes import setup_gallery_routes
-app.include_router(setup_gallery_routes())
-
 # Persisted image-editor drafts (server-backed projects)
 from routes.editor_draft_routes import setup_editor_draft_routes
 app.include_router(setup_editor_draft_routes())
 
+# Imps managed image projects (editable state + Lore-backed Save)
+from routes.image_project_routes import setup_image_project_routes
+app.include_router(setup_image_project_routes())
+from routes.imps_routes import setup_imps_routes
+app.include_router(setup_imps_routes())
+
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
-task_scheduler = TaskScheduler(session_manager)
+task_scheduler = TaskScheduler(session_manager, auth_manager=auth_manager)
+app.state.task_scheduler = task_scheduler
 from src.event_bus import set_task_scheduler
 set_task_scheduler(task_scheduler)
 from routes.task_routes import setup_task_routes
@@ -795,12 +1024,93 @@ app.include_router(setup_cookbook_routes())
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
 
+from routes.odysseus_files_routes import setup_odysseus_files_routes
+app.include_router(setup_odysseus_files_routes())
+
+# Versioned provider-neutral Files namespace. The existing Files routes remain
+# active until Host/Copal/Gallery/Library parity is proven; this additive facade
+# owns opaque ResourceRefs and never shadows provider bytes.
+from routes.files_facade_routes import setup_files_facade_routes
+app.include_router(setup_files_facade_routes(policy_repository=files_policy_repository, application_state=app.state))
+
+# Canonical Location/Workspace/People/Agent policy state. Compatibility root
+# routes remain during migration, but scoped resets write only this ledger.
+from routes.file_policy_routes import setup_file_policy_routes
+app.include_router(setup_file_policy_routes(repository=files_policy_repository))
+
+# General Hexes follow the active provider's pinned SQLite authority. Broker
+# instances without a local path report unavailable rather than open a default.
+from routes.general_hex_routes import setup_general_hex_routes, _owner as _hex_owner
+from routes.general_hex_exchange_routes import setup_general_hex_exchange_routes
+from src.general_hex_runtime import active_hex_db_path
+from src.openclank.workspace_policy_service import resolve_owned_workspace, WorkspacePolicyServiceError
+_general_hex_db_resolver = lambda: active_hex_db_path(app.state.memory_provider)
+
+
+def _general_hex_workspace_binding(request, workspace_id):
+    """Use an existing owned App or Agent binding without granting access."""
+    for purpose in ("app_folder", "agent_workspace"):
+        try:
+            binding = resolve_owned_workspace(
+                files_policy_repository,
+                workspace_id=workspace_id,
+                owner_username=_hex_owner(request),
+                auth_manager=request.app.state.auth_manager,
+                purpose=purpose,
+            )
+            return binding.path, purpose
+        except WorkspacePolicyServiceError as error:
+            last_error = error
+    status = 403 if last_error.code == "workspace_denied" else 404
+    raise HTTPException(status, detail={"code": last_error.code, "message": str(last_error)}) from last_error
+
+
+def _general_hex_workspace_resolver(request, workspace_id):
+    return _general_hex_workspace_binding(request, workspace_id)[0]
+
+
+def _general_hex_workspace_lister(request, offset, limit, search):
+    """Include first-use workspaces, even before a Hex project exists."""
+    owner = _hex_owner(request)
+    subject_id = request.app.state.auth_manager.account_id(owner)
+    if not subject_id:
+        raise HTTPException(403, detail="Workspace owner is unavailable")
+    query = str(search or "").strip().casefold()
+    rows = []
+    for workspace in files_policy_repository.list_workspaces(owner_subject_id=str(subject_id)):
+        if query and query not in workspace.name.casefold() and query not in workspace.id.casefold():
+            continue
+        rows.append(workspace)
+    offset = max(0, int(offset))
+    limit = max(1, min(100, int(limit)))
+    page = []
+    for workspace in rows[offset:offset + limit]:
+        item = {"workspace_id": workspace.id, "name": workspace.name}
+        try:
+            path, purpose = _general_hex_workspace_binding(request, workspace.id)
+            item.update(path=path, purpose=purpose, availability="available")
+        except HTTPException as error:
+            if error.status_code not in (403, 404):
+                raise
+            item["availability"] = "unavailable"
+        page.append(item)
+    next_offset = offset + len(page)
+    return {"workspaces": page, "total": len(rows), "next_offset": next_offset if next_offset < len(rows) else None}
+
+
+app.include_router(setup_general_hex_routes(db_path_resolver=_general_hex_db_resolver))
+app.include_router(setup_general_hex_exchange_routes(
+    db_path_resolver=_general_hex_db_resolver,
+    workspace_resolver=_general_hex_workspace_resolver,
+    workspace_lister=_general_hex_workspace_lister,
+))
+
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes
 app.include_router(setup_hwfit_routes())
 
 # Model A/B Comparison
-from routes.compare_routes import setup_compare_routes
+from routes.compare.compare_routes import setup_compare_routes
 app.include_router(setup_compare_routes(session_manager))
 
 # User Preferences
@@ -816,6 +1126,9 @@ app.include_router(setup_backup_routes(
 from routes.font_routes import setup_font_routes
 app.include_router(setup_font_routes())
 
+from routes.theme_emoji_routes import router as theme_emoji_router
+app.include_router(theme_emoji_router)
+
 
 # MCP (Model Context Protocol)
 from src.mcp_manager import McpManager
@@ -830,7 +1143,12 @@ logger.info("MCP routes initialized")
 # AI Interaction tools (debates, pipelines, self-managing AI, UI control)
 from src.ai_interaction import set_session_manager as set_ai_session_manager, set_memory_manager as set_ai_memory_manager, set_rag_manager as set_ai_rag_manager
 set_ai_session_manager(session_manager)
-set_ai_memory_manager(memory_manager, memory_vector, provider=memory_provider)
+set_ai_memory_manager(
+    memory_manager,
+    memory_vector,
+    provider=memory_provider,
+    lifecycle=memory_lifecycle,
+)
 set_ai_rag_manager(rag_manager, personal_docs_mgr)
 logger.info("AI interaction tools initialized (session, memory, RAG, UI control)")
 
@@ -845,12 +1163,18 @@ app.include_router(setup_api_token_routes())
 logger.info("Webhook & API token routes initialized")
 
 # Notes (Google Keep-style notes/todos)
-from routes.note_routes import setup_note_routes
+from routes.note.note_routes import setup_note_routes
 app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
 
 # Email
 from routes.email_routes import setup_email_routes
+from routes.email_pollers import configure_owner_lifecycle as configure_email_owner_lifecycle
+configure_email_owner_lifecycle(
+    auth_manager.is_account_lifecycle_fenced,
+    lambda owner: owner == "local-installation" or owner in auth_manager.users,
+)
 email_router = setup_email_routes()
+app.state.invalidate_email_owner_runtime = email_router.invalidate_owner_runtime
 app.include_router(email_router)
 
 # Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
@@ -877,6 +1201,14 @@ app.include_router(setup_contacts_routes())
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
 
+from routes.tui_routes import setup_tui_routes
+_tui_router = setup_tui_routes(
+    auth_manager=auth_manager,
+    request_barrier=_account_request_barrier,
+)
+app.state.invalidate_tui_owner_runtime = _tui_router.invalidate_owner_runtime
+app.include_router(_tui_router)
+
 # ========= ROUTES (kept in app.py) =========
 
 @app.get("/")
@@ -891,48 +1223,92 @@ async def serve_index(request: Request):
     # bundled-template routes instead of mislabelling the fault as a 404.
     return serve_html_with_nonce(request, abs_join(BASE_DIR, "index.html"))
 
-@app.get("/notes")
-async def serve_notes(request: Request):
+# One browser-target registry (static/js/appletRoutes.js) owns canonical
+# applet addresses. These literal shell routes serve the SPA for every direct
+# applet path so deep links and refresh work; /copal/* stays as a compatibility
+# alias that redirects to the canonical direct path. Unknown URLs and API
+# routes are intentionally NOT caught here — they keep meaningful errors.
+_SHELL_APPLET_PATHS = (
+    "/notes",       # legacy alias -> Editor
+    "/code",        # legacy alias -> Editor
+    "/bases",       # legacy alias -> Editor (Base leaf)
+    "/editor",
+    "/wiki",
+    "/timeline",
+    "/todo",
+    "/graph",
+    "/mind",        # legacy alias -> Graph (mind mode)
+    "/galaxy",      # legacy alias -> Graph (galaxy mode)
+    "/treehouse",
+    "/files",
+    "/calendar",
+    "/cookbook",
+    "/usage",
+    "/email",
+    "/memory",
+    "/tasks",
+    "/library",
+)
+for _shell_path in _SHELL_APPLET_PATHS:
+    app.add_api_route(
+        _shell_path, serve_index, methods=["GET"], include_in_schema=False,
+        name=f"serve_shell{_shell_path.replace('/', '_')}",
+    )
+
+
+def _legacy_shell_redirect(request: Request, target: str) -> RedirectResponse:
+    query = str(request.url.query or "")
+    return RedirectResponse(url=f"{target}?{query}" if query else target, status_code=302)
+
+
+@app.get("/gallery", include_in_schema=False)
+async def serve_gallery_alias(request: Request) -> RedirectResponse:
+    return _legacy_shell_redirect(request, "/files")
+
+@app.get("/settings", include_in_schema=False)
+@app.get("/settings/{panel}", include_in_schema=False)
+async def serve_settings(request: Request, panel: str | None = None):
+    # Settings panels (including History and File Access) are reachable by
+    # direct navigation; the client opens the named panel once.
     return await serve_index(request)
 
-@app.get("/calendar")
-async def serve_calendar(request: Request):
-    return await serve_index(request)
+# Legacy /copal/* addresses redirect to the canonical direct applet path,
+# preserving query state (doc/mode). They are aliases, not destinations.
+_COPAL_VIEW_TO_PATH = {
+    "notes": "/editor",
+    "editor": "/editor",
+    "code": "/editor",
+    "bases": "/editor",
+    "wiki": "/wiki",
+    "timeline": "/timeline",
+    "todo": "/todo",
+    "graph": "/graph",
+    "mind": "/graph",
+    "galaxy": "/graph",
+    "treehouse": "/treehouse",
+    "files": "/files",
+    "calendar": "/calendar",
+}
 
-# Per-tool deep-link routes — all serve the same SPA, the JS auto-opens
-# the matching modal based on window.location.pathname. Each route also
-# gets a unique favicon + page title via inline script in index.html so
-# bookmarks render with tool-specific icons.
-@app.get("/cookbook")
-async def serve_cookbook(request: Request):
-    return await serve_index(request)
-
-@app.get("/email")
-async def serve_email(request: Request):
-    return await serve_index(request)
-
-@app.get("/memory")
-async def serve_memory(request: Request):
-    return await serve_index(request)
-
-@app.get("/gallery")
-async def serve_gallery(request: Request):
-    return await serve_index(request)
-
-@app.get("/tasks")
-async def serve_tasks(request: Request):
-    return await serve_index(request)
-
-@app.get("/library")
-async def serve_library(request: Request):
-    return await serve_index(request)
-
-@app.get("/copal")
-@app.get("/copal/{view}")
-async def serve_copal(request: Request, view: str = "notes"):
-    if view == "calendar":
-        return RedirectResponse(url="/calendar", status_code=302)
-    return await serve_index(request)
+@app.get("/copal", include_in_schema=False)
+@app.get("/copal/{view}", include_in_schema=False)
+async def serve_copal_alias(request: Request, view: str = "notes"):
+    from urllib.parse import urlencode
+    target = _COPAL_VIEW_TO_PATH.get((view or "notes").lower())
+    if target is None:
+        # Unknown copal subpath: still the SPA shell so client-side aliases can
+        # resolve it; do not invent a new applet.
+        return await serve_index(request)
+    query = dict(request.query_params)
+    if (view or "").lower() in ("mind", "galaxy") and "mode" not in query:
+        query["mode"] = view.lower()
+    # `/bases` resolves the Bases leaf intent via the client registry; the
+    # legacy `/copal/bases` alias must preserve it the same way or bookmarks
+    # lose the leaf. Symmetric with SEGMENTS.bases.openBases.
+    if (view or "").lower() == "bases" and "open" not in query:
+        query["open"] = "bases"
+    suffix = ("?" + urlencode(query)) if query else ""
+    return RedirectResponse(url=f"{target}{suffix}", status_code=302)
 
 @app.get("/backgrounds")
 async def serve_backgrounds(request: Request):
@@ -941,8 +1317,6 @@ async def serve_backgrounds(request: Request):
 
 @app.get("/login")
 async def serve_login(request: Request):
-    if not AUTH_ENABLED:
-        return RedirectResponse(url="/", status_code=302)
     return serve_html_with_nonce(request, abs_join(BASE_DIR, "static/login.html"))
 
 @app.get("/api/version")
@@ -953,6 +1327,35 @@ async def get_version():
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get(DESKTOP_SHELL_READY_PATH, include_in_schema=False)
+async def desktop_shell_readiness_check(request: Request) -> JSONResponse:
+    """Prove this exact loopback listener is the shell-spawned backend child."""
+    binding = _DESKTOP_SHELL_BINDING
+    challenge = request.headers.get(DESKTOP_SHELL_CHALLENGE_HEADER, "")
+    if (
+        binding is None
+        or not _is_trusted_loopback(request)
+        or request.url.scheme != "http"
+        or request.headers.get("host") != binding.expected_host_header
+        or not binding.challenge_is_valid(challenge)
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    from src.readiness import check_readiness
+
+    result = check_readiness(supervisor=getattr(app.state, "mimo_supervisor", None))
+    ready = bool(result.get("ready"))
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content=binding.payload(
+            challenge,
+            ready=ready,
+            auth_enabled=True,
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
 
 @app.post("/api/client-perf")
 async def client_perf(request: Request):
@@ -990,7 +1393,7 @@ async def readiness_check() -> JSONResponse:
     subsystem is whole, so an orchestrator can gate traffic on real readiness.
     """
     from src.readiness import check_readiness
-    result = check_readiness()
+    result = check_readiness(supervisor=getattr(app.state, "mimo_supervisor", None))
     return JSONResponse(status_code=200 if result.get("ready") else 503, content=result)
 
 @app.get("/api/runtime")
@@ -1030,6 +1433,38 @@ app.router.lifespan_context = _lifespan
 async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
+    # The managed provider engine is a hard installation boundary.  A source
+    # setup must build it before launch; packages and containers ship the exact
+    # verified payload.  Recovery mode is deliberately non-ready and exists
+    # only so an operator can run diagnostics after a failed installation.
+    try:
+        from core.constants import APP_VERSION
+        from src.openclank.engine_build import source_fingerprint, verify_install
+
+        if getattr(sys, "frozen", False):
+            from scripts.openclank_bootstrap import packaged_engine_expectations
+            _engine_expectations = packaged_engine_expectations()
+        else:
+            _engine_expectations = {"expected_source_sha256": source_fingerprint(
+                Path(__file__).resolve().parent / "packages" / "mimo-code")}
+        app.state.engine_verification = verify_install(
+            expected_version=APP_VERSION,
+            **_engine_expectations,
+            run_smoke=True,
+            acp_smoke=True,
+        ).require()
+    except Exception as exc:
+        app.state.engine_verification = None
+        if str(os.environ.get("OPENCLANK_RECOVERY_MODE") or "").lower() not in {
+            "1", "true", "yes", "on"
+        }:
+            raise RuntimeError(f"Open Clank managed engine preflight failed: {exc}") from exc
+        logger.error("Recovery mode: managed engine preflight failed: %s", exc)
+    # Admit the canonical source before serving ordinary Logs, including a
+    # genuinely fresh archive with no conversations. The existing owner creates
+    # only a fresh current schema; nonempty historical stores still require
+    # explicit offline conversion and cannot be treated as empty read results.
+    await asyncio.to_thread(get_conversation_archive)
     webhook_manager.set_loop(asyncio.get_running_loop())
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
@@ -1053,14 +1488,13 @@ async def _startup_event():
     _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
     app.state._startup_tasks = _startup_tasks
 
-    # Copal is an owned stdio child, not a second public web server.
+    # The current Copal authority is the qualified Files store.
     try:
-        from src.openclank.copal_bridge import CopalBridge
-
-        app.state.copal_bridge = CopalBridge()
+        from src.openclank.copal_storage import configured_bridge
+        app.state.copal_bridge = configured_bridge()
         await app.state.copal_bridge.start()
     except Exception as e:
-        logger.error("Copal Redb bridge failed to start: %s", e, exc_info=True)
+        logger.error("Copal Files bridge failed to start: %s", e, exc_info=True)
         app.state.copal_bridge = None
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
@@ -1142,75 +1576,35 @@ async def _startup_event():
 
         _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
 
-    async def _initialize_and_migrate_memory():
-        if not memory_provider:
-            return
-        await memory_provider.initialize()
-        if getattr(memory_provider, "provider_id", "") != "frankenmemory":
-            return
-        from core.atomic_io import atomic_write_json
-        ledger_path = os.path.join(DATA_DIR, "memory_provider_migration_v1.json")
-        try:
-            with open(ledger_path, encoding="utf-8") as handle:
-                ledger = json.load(handle)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            ledger = {"version": 1, "migrated_ids": [], "ownerless_ids": []}
-        migrated = set(ledger.get("migrated_ids") or [])
-        ownerless = set(ledger.get("ownerless_ids") or [])
-        for entry in memory_manager.load_all():
-            legacy_id = str(entry.get("id") or "")
-            if not legacy_id or legacy_id in migrated:
-                continue
-            owner = str(entry.get("owner") or "").strip()
-            if not owner:
-                ownerless.add(legacy_id)
-                continue
-            metadata = dict(entry.get("metadata") or {})
-            metadata.update({
-                "migrated_from": "memory.json",
-                "legacy_id": legacy_id,
-                "legacy_timestamp": entry.get("timestamp"),
-            })
-            record = await memory_provider.remember(
-                str(entry.get("text") or ""),
-                owner=owner,
-                session_id=entry.get("session_id"),
-                category=entry.get("category") or "fact",
-                source=entry.get("source") or "legacy_migration",
-                metadata=metadata,
-            )
-            if entry.get("pinned"):
-                await memory_provider.pin(record.id, True, owner=owner)
-            migrated.add(legacy_id)
-            ledger.update({
-                "migrated_ids": sorted(migrated),
-                "ownerless_ids": sorted(ownerless),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
-            atomic_write_json(ledger_path, ledger)
-        ledger.update({
-            "migrated_ids": sorted(migrated),
-            "ownerless_ids": sorted(ownerless),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        atomic_write_json(ledger_path, ledger)
-        logger.info(
-            "Memory migration checked: %d migrated, %d ownerless awaiting claim",
-            len(migrated), len(ownerless),
-        )
 
-    _startup_tasks.append(asyncio.create_task(_initialize_and_migrate_memory()))
+    # Memory lifecycle recovery is a readiness boundary: do not serve traffic
+    # while provider state and memory-derived skills may still be split.
+    if memory_provider:
+        await memory_provider.initialize()
+        if memory_lifecycle is not None:
+            reconciled = await memory_lifecycle.reconcile()
+            require_memory_lifecycle_convergence(reconciled)
 
     # Frankenmemory maintenance is deliberately one small task, not another
-    # scheduler framework. Zero disables it for deployments that groom
-    # externally; the default is one daily pass through all graph/tier ops.
+    # scheduler framework. Zero (the default) disables it for deployments that
+    # groom externally; an explicit interval runs one pass per real owner.
     from src.memory_maintenance import groom_interval_hours, groom_loop
+    from src.memory_scope import chat_workspace, memory_owner
     _groom_hours = groom_interval_hours()
     if memory_provider and getattr(memory_provider, "provider_id", "") == "frankenmemory":
         if _groom_hours <= 0:
             logger.info("Frankenmemory auto-groom disabled (FM_GROOM_INTERVAL_HOURS=0)")
         else:
-            _startup_tasks.append(asyncio.create_task(groom_loop(memory_provider, _groom_hours)))
+            def _memory_groom_owners():
+                return list(_files_identity_users())
+
+            _startup_tasks.append(asyncio.create_task(groom_loop(
+                memory_provider,
+                _groom_hours,
+                owners=_memory_groom_owners,
+                workspace_id=chat_workspace(),
+                owner_is_fenced=auth_manager.is_account_lifecycle_fenced,
+            )))
             logger.info("Frankenmemory auto-groom scheduled every %.2fh", _groom_hours)
 
     async def _ensure_default_tasks():
@@ -1256,31 +1650,8 @@ async def _startup_event():
         except Exception as e:
             logger.debug(f"Default tasks: {e}")
 
-    # Reconcile built-in tasks before the runner starts. Otherwise legacy
-    # scheduled built-ins can fire once before being converted to event tasks.
+    # Seed missing current built-in tasks before the runner starts.
     await _ensure_default_tasks()
-
-    # Disk-backed skills are not covered by the DB legacy-owner sweep. Repair
-    # ownerless or deleted/test-owner SKILL.md files so strict owner filtering
-    # does not make an existing library look empty after auth/account changes.
-    try:
-        import json as _json
-        auth_path = AUTH_FILE
-        with open(auth_path, encoding="utf-8") as f:
-            users = _json.load(f).get("users", {})
-        primary_owner = None
-        for uname, udata in users.items():
-            if udata.get("is_admin") is True:
-                primary_owner = uname
-                break
-        if not primary_owner and users:
-            primary_owner = next(iter(users))
-        if primary_owner:
-            changed = skills_manager.backfill_owner(primary_owner, set(users.keys()))
-            if changed:
-                logger.info("Assigned %s legacy skill file(s) to %s", changed, primary_owner)
-    except Exception as e:
-        logger.debug(f"Skill owner backfill skipped: {e}")
 
     # Start scheduled task runner — skip when running under a cron-driven
     # deployment where an external worker drives task firing. Mirrors
@@ -1293,20 +1664,7 @@ async def _startup_event():
             "In-process task scheduler disabled (ODYSSEUS_INPROCESS_TASKS=0); "
             "drive task firing externally (e.g. cron)."
         )
-    # Periodic null-owner sweep — re-runs the legacy-owner assignment hourly
-    # so any data created while auth was disabled / localhost-bypassed gets
-    # claimed by the admin instead of staying world-visible (M19).
-    async def _null_owner_sweep_loop():
-        while True:
-            try:
-                await asyncio.sleep(3600)
-                from core.database import _migrate_assign_legacy_owner
-                await asyncio.to_thread(_migrate_assign_legacy_owner)
-            except Exception as e:
-                logger.debug(f"Null-owner sweep skipped: {e}")
-                await asyncio.sleep(3600)
 
-    _startup_tasks.append(asyncio.create_task(_null_owner_sweep_loop()))
 
     # Nightly skill audit — at ~02:00 local, test + judge a batch of the
     # least-recently-checked skills, auto-fixing/escalating weak ones (never
@@ -1332,7 +1690,10 @@ async def _startup_event():
                     continue
                 batch = int(get_setting("skill_audit_batch", 8) or 8)
                 from routes.skills_routes import run_scheduled_skill_audit
-                await run_scheduled_skill_audit(skills_manager, owner=None, max_skills=batch)
+                await run_scheduled_skill_audit(
+                    skills_manager, owner=None, max_skills=batch,
+                    owner_is_fenced=auth_manager.is_account_lifecycle_fenced,
+                )
             except Exception as e:
                 logger.warning(f"Nightly skill audit failed: {e}")
 
@@ -1347,27 +1708,314 @@ async def _startup_event():
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
     _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
 
-    # ── openthesius mimo supervisor (non-critical) ──
-    if os.environ.get("OPENTHESIUS_DRIVE", "mimo") == "mimo":
+    # ── One installation history writer ──
+    # The app supervisor mints one immutable credential per authenticated
+    # account and gives the Rust writer only the credential file path. Worker
+    # requests receive the matching client through their trusted account
+    # context; no shared account token or owner-grant environment is used.
+    app.state.history_supervisor = None
+    _history_binary = os.environ.get("OPENCLANK_HISTORY_SERVICE_BIN", "").strip()
+    if not _history_binary:
+        _app_resources = os.environ.get("APP_RESOURCES", "").strip()
+        # A packaged release is authoritative.  The repository release target
+        # is only a development fallback and is health-negotiated by the
+        # supervisor before it becomes reachable from the app.
+        _history_candidates = []
+        _history_executable = "openclank-history-service.exe" if os.name == "nt" else "openclank-history-service"
+        from src.runtime_paths import get_app_root
+        _history_candidates.append(Path(get_app_root()) / "bin" / _history_executable)
+        if _app_resources:
+            _history_candidates.append(
+                Path(_app_resources) / "libexec/openclank/history" / _history_executable
+            )
+        _history_candidates.append(
+            Path(__file__).resolve().parent / "packages/openclank-history/target/release" / _history_executable,
+        )
+        _history_binary = next(
+            (str(_candidate) for _candidate in _history_candidates if _candidate.is_file() and (os.name == "nt" or os.access(_candidate, os.X_OK))),
+            "",
+        )
+    if _history_binary:
+        try:
+            from src.openclank.history_client import (
+                HistoryServiceSupervisor,
+                ScopedHistoryCredential,
+            )
+            from src.openclank.history_paths import history_root, settings_path
+
+            _history_credentials = []
+            for _username, _record in _files_identity_users().items():
+                _username = str(_username).strip()
+                if not _username or not isinstance(_record, dict):
+                    continue
+                _account_id = str(_record.get("account_id") or "").strip()
+                if not _account_id:
+                    continue
+                _capabilities = {"capture", "read", "restore", "settings-read", "settings-write"}
+                if _record.get("is_admin") is True:
+                    _capabilities.add("admin")
+                _history_credentials.append(
+                    ScopedHistoryCredential(
+                        # A wildcard actor binding is still account-scoped;
+                        # the authenticated request supplies the concrete
+                        # human or agent actor id for action authorization.
+                        actor_id="*",
+                        account_id=_account_id,
+                        capabilities=frozenset(_capabilities),
+                    )
+                )
+            if not _history_credentials:
+                # Readiness only: this private supervisor binding has no data
+                # or administrator capability and owns no historical account.
+                _history_credentials.append(
+                    ScopedHistoryCredential(
+                        actor_id="supervisor",
+                        account_id="service:health",
+                        capabilities=frozenset(),
+                    )
+                )
+            # The Files root registry is the provider authority for physical
+            # destinations.  Publish only enabled, available roots with the
+            # immutable accounts that own or were assigned each root; the
+            # history worker rejects a path that is not paired with one of
+            # these trusted root identities.
+            from src.openclank.filesystem_registry import FilesystemRootRegistry
+
+            def _history_project_roots(_filesystem_data: dict[str, object]) -> list[dict[str, object]]:
+                """Project canonical roots using current immutable auth identities."""
+                users = _files_identity_users()
+                _history_account_by_owner = {str(name): str(record['account_id'])
+                    for name, record in users.items() if isinstance(record, dict) and record.get('account_id')}
+                _history_admin_accounts = {str(record['account_id']) for record in users.values()
+                    if isinstance(record, dict) and record.get('account_id') and record.get('is_admin') is True}
+                projected: list[dict[str, object]] = []
+                for _root_id, _root in (_filesystem_data.get("roots") or {}).items():
+                    if not isinstance(_root, dict) or not _root.get("enabled") or _root.get("availability") != "available":
+                        continue
+                    _root_kind = str(_root.get("kind") or "recursive_directory")
+                    if _root_kind not in {"exact_file", "recursive_directory"}:
+                        continue
+                    _accounts: set[str] = set(_history_admin_accounts)
+                    _owner_account = _history_account_by_owner.get(str(_root.get("owner_id") or ""))
+                    if _owner_account:
+                        _accounts.add(_owner_account)
+                    for _assignment in (_filesystem_data.get("visibility_assignments") or {}).values():
+                        if not isinstance(_assignment, dict) or not _assignment.get("enabled") or str(_assignment.get("root_id") or "") != str(_root_id):
+                            continue
+                        if str(_assignment.get("subject_kind") or "user") == "user":
+                            _assigned_account = _history_account_by_owner.get(str(_assignment.get("subject_id") or ""))
+                            if _assigned_account:
+                                _accounts.add(_assigned_account)
+                    if _accounts and str(_root.get("canonical_path") or "").strip():
+                        projected.append(
+                            {
+                                "root_id": str(_root_id),
+                                "canonical_path": str(_root["canonical_path"]),
+                                "kind": _root_kind,
+                                "account_ids": sorted(_accounts),
+                                "workspace_ids": [],
+                            }
+                        )
+                # Administrators' existing human Files host scope is separate
+                # from assigned roots. Reuse its public host anchors; never
+                # infer a broader path or grant these roots to agent actors.
+                from routes.odysseus_files_routes import project_navigation_roots
+                host_roots: dict[str, dict[str, object]] = {}
+                for owner, record in users.items():
+                    if not isinstance(record, dict) or record.get("is_admin") is not True:
+                        continue
+                    account = str(record.get("account_id") or "").strip()
+                    actor = str(owner).strip()
+                    if not account or not actor:
+                        continue
+                    scope = _filesystem_registry.app_scope(actor, is_admin=True)
+                    projection = project_navigation_roots(_filesystem_registry, actor, scope)
+                    for anchor in projection.get("roots") or []:
+                        if "write" not in set(anchor.get("capabilities") or []):
+                            continue
+                        root_id = str(anchor.get("id") or "").strip()
+                        path = str(anchor.get("path") or "").strip()
+                        if not root_id or not path:
+                            continue
+                        # Pair each immutable account with its exact human
+                        # actor. A merged account/actor cross product could
+                        # accidentally authorize another administrator actor.
+                        binding_id = f"{root_id}:human:{account}"
+                        binding = host_roots.setdefault(binding_id, {
+                            "root_id": binding_id,
+                            "canonical_path": path,
+                            "kind": str(anchor.get("kind") or "recursive_directory"),
+                            "account_ids": [account],
+                            "actor_ids": [],
+                            "workspace_ids": [],
+                        })
+                        if actor not in binding["actor_ids"]:
+                            binding["actor_ids"].append(actor)
+                projected.extend(host_roots.values())
+                return projected
+
+            _history_authorized_roots: list[dict[str, object]] = []
+            _history_root_generation = 0
+            try:
+                _filesystem_registry = FilesystemRootRegistry(
+                    os.environ.get("ODYSSEUS_FILES_REGISTRY") or None
+                )
+                _filesystem_data = _filesystem_registry.snapshot()
+                _history_root_generation = int(_filesystem_data.get("generation") or 0)
+                _history_authorized_roots = _history_project_roots(_filesystem_data)
+            except Exception as _root_error:
+                logger.warning("Open Clank history root bindings paused: %s", _root_error)
+            _history_socket = os.environ.get(
+                "OPENCLANK_HISTORY_SOCKET",
+                str(settings_path().parent / "history.sock"),
+            )
+            # RestoreHost must never inherit the worker's cwd or place
+            # receipts beside user files. A configured Files host root is
+            # authoritative; otherwise the private history root and an empty
+            # map make host restore fail closed until Files publishes opaque
+            # ResourceKey registrations.
+            _history_restore_host_root = os.environ.get("OPENCLANK_HISTORY_HOST_ROOT") or str(history_root())
+            _history_restore_receipt_root = os.environ.get(
+                "OPENCLANK_HISTORY_RECEIPT_ROOT",
+                str(history_root() / "restore-receipts"),
+            )
+            _history_restore_resource_map = os.environ.get(
+                "OPENCLANK_HISTORY_RESOURCE_MAP",
+                str(history_root() / "resource-map.json"),
+            )
+            _history_supervisor = HistoryServiceSupervisor(
+                _history_binary,
+                socket_path=_history_socket,
+                catalog_path=settings_path().parent / "history.redb",
+                lore_root=history_root(),
+                credential_file=settings_path().parent / "history-credentials.json",
+                credentials=_history_credentials,
+                host_root=_history_restore_host_root,
+                receipt_root=_history_restore_receipt_root,
+                resource_map=_history_restore_resource_map,
+                authorized_roots=_history_authorized_roots,
+            )
+            await _history_supervisor.start()
+            app.state.history_supervisor = _history_supervisor
+            os.environ["OPENCLANK_HISTORY_SOCKET"] = str(_history_socket)
+            from src.openclank.files_service_client import set_history_binding_provider
+
+            def _files_history_binding(
+                owner: str,
+                lane: str,
+                scope: dict[str, object] | None = None,
+            ) -> dict[str, object]:
+                owner_text = str(owner or "").strip()
+                account = "local-installation"
+                owner_record: dict[str, object] | None = None
+                if owner_text:
+                    record = getattr(auth_manager, "users", {}).get(owner_text)
+                    if isinstance(record, dict):
+                        owner_record = record
+                        account = str(record.get("account_id") or account).strip()
+                actor = owner_text or "local-installation"
+                if lane == "agent":
+                    actor = f"agent:{actor}"
+                requested_ids = {
+                    str(value)
+                    for value in ((scope or {}).get("visible_root_ids") or [])
+                    if str(value).strip()
+                }
+                allow_implicit_host = lane == "human" and (scope or {}).get("host") is True
+                bindings = [
+                    dict(root)
+                    for root in _history_authorized_roots
+                    if account in set(root.get("account_ids") or [])
+                    and (
+                        str(root.get("root_id")) in requested_ids
+                        or (allow_implicit_host and not requested_ids)
+                    )
+                ]
+                workspace_root = str(bindings[0]["canonical_path"]) if bindings else ""
+                workspace_id = (
+                    str((scope or {}).get("history_workspace_id") or "").strip()
+                    or (f"files:{bindings[0]['root_id']}" if bindings else "")
+                )
+                return {
+                    "socket": str(_history_socket),
+                    "account_id": account,
+                    "actor_id": actor,
+                    "token": _history_supervisor.credential_token(actor, account),
+                    "workspace_id": workspace_id,
+                    "workspace_root": workspace_root,
+                    "root_bindings": bindings,
+                }
+
+            set_history_binding_provider(_files_history_binding)
+            async def _history_root_refresh_loop():
+                nonlocal _history_authorized_roots, _history_root_generation
+                while True:
+                    await asyncio.sleep(1.0)
+                    try:
+                        _latest = await asyncio.to_thread(_filesystem_registry.snapshot)
+                        _latest_generation = int(_latest.get("generation") or 0)
+                        _latest_roots = _history_project_roots(_latest)
+                        if _latest_generation == _history_root_generation and _latest_roots == _history_authorized_roots:
+                            continue
+                        # The supervisor restarts one worker generation with
+                        # both credentials and roots as a single publication.
+                        await _history_supervisor.sync_authorized_roots(_latest_roots)
+                        _history_authorized_roots = _latest_roots
+                        _history_root_generation = _latest_generation
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as _root_refresh_error:
+                        logger.error("Open Clank history root refresh paused: %s", _root_refresh_error)
+
+            _startup_tasks.append(asyncio.create_task(_history_root_refresh_loop()))
+            logger.info("Open Clank history writer started for %d account(s)", len(_history_credentials))
+        except Exception as _history_error:
+            app.state.history_supervisor = None
+            logger.warning("Open Clank history writer paused: %s", _history_error)
+    else:
+        logger.warning("Open Clank history writer unavailable: no service executable was found")
+
+    # ── Open Clank managed-engine supervisor ──
+    _agent_drive = (
+        os.environ.get("OPEN_CLANK_AGENT_DRIVE")
+        or os.environ.get("OPENTHESIUS_DRIVE")
+        or "mimo"
+    )
+    if _agent_drive == "mimo":
         async def _startup_mimo():
             try:
                 import sys as _sys
-                _openthesius_src = os.environ.get("OPENTHESIUS_SRC", "/home/e/sauce/ai/openclanker/src")
-                if _openthesius_src not in _sys.path:
-                    _sys.path.insert(0, _openthesius_src)
+                _agent_src = (
+                    os.environ.get("OPEN_CLANK_AGENT_SRC")
+                    or os.environ.get("OPENTHESIUS_SRC")
+                    or str(Path(__file__).resolve().parent / "src")
+                )
+                if _agent_src not in _sys.path:
+                    _sys.path.insert(0, _agent_src)
                 # Phase 5: ensure fm-mcp binary exists before supervisor starts
                 from src.openclank.fmmcp_builder import ensure_fmmcp_built
                 await ensure_fmmcp_built()
 
-                from src.openclank.mimo_supervisor import MimoSupervisorPool
+                from src.openclank.agent_supervisor import select_host_provider_owner
+                from src.openclank.agent_supervisor_factory import build_agent_supervisor
+                from src.openclank.local_model_executors import (
+                    build_local_executor_broker,
+                )
 
-                # Parse OPENTHESIUS_SAFE_DIRS (colon-separated, ~ expanded)
-                _raw = os.environ.get("OPENTHESIUS_SAFE_DIRS", "")
+                # Parse OPEN_CLANK_SAFE_DIRS (colon-separated, ~ expanded).
+                _raw = (
+                    os.environ.get("OPEN_CLANK_SAFE_DIRS")
+                    or os.environ.get("OPENTHESIUS_SAFE_DIRS")
+                    or ""
+                )
                 _safe_dirs = [os.path.expanduser(d.strip()) for d in _raw.split(":") if d.strip()] if _raw else []
 
-                # Phase 4: if THESIUS_AGENT_HOME is set, auto-include the agent
+                # If OPEN_CLANK_AGENT_HOME is set, auto-include the agent
                 # home in safe dirs so the agent can read/write its own files.
-                _agent_home = os.environ.get("THESIUS_AGENT_HOME")
+                _agent_home = (
+                    os.environ.get("OPEN_CLANK_AGENT_HOME")
+                    or os.environ.get("THESIUS_AGENT_HOME")
+                )
                 if _agent_home:
                     _agent_home = os.path.expanduser(_agent_home)
                     if _agent_home not in _safe_dirs:
@@ -1375,57 +2023,66 @@ async def _startup_event():
 
                 _safe_dirs = _safe_dirs or None
 
-                # An existing auth.json does not make this a multi-user runtime
-                # when the operator explicitly launched with AUTH_ENABLED=false.
-                # Keep MiMo's single ownerless worker aligned with middleware and
-                # exact ownerless endpoint queries in that mode.
-                _auth_enabled = AUTH_ENABLED and bool(
-                    getattr(auth_manager, "is_configured", False)
-                )
+                # Runtime partitions require real owners from process start,
+                # including the account-bootstrap window.
                 _initial_owner = ""
                 _host_provider_owner = ""
-                if _auth_enabled:
-                    _admin_owners = [
-                        str(name)
-                        for name, record in getattr(auth_manager, "users", {}).items()
-                        if isinstance(record, dict) and record.get("is_admin") is True
-                    ]
-                    _initial_owner = _admin_owners[0] if _admin_owners else ""
-                    from src.openclank.mimo_supervisor import _select_host_provider_owner
-                    _host_provider_owner = _select_host_provider_owner(
-                        _admin_owners,
-                        os.environ.get("OPENCLANK_HOST_PROVIDER_OWNER", ""),
+                _admin_owners = [
+                    str(name)
+                    for name, record in _files_identity_users().items()
+                    if isinstance(record, dict) and record.get("is_admin") is True
+                ]
+                _initial_owner = _admin_owners[0] if _admin_owners else ""
+                _host_provider_owner = select_host_provider_owner(
+                    _admin_owners,
+                    os.environ.get("OPENCLANK_HOST_PROVIDER_OWNER", ""),
+                )
+                if _admin_owners and not _host_provider_owner:
+                    logger.warning(
+                        "host model providers disabled: configure OPENCLANK_HOST_PROVIDER_OWNER when multiple admins exist"
                     )
-                    if _admin_owners and not _host_provider_owner:
-                        logger.warning(
-                            "host model providers disabled: configure OPENCLANK_HOST_PROVIDER_OWNER when multiple admins exist"
-                        )
-                _sup = MimoSupervisorPool(
+                # One installation-wide spool and registered executor broker
+                # back every owner worker.  The engine receives artifact IDs
+                # and recipe IDs only; no worker gets filesystem or command
+                # authority for local model execution.
+                _model_artifacts = account_owner_lifecycle.artifact_store
+                _local_executor_broker = build_local_executor_broker(
+                    _model_artifacts,
+                )
+                app.state.model_artifacts = _model_artifacts
+                app.state.local_executor_broker = _local_executor_broker
+                _sup = build_agent_supervisor(
                     memory_provider=memory_provider,
                     safe_dirs=_safe_dirs,
-                    auth_enabled=_auth_enabled,
                     initial_owner=_initial_owner,
                     host_provider_owner=_host_provider_owner,
+                    local_executor_broker=_local_executor_broker,
                 )
+                _reap_orphaned_mimo_workers()
                 await _sup.start()
+                app.state.agent_supervisor = _sup
                 app.state.mimo_supervisor = _sup
                 task_scheduler._mimo_supervisor = _sup
-                from src.model_dispatch import set_mimo_supervisor
-                set_mimo_supervisor(_sup)
+                from src.model_dispatch import set_agent_supervisor
+                set_agent_supervisor(_sup)
                 logger.info("[openthesius] mimo supervisor started")
             except Exception as e:
-                logger.error("[openthesius] mimo supervisor failed to start: %s", e, exc_info=True)
+                logger.error("Open Clank managed engine failed to start: %s", e, exc_info=True)
                 app.state.mimo_supervisor = None
-                from src.model_dispatch import set_mimo_supervisor
-                set_mimo_supervisor(None)
-        _startup_tasks.append(asyncio.create_task(_startup_mimo()))
+                from src.model_dispatch import set_agent_supervisor
+                set_agent_supervisor(None)
+                if str(os.environ.get("OPENCLANK_RECOVERY_MODE") or "").lower() not in {
+                    "1", "true", "yes", "on"
+                }:
+                    raise
+        await _startup_mimo()
 
     logger.info("Application startup complete")
 
 def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
     """Last-resort SIGTERM→SIGKILL containment for unregistered direct children.
 
-    Normal MCP and MiMo children are closed by their registered owners before
+    Normal MCP and Open Clank agent children are closed by their registered owners before
     this runs. Linux exposes the direct-child inventory through ``/proc``;
     other platforms skip this defensive check explicitly.
     """
@@ -1476,6 +2133,105 @@ def _reap_orphaned_children(grace_seconds: float = 2.0) -> None:
             pass
 
 
+def _is_orphaned_open_clank_agent_worker(
+    cmd: str,
+    ppid: int,
+    me: int,
+    parent_cmd: str | None,
+) -> bool:
+    """Return whether this is an orphaned bundled Open Clank agent worker.
+
+    Match both the repository-owned binary and its ``acp`` command. Personal
+    ``mimo serve`` processes on the same PC are outside Open Clank's lifecycle
+    and must never be touched.
+    """
+    bundled_binary = str((Path(__file__).resolve().parent / "bin" / "mimo").resolve())
+    argv = cmd.split()
+    if len(argv) < 2 or argv[0] != bundled_binary or argv[1] != "acp":
+        return False
+    if ppid == me:
+        return False
+    if parent_cmd is not None and "app.py" in parent_cmd:
+        return False
+    return True
+
+
+def _reap_orphaned_mimo_workers() -> None:
+    """Startup sweep: stop bundled agent workers orphaned by a prior run.
+
+    Sibling to the generation-dir sweep in ``MimoSupervisorPool.start()``. The
+    shutdown reap (``_reap_orphaned_children``) only catches children still
+    parented to this process; procs reparented to a subreaper when the previous
+    run was SIGKILL'd/OOM'd survive restarts and leak ~50 MB each. Safe because
+    this runs before the supervisor spawns its own children, and a concurrent
+    app.py's direct children are spared by ``_is_orphaned_mimo_worker``.
+    """
+    import signal as _signal
+    import time as _time
+
+    if not sys.platform.startswith("linux"):
+        return
+
+    me = os.getpid()
+    victims: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                tail = fh.read().rsplit(")", 1)[1].split()
+            state, ppid = tail[0], int(tail[1])
+            if state == "Z":
+                continue
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace")
+        except (OSError, ValueError, IndexError):
+            continue
+        try:
+            with open(f"/proc/{ppid}/cmdline", "rb") as fh:
+                parent_cmd = fh.read().replace(b"\x00", b" ").decode(errors="replace")
+        except OSError:
+            parent_cmd = None  # parent gone => reparented orphan
+        if _is_orphaned_open_clank_agent_worker(cmd, ppid, me, parent_cmd):
+            victims.append(pid)
+    if not victims:
+        return
+
+    def _alive(p: int) -> bool:
+        try:
+            with open(f"/proc/{p}/stat") as fh:
+                return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except OSError:
+            return False
+
+    logger.warning(
+        "reaping %d orphaned Open Clank agent worker(s) at startup: %s",
+        len(victims),
+        victims,
+    )
+    for pid in victims:
+        try:
+            os.kill(pid, _signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        if not any(_alive(p) for p in victims):
+            break
+        _time.sleep(0.2)
+    for pid in victims:
+        if _alive(pid):
+            try:
+                os.kill(pid, _signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 async def _shutdown_event():
     shutdown_started = time.monotonic()
     logger.info("Application shutting down...")
@@ -1491,8 +2247,21 @@ async def _shutdown_event():
             if supervisor:
                 await supervisor.stop()
         finally:
-            from src.model_dispatch import set_mimo_supervisor
-            set_mimo_supervisor(None)
+            from src.model_dispatch import set_agent_supervisor
+            set_agent_supervisor(None)
+
+    async def _stop_history():
+        supervisor = getattr(app.state, "history_supervisor", None)
+        try:
+            if supervisor:
+                await supervisor.stop()
+        finally:
+            from src.openclank.files_service_client import set_history_binding_provider
+            set_history_binding_provider(None)
+
+    async def _stop_agent_runs():
+        from src import agent_runs
+        await agent_runs.shutdown()
 
     async def _cancel_startup_tasks():
         startup_tasks = list(getattr(app.state, "_startup_tasks", []))
@@ -1516,14 +2285,23 @@ async def _shutdown_event():
         if callable(shutdown):
             await shutdown()
 
-    await _run_shutdown_phase("copal_bridge", _stop_copal, timeout=2.0)
-    await _run_shutdown_phase("mimo_supervisor", _stop_mimo, timeout=7.0)
+    async def _stop_files():
+        from src.openclank.files_service_client import close_all_clients
+        # Files owns native children outside the MCP manager. Closing cached
+        # clients also releases their private transports on non-Linux hosts.
+        await asyncio.to_thread(close_all_clients)
+
     await _run_shutdown_phase("startup_tasks", _cancel_startup_tasks, timeout=2.0)
-    await _run_shutdown_phase("upload_cleanup", _cancel_upload_cleanup, timeout=2.0)
+    await _run_shutdown_phase("agent_runs", _stop_agent_runs, timeout=2.0)
     await _run_shutdown_phase("task_scheduler", task_scheduler.stop, timeout=2.0)
+    await _run_shutdown_phase("copal_bridge", _stop_copal, timeout=2.0)
+    await _run_shutdown_phase("history_supervisor", _stop_history, timeout=12.0)
+    await _run_shutdown_phase("mimo_supervisor", _stop_mimo, timeout=7.0)
+    await _run_shutdown_phase("upload_cleanup", _cancel_upload_cleanup, timeout=2.0)
     await _run_shutdown_phase("webhooks", webhook_manager.close, timeout=2.0)
     await _run_shutdown_phase("memory_provider", _stop_memory_provider, timeout=5.0)
     await _run_shutdown_phase("mcp_servers", mcp_manager.disconnect_all, timeout=6.0)
+    await _run_shutdown_phase("files_services", _stop_files, timeout=6.0)
     await _run_shutdown_phase(
         "defensive_child_reaper",
         lambda: asyncio.to_thread(_reap_orphaned_children),
@@ -1539,6 +2317,6 @@ if __name__ == "__main__":
     import uvicorn
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
-    bind_port = int(os.getenv("APP_PORT", "7000"))
+    bind_port = int(os.getenv("APP_PORT", "7777"))
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info", timeout_graceful_shutdown=10)

@@ -1,0 +1,1 @@
+Do not turn 'not seen' into 'cannot happen'.

@@ -1,0 +1,1 @@
+Θ(n²) loop iterations and O(1) extra accumulator space, assuming fixed-cost operations.

@@ -1,0 +1,1 @@
+Marking only on removal can queue D twice. Weighted costs require a different argument.

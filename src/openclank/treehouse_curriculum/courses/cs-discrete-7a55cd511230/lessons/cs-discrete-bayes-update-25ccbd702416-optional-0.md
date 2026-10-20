@@ -1,0 +1,1 @@
+Among flagged cases,8 of107 are defective:8/107≈7.48%. Among defective cases,8/10=80% flag. New population gives80 flagged defective and90 flagged nondefective;80/170=8/17≈47.06%. The base rate changed while conditional flag rates stayed fixed.

@@ -1,0 +1,1 @@
+If you got 42 for arithmetic, separate the written digits from the numeric values.

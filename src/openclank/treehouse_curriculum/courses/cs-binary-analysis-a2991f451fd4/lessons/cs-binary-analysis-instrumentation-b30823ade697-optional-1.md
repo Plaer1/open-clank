@@ -1,0 +1,1 @@
+A slower instrumented run does not by itself measure the original routine's cost.

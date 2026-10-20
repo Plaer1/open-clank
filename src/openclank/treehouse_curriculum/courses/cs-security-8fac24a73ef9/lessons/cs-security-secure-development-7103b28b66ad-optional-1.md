@@ -1,0 +1,1 @@
+Client validation can improve feedback but cannot replace server enforcement.

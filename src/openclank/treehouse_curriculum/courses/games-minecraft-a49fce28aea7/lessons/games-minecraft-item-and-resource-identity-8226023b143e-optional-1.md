@@ -1,0 +1,1 @@
+Trace manifest→initializer→registry and separately item definition→model→texture.

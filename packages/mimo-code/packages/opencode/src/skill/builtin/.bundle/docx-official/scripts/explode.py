@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["lxml>=4.9"]
+# ///
 """Explode a `.docx` archive into a browsable folder of pretty-printed XML.
 
 Alternate implementation notes:
@@ -10,7 +14,7 @@ Alternate implementation notes:
       keeps the "raw bytes are on disk" invariant available for debugging.
 
 Usage:
-    python explode.py <input.docx> <destination_dir> [--verbatim]
+    uv run explode.py <input.docx> <destination_dir> [--verbatim]
 
 Exit code 0 on success, 2 on argument or I/O errors.
 """
@@ -24,7 +28,8 @@ from pathlib import Path
 try:
     from lxml import etree as _et
 except ImportError as exc:  # pragma: no cover
-    sys.stderr.write("explode.py needs `lxml`. Install with: pip install lxml\n")
+    sys.stderr.write("explode.py needs `lxml`. Run with `uv run explode.py` (auto-installs) "
+                     "or: pip install lxml\n")
     raise
 
 XML_KINDS = frozenset({".xml", ".rels"})

@@ -1,0 +1,1 @@
+The expected payoffs are 0.5 and 0; the response explains why predictable mixing can be exploited.

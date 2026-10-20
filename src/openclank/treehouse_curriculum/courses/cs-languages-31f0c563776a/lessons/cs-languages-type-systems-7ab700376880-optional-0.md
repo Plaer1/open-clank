@@ -1,0 +1,1 @@
+First is a type mismatch under stated rules; second needs contract/tests or proof beyond the return type.

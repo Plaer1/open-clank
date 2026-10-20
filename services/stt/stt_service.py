@@ -1,9 +1,13 @@
 # services/stt/stt_service.py
-"""Multi-provider Speech-to-Text service — dispatches to local Whisper, OpenAI-compatible API, or browser."""
+"""Speech settings compatibility plus the managed Whisper executor internals.
 
-import io
+Server-side transcription is dispatched by ``src.openclank.modality_facade``.
+The public methods here fail closed for stale local/endpoint settings; only the
+private fixed-recipe local primitive is retained for the managed host broker.
+Browser Web Speech remains client-side and performs no server model inference.
+"""
+
 import logging
-import httpx
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -12,14 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 class STTService:
-    """Multi-provider STT service.
+    """Legacy speech-settings facade with managed-executor internals.
 
     Reads provider config from data/settings.json on each call.
     Providers:
       "disabled"        — no STT
       "browser"         — client-side Web Speech API (no server transcription)
-      "local"           — faster-whisper on CPU/GPU
-      "endpoint:<id>"   — OpenAI-compatible /audio/transcriptions via ModelEndpoint
+      "local"           — retired public selector; broker recipe owns execution
+      "endpoint:<id>"   — retired direct-provider selector
     """
 
     def __init__(self):
@@ -50,10 +54,9 @@ class STTService:
         if provider == "browser":
             return True  # handled client-side
         if provider == "local":
-            return self._get_whisper(owner) is not None
-        if provider.startswith("endpoint:"):
-            endpoint_id = provider.split(":", 1)[1]
-            return self._owned_endpoint(endpoint_id, owner) is not None
+            return False
+        if isinstance(provider, str) and provider.startswith("endpoint:"):
+            return False
         return False
 
     # ── Local Whisper ──
@@ -118,78 +121,20 @@ class STTService:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
 
-    # ── API endpoint ──
-
-    @staticmethod
-    def _owned_endpoint(endpoint_id: str, owner: str | None = None):
-        from src.database import SessionLocal, ModelEndpoint
-
-        db = SessionLocal()
-        try:
-            query = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id)
-            normalized_owner = (owner or "").strip().lower()
-            if normalized_owner:
-                query = query.filter(ModelEndpoint.owner == normalized_owner)
-            else:
-                query = query.filter(ModelEndpoint.owner.is_(None))
-            ep = query.first()
-            if ep is None:
-                return None
-            return {"base_url": ep.base_url.rstrip("/"), "api_key": ep.api_key}
-        finally:
-            db.close()
-
-    def _transcribe_api(self, audio_bytes: bytes, endpoint_id: str, model: str,
-                        language: str = "", owner: str | None = None) -> Optional[str]:
-        endpoint = self._owned_endpoint(endpoint_id, owner)
-        if endpoint is None:
-            logger.error(f"STT endpoint {endpoint_id} not found for owner")
-            return None
-        base_url = endpoint["base_url"]
-        api_key = endpoint["api_key"]
-
-        url = base_url + "/audio/transcriptions"
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        files = {"file": ("audio.webm", io.BytesIO(audio_bytes), "audio/webm")}
-        data = {"model": model or "whisper-1"}
-        if language:
-            data["language"] = language
-
-        try:
-            r = httpx.post(url, headers=headers, files=files, data=data, timeout=60)
-            r.raise_for_status()
-            result = r.json()
-            text = result.get("text", "")
-            logger.info(f"API STT: {len(text)} chars from {base_url}")
-            return text
-        except Exception as e:
-            logger.error(f"API STT transcription failed: {e}")
-            return None
-
     # ── Public interface ──
 
     def transcribe(self, audio_bytes: bytes, owner: str | None = None) -> Optional[str]:
+        """Fail closed when legacy callers bypass the managed operation router."""
+
+        del audio_bytes
         settings = self._load_settings(owner)
-        if settings.get("stt_enabled") is False:
+        provider = settings.get("stt_provider")
+        if settings.get("stt_enabled") is False or provider in ("disabled", "browser"):
             return None
-        provider = settings["stt_provider"]
-        model = settings["stt_model"]
-        language = settings.get("stt_language", "")
-
-        if provider in ("disabled", "browser"):
-            return None
-
-        if provider == "local":
-            return self._transcribe_local(audio_bytes, language, owner)
-        elif provider.startswith("endpoint:"):
-            endpoint_id = provider.split(":", 1)[1]
-            return self._transcribe_api(audio_bytes, endpoint_id, model, language, owner)
-        else:
-            logger.error(f"Unknown STT provider: {provider}")
-            return None
+        logger.warning(
+            "Direct STT service execution is retired; use audio.transcribe"
+        )
+        return None
 
     def get_stats(self, owner: str | None = None) -> Dict[str, Any]:
         settings = self._load_settings(owner)
@@ -206,11 +151,11 @@ class STTService:
         }
 
         if provider == "local":
-            whisper = self._get_whisper(owner)
-            stats["model_loaded"] = whisper is not None
+            stats["model_loaded"] = False
+            stats["managed_executor"] = "faster-whisper"
         elif provider == "browser":
             stats["model"] = "Browser (Web Speech API)"
-        elif provider.startswith("endpoint:") and stats["available"]:
+        elif isinstance(provider, str) and provider.startswith("endpoint:") and stats["available"]:
             stats["endpoint_id"] = provider.split(":", 1)[1]
 
         return stats

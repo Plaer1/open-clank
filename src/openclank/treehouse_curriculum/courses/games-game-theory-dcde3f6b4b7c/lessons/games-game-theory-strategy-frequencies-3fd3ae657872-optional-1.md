@@ -1,0 +1,1 @@
+Compute both fitnesses before the population-weighted denominator.

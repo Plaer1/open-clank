@@ -1,0 +1,1 @@
+Writing 'assume n even' begins the converse, not the requested contrapositive.

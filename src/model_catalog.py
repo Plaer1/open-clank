@@ -18,6 +18,7 @@ def build_model_catalog(
     hidden_ids: Iterable[str] = (),
     display_names: Optional[Mapping[str, str]] = None,
     families: Optional[Mapping[str, str]] = None,
+    relations: Optional[Mapping[str, Mapping[str, Optional[str]]]] = None,
     capabilities: Optional[dict[str, Optional[bool]]] = None,
     compatibility: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
@@ -31,6 +32,7 @@ def build_model_catalog(
     hidden = set(hidden_ids)
     displays = dict(display_names or {})
     family_map = dict(families or {})
+    relation_map = dict(relations or {})
     caps = dict(capabilities or {})
     compat = dict(compatibility or {})
     result = []
@@ -41,7 +43,7 @@ def build_model_catalog(
         seen.add(model_id)
         is_hidden = model_id in hidden
         is_compatible = bool(compat.get("compatible", not is_hidden))
-        result.append({
+        record = {
             "endpoint_id": endpoint_id,
             "endpoint_url": endpoint_url,
             "model_id": model_id,
@@ -59,5 +61,12 @@ def build_model_catalog(
                 "hidden" if is_hidden
                 else ("incompatible" if not is_compatible else ("stale" if stale else None))
             ),
-        })
+        }
+        relation = relation_map.get(model_id)
+        if relation:
+            for key in ("base_model_id", "preset", "variant"):
+                value = relation.get(key)
+                if value:
+                    record[key] = value
+        result.append(record)
     return result

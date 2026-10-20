@@ -1,0 +1,1 @@
+Automated theorem proving searches for proofs; interactive proof assistants check supplied constructions with a trusted kernel. A result only establishes the formalized claim under the chosen encoding and assumptions. No solver installation is required here.

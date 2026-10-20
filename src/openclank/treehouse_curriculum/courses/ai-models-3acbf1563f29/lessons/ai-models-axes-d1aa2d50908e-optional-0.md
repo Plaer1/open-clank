@@ -1,0 +1,1 @@
+A GAN can use convolutional networks for its generator and discriminator. A mixture-of-experts layer can be part of a Transformer. These labels can describe different parts of the same system, so a comparison needs a shared axis.

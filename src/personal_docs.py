@@ -3,8 +3,10 @@ import os
 import re
 import json
 import logging
-from typing import List, Dict, Set, Any, Tuple
+from typing import List, Dict, Set, Any, Tuple, Optional
 from dataclasses import dataclass
+
+from src.index_walk import prune_index_dirs, is_indexable_file
 
 from src.markitdown_runtime import MARKITDOWN_EXTS
 
@@ -94,13 +96,22 @@ def tokenize(s: str) -> Set[str]:
     return set(t for t in tokens if t not in config.STOP_WORDS and len(t) > 1)
 
 def load_personal_index(
-    personal_dir: str, 
+    personal_dir: str,
     extensions: Tuple[str, ...] = config.DEFAULT_EXTENSIONS
 ) -> List[Dict[str, Any]]:
-    """Load and index personal documents."""
+    """Load and index personal documents.
+
+    Skips hidden and junk directories and hidden files via the shared
+    ``index_walk`` policy, so the keyword index matches the vector index and a
+    real vault/repo does not sweep in ``.obsidian/`` / ``.git/`` /
+    ``node_modules/`` content (#5559).
+    """
     files = []
-    for root, _, names in os.walk(personal_dir):
+    for root, dirs, names in os.walk(personal_dir):
+        prune_index_dirs(dirs)
         for name in sorted(names):
+            if not is_indexable_file(name):
+                continue
             p = os.path.join(root, name)
             if not os.path.isfile(p):
                 continue
@@ -151,7 +162,8 @@ def retrieve_personal_keyword(personal_index: List[Dict], query: str, k: int = 5
     return out
 
 def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
-                     rag_manager=None) -> List[str]:
+                     rag_manager=None, owner: Optional[str] = None,
+                     workspace_id: Optional[str] = None, project_id: Optional[str] = None) -> List[str]:
     """
     Retrieve relevant personal documents using vector search first, falling back to keyword search.
 
@@ -170,7 +182,19 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
     # First try vector search if RAGManager is available
     if rag_manager:
         try:
-            vector_results = rag_manager.search(query, k)
+            # Canonical Frankenmemory RAG is tenant-scoped.  A caller that
+            # cannot prove its owner must not fall through to a global
+            # keyword/vector result and accidentally leak another user's
+            # documents. Older injected test doubles may still use the
+            # ownerless signature.
+            if getattr(rag_manager, "backend", None) == "frankenmemory" and not owner:
+                return []
+            try:
+                vector_results = rag_manager.search(
+                    query, k, owner=owner, workspace_id=workspace_id, project_id=project_id
+                )
+            except TypeError:
+                vector_results = rag_manager.search(query, k)
             if vector_results:
                 # Format vector results
                 out = []
@@ -298,8 +322,20 @@ class PersonalDocsManager:
         else:
             logger.info(f"Directory already indexed: {directory}")
 
-    def remove_directory(self, directory: str):
-        """Remove a directory from the tracking list."""
+    def remove_directory(
+        self,
+        directory: str,
+        owner: str | None = None,
+        *,
+        remove_rag: bool = True,
+    ):
+        """Remove a tracked directory and optionally its canonical RAG rows.
+
+        Account deletion stages personal bytes before the Frankenmemory owner
+        purge.  That saga passes ``remove_rag=False`` so this manager updates
+        only its file-backed path registry; Frankenmemory remains the single
+        transactional authority for tenant-row deletion.
+        """
         # Normalize the path
         directory = os.path.abspath(directory)
         
@@ -317,9 +353,18 @@ class PersonalDocsManager:
             # re-indexed only the remaining tracked dirs — ownerless and never
             # personal_dir — a catastrophic wipe (#1660). remove_directory now
             # removes exactly this directory's chunks and leaves the rest intact.
-            if self.rag_manager:
+            if self.rag_manager and remove_rag:
                 try:
-                    self.rag_manager.remove_directory(directory)
+                    try:
+                        self.rag_manager.remove_directory(directory, owner=owner)
+                    except TypeError as exc:
+                        # Older compatibility stores did not accept tenant
+                        # context. Keep their test/legacy adapter working;
+                        # canonical Frankenmemory implements the scoped form
+                        # and therefore never takes this fallback.
+                        if "owner" not in str(exc):
+                            raise
+                        self.rag_manager.remove_directory(directory)
                 except Exception as e:
                     logger.error(f"Failed to remove directory from RAG index: {e}")
         else:
@@ -404,9 +449,13 @@ class PersonalDocsManager:
 
         logger.info(f"Refreshed index: {len(self.index)} documents from {len(self.indexed_directories) + 1} directories")
 
-    def retrieve(self, query: str, k: int = 5) -> List[str]:
+    def retrieve(self, query: str, k: int = 5, owner: Optional[str] = None,
+                 workspace_id: Optional[str] = None, project_id: Optional[str] = None) -> List[str]:
         """Retrieve relevant documents for a query."""
-        return retrieve_personal(self.index, query, k, self.rag_manager)
+        return retrieve_personal(
+            self.index, query, k, self.rag_manager,
+            owner=owner, workspace_id=workspace_id, project_id=project_id,
+        )
 
     def get_file_list(self) -> List[Dict[str, Any]]:
         """Get list of indexed files with metadata."""
@@ -434,7 +483,7 @@ class PersonalDocsManager:
             'additional_directories': self.indexed_directories
         }
         
-    def index_all_directories(self):
+    def index_all_directories(self, owner: str | None = None):
         """Re-index all tracked directories in the RAG system."""
         if not self.rag_manager:
             logger.warning("No RAG manager available for indexing")
@@ -445,7 +494,7 @@ class PersonalDocsManager:
         
         # Index the base personal directory
         try:
-            result = self.rag_manager.index_personal_documents(self.personal_dir)
+            result = self.rag_manager.index_personal_documents(self.personal_dir, owner=owner)
             if result.get('success'):
                 success_count += 1
                 logger.info(f"Indexed base directory: {self.personal_dir}")
@@ -461,7 +510,7 @@ class PersonalDocsManager:
                 continue
             
             try:
-                result = self.rag_manager.index_personal_documents(directory)
+                result = self.rag_manager.index_personal_documents(directory, owner=owner)
                 if result.get('success'):
                     success_count += 1
                     logger.info(f"Indexed directory: {directory}")

@@ -1,3 +1,4 @@
+import { uiIcon, setUiIconText, mountUiIcons } from './uiIcons.js';
 // static/js/ui.js
 
 /**
@@ -204,6 +205,10 @@ function _initHoverCardSpaceToggle() {
       }
       return;
     }
+    // Files and Code have real in-window Space semantics (preview/select or
+    // editor input). Do not let the generic hovered-window minimizer consume
+    // that key before the tool's own handler sees it.
+    if (e.target?.closest?.('.files-window, .code-editor-window')) return;
     const id = _spaceWindowId(hoveredToggleWindow);
     if (!id) return;
     if (_spaceIsBlocked(e, hoveredToggleWindow)) return;
@@ -212,7 +217,7 @@ function _initHoverCardSpaceToggle() {
   }, true);
 }
 
-_initHoverCardSpaceToggle();
+if (typeof document !== 'undefined') _initHoverCardSpaceToggle();
 
 /**
  * Copy text to clipboard
@@ -321,7 +326,7 @@ export function showToast(msg, durationOrOpts) {
   if (leadingIcon === 'check') {
     const icon = document.createElement('span');
     icon.className = 'toast-checkmark';
-    icon.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+    icon.innerHTML = uiIcon("check", 13, { role:"inherit" });
     toastEl.appendChild(icon);
   } else if (leadingIcon === 'spinner') {
     const wp = spinnerModule.createWhirlpool(14);
@@ -374,7 +379,7 @@ export function showToast(msg, durationOrOpts) {
   closeBtn.className = 'toast-close-btn';
   closeBtn.setAttribute('aria-label', 'Dismiss');
   closeBtn.title = 'Dismiss';
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 14);
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -410,7 +415,7 @@ export function showToast(msg, durationOrOpts) {
 /**
  * Show error toast message
  */
-export function showError(msg) {
+export function showError(msg, options = {}) {
   if (!toastEl) {
     toastEl = document.getElementById('toast');
   }
@@ -427,12 +432,34 @@ export function showError(msg) {
   textSpan.textContent = msg;
   toastEl.appendChild(textSpan);
 
+  if (options.action && typeof options.onAction === 'function') {
+    const action = document.createElement('button');
+    action.type = 'button';
+    action.className = 'toast-error-action';
+    action.textContent = options.action;
+    action.setAttribute('aria-label', options.actionHint || options.action);
+    action.style.cssText = 'padding:2px 10px;margin-left:10px;border:1px solid currentColor;border-radius:4px;background:none;color:inherit;cursor:pointer;font-size:12px;pointer-events:auto;';
+    action.addEventListener('click', (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      clearTimeout(toastEl._hideTimer);
+      toastEl.classList.remove('show');
+      Promise.resolve(options.onAction()).catch((error) => {
+        showError(error?.message || 'Recovery action failed');
+      });
+    });
+    toastEl.appendChild(action);
+    toastEl.style.pointerEvents = 'auto';
+  } else {
+    toastEl.style.pointerEvents = '';
+  }
+
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'toast-close-btn';
   closeBtn.setAttribute('aria-label', 'Dismiss');
   closeBtn.title = 'Dismiss';
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = uiIcon('close', 14);
   closeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -446,7 +473,8 @@ export function showError(msg) {
   toastEl._hideTimer = setTimeout(() => {
     toastEl.classList.add('exiting');
     toastEl.classList.remove('show');
-  }, 6000);
+    toastEl.style.pointerEvents = '';
+  }, Number(options.duration) > 0 ? Number(options.duration) : 6000);
 }
 
 /**
@@ -577,9 +605,11 @@ export function el(id) {
 
 /**
  * Styled confirm dialog — replaces native browser confirm().
- * Returns a Promise<boolean>.
+ * Returns a Promise<boolean|'alternate'>. Existing two-button callers only
+ * receive true/false; callers that pass alternateText can detect the third
+ * action via the string 'alternate'.
  */
-export function styledConfirm(message, { confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+export function styledConfirm(message, { confirmText = 'Confirm', cancelText = 'Cancel', alternateText = '', title = 'Confirm', danger = false } = {}) {
   return new Promise(resolve => {
     // Reuse or create the modal
     let overlay = document.getElementById('styled-confirm-overlay');
@@ -593,6 +623,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
           '<div class="modal-body"><p id="styled-confirm-msg"></p></div>' +
           '<div class="modal-footer">' +
             '<button id="styled-confirm-cancel"></button>' +
+            '<button id="styled-confirm-alt" style="display:none;"></button>' +
             '<button id="styled-confirm-ok"></button>' +
           '</div>' +
         '</div>';
@@ -600,14 +631,25 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     }
 
     const msgEl = document.getElementById('styled-confirm-msg');
+    const titleEl = document.getElementById('styled-confirm-title');
     const okBtn = document.getElementById('styled-confirm-ok');
     const cancelBtn = document.getElementById('styled-confirm-cancel');
+    let altBtn = document.getElementById('styled-confirm-alt');
+    if (!altBtn) {
+      altBtn = document.createElement('button');
+      altBtn.id = 'styled-confirm-alt';
+      okBtn.parentNode.insertBefore(altBtn, okBtn);
+    }
 
+    if (titleEl) titleEl.textContent = title || 'Confirm';
     msgEl.textContent = message;
-    okBtn.textContent = confirmText;
-    cancelBtn.textContent = cancelText;
+    setUiIconText(okBtn, 'check', confirmText);
+    setUiIconText(cancelBtn, 'close', cancelText);
+    altBtn.textContent = alternateText || '';
     okBtn.className = danger ? 'confirm-btn confirm-btn-danger' : 'confirm-btn confirm-btn-primary';
     cancelBtn.className = 'confirm-btn confirm-btn-secondary';
+    altBtn.className = 'confirm-btn confirm-btn-secondary';
+    altBtn.style.display = alternateText ? '' : 'none';
 
     // Remember what had focus so we can restore it when the dialog closes.
     const _prevFocus = document.activeElement;
@@ -619,20 +661,23 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       overlay.style.display = 'none';
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
+      altBtn.removeEventListener('click', onAlt);
       overlay.removeEventListener('click', onBackdrop);
       document.removeEventListener('keydown', onKey);
       try { _prevFocus && _prevFocus.focus && _prevFocus.focus(); } catch {}
       resolve(result);
     }
     function onOk() { cleanup(true); }
+    function onAlt() { cleanup('alternate'); }
     function onCancel() { cleanup(false); }
     function onBackdrop(e) { if (e.target === overlay) cleanup(false); }
     function onKey(e) {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        const active = document.activeElement;
-        if (active === okBtn) cancelBtn.focus();
-        else okBtn.focus();
+        const f = alternateText ? [cancelBtn, altBtn, okBtn] : [cancelBtn, okBtn];
+        const i = f.indexOf(document.activeElement);
+        const dir = e.key === 'ArrowRight' ? 1 : -1;
+        f[(i + dir + f.length) % f.length].focus();
       } else if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
@@ -641,7 +686,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
       } else if (e.key === 'Tab') {
         // Trap focus inside the dialog so Tab can't wander to the page behind.
         e.preventDefault();
-        const f = [cancelBtn, okBtn];
+        const f = alternateText ? [cancelBtn, altBtn, okBtn] : [cancelBtn, okBtn];
         const i = f.indexOf(document.activeElement);
         const n = e.shiftKey ? (i <= 0 ? f.length - 1 : i - 1) : (i >= f.length - 1 ? 0 : i + 1);
         f[n].focus();
@@ -649,6 +694,7 @@ export function styledConfirm(message, { confirmText = 'Confirm', cancelText = '
     }
 
     okBtn.addEventListener('click', onOk);
+    altBtn.addEventListener('click', onAlt);
     cancelBtn.addEventListener('click', onCancel);
     overlay.addEventListener('click', onBackdrop);
     document.addEventListener('keydown', onKey);
@@ -701,8 +747,8 @@ export function styledPrompt(message, {
     input.value = defaultValue || '';
     input.placeholder = placeholder || '';
     input.maxLength = maxLength;
-    okBtn.textContent = confirmText;
-    cancelBtn.textContent = cancelText;
+    setUiIconText(okBtn, 'check', confirmText);
+    setUiIconText(cancelBtn, 'close', cancelText);
 
     // Remember what had focus so we can restore it when the dialog closes.
     const _prevFocus = document.activeElement;
@@ -773,7 +819,7 @@ export function esc(s) {
 // When a touch starts inside .modal-content, set a flag so that
 // synthetic mouse events on the backdrop are ignored.
 let _touchInsideModal = false;
-if ('ontouchstart' in window) {
+if (typeof window !== 'undefined' && 'ontouchstart' in window) {
   document.addEventListener('touchstart', (e) => {
     if (e.target.closest('.modal-content')) {
       _touchInsideModal = true;
@@ -795,6 +841,7 @@ export function isTouchInsideModal() {
 
 // Close floating dropdowns/popups on scroll to prevent them drifting
 function _initScrollDismiss() {
+  mountUiIcons(document);
   const chatHistory = document.getElementById('chat-history');
   if (chatHistory) {
     chatHistory.addEventListener('scroll', () => {
@@ -806,9 +853,9 @@ function _initScrollDismiss() {
     setTimeout(_initScrollDismiss, 500);
   }
 }
-if (document.readyState === 'loading') {
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _initScrollDismiss);
-} else {
+} else if (typeof document !== 'undefined') {
   _initScrollDismiss();
 }
 
@@ -819,22 +866,7 @@ if (document.readyState === 'loading') {
  * (or similar) to keep the per-site visual nudge they need.
  */
 export function emptyStateIcon(kind) {
-  const SVG_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">';
-  const SVG_CLOSE = '</svg>';
-  let inner;
-  switch (kind) {
-    case 'sad':
-      inner = '<circle cx="12" cy="12" r="10"/><path d="M16 16s-1.5-2-4-2-4 2-4 2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-    case 'neutral':
-      inner = '<circle cx="12" cy="12" r="10"/><line x1="8" y1="15" x2="16" y2="15"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-    case 'smiley':
-    default:
-      inner = '<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>';
-      break;
-  }
-  return SVG_OPEN + inner + SVG_CLOSE;
+  return uiIcon(['sad', 'neutral'].includes(kind) ? kind : 'smiley', 14);
 }
 
 const uiModule = {
@@ -868,7 +900,7 @@ if (typeof window !== 'undefined') {
 // ── Mobile: clear enter animation so inline transform works for dragging ──
 // The CSS `animation: sheet-enter ... forwards` holds the final transform,
 // blocking any inline style changes. We clear it once the animation completes.
-if ('ontouchstart' in window || window.innerWidth <= 768) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && ('ontouchstart' in window || window.innerWidth <= 768)) {
   document.addEventListener('animationend', (e) => {
     if (e.animationName === 'sheet-enter' &&
         (e.target.classList.contains('modal-content') || e.target.id === 'theme-popup')) {
@@ -894,7 +926,7 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 // ── Mobile swipe-down-to-dismiss for bottom sheet modals ──
 // Finger-following drag with velocity-based dismiss.
 // Works from grab handle, header, OR anywhere on the sheet when content is scrolled to top.
-if ('ontouchstart' in window) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && 'ontouchstart' in window) {
   const DISMISS_THRESHOLD = 50;    // px — dismiss if dragged past this
   const VELOCITY_THRESHOLD = 0.3;  // px/ms — fast flick dismisses even below threshold
   const RUBBER_RESISTANCE = 0.35;  // drag resistance when pulling up past origin
@@ -929,7 +961,7 @@ if ('ontouchstart' in window) {
     // can paint / move layers / draw selections without the modal trying
     // to interpret it as a swipe-to-dismiss gesture. Skip the swipe init
     // entirely when the touch starts inside the editor area.
-    if (e.target.closest('.gallery-editor, .gallery-editor-container')) return;
+    if (e.target.closest('.imps-editor, .imps-editor-container')) return;
     // Internal vertical drag handles (e.g. the calendar's cal-splitter that
     // resizes the day-detail pane) consume vertical touches themselves. If
     // we don't bail here, the swipe-dismiss path also tracks the touch and
@@ -1055,6 +1087,22 @@ if ('ontouchstart' in window) {
     el.style.willChange = '';
 
     if (shouldDismiss) {
+      const managedModal = el.closest('.modal');
+      if (managedModal && Modals.minimizeOnSwipe(managedModal.id)) return;
+      const managedWindow = managedModal?.__openClankWindow || managedModal?.__copalWindow;
+      if (managedWindow?.requestCloseAsync) {
+        // Open Clank windows may own an async dirty-state gate. Let that gate
+        // decide before the shared swipe path hides or unregisters anything.
+        // A cancelled close snaps the sheet back; an allowed close runs the
+        // window's normal onClosed lifecycle exactly once.
+        el.style.transition = 'transform 0.2s ease-out';
+        el.style.transform = '';
+        void managedWindow.requestCloseAsync().finally(() => {
+          el.style.transition = '';
+          el.style.animation = '';
+        });
+        return;
+      }
       // Animate out — use remaining distance to calculate duration
       const remaining = el.offsetHeight - dy;
       const speed = Math.max(Math.abs(_velocity), 0.8); // min speed
@@ -1096,7 +1144,7 @@ if ('ontouchstart' in window) {
 }
 
 // ---- Bring modal to front on click ----
-{
+if (typeof document !== 'undefined') {
   const raiseModalToFront = (modal, floor = 250) => {
     const z = nextToolWindowZ({
       exclude: modal,
@@ -1147,7 +1195,7 @@ if ('ontouchstart' in window) {
 // own scrolling container that often fails — the user types blind.
 // Scroll the input into the middle of the still-visible viewport
 // after the keyboard has had a moment to animate in.
-if ('ontouchstart' in window || window.innerWidth <= 768) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && ('ontouchstart' in window || window.innerWidth <= 768)) {
   let _kbScrollTimer = null;
   document.addEventListener('focusin', (e) => {
     const el = e.target;
@@ -1190,7 +1238,7 @@ if ('ontouchstart' in window || window.innerWidth <= 768) {
 // Priority: expanded library card → open chat thinking block → topmost modal.
 // Runs capture-phase + stopImmediatePropagation so per-modal ESC listeners
 // never also fire (which would otherwise close several modals at once).
-if (!window._odyEscExpandGuard) {
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && !window._odyEscExpandGuard) {
   window._odyEscExpandGuard = true;
 
   // Auto-promote any modal that becomes visible to the top of the z-stack.
@@ -1237,6 +1285,12 @@ if (!window._odyEscExpandGuard) {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
 
+    // Files owns Escape while its in-window preview is open. Let the preview
+    // handler consume the key instead of collapsing the entire Open Clank
+    // window through the global modal arbiter.
+    if (e.target?.closest?.('.files-window')
+        && document.querySelector('.files-window [data-files-preview]:not([hidden])')) return;
+
     // An open modal <dialog> owns Escape outright. The platform already
     // closes exactly the topmost dialog of a stack via its cancel behavior,
     // so silence every competing document-level handler (this one included)
@@ -1245,6 +1299,13 @@ if (!window._odyEscExpandGuard) {
       e.stopImmediatePropagation();
       return;
     }
+
+    // A mounted Copal sheet owns Escape for its grid selection/edit/menu
+    // lifecycle.  The pointer-aware window fallback below would otherwise
+    // close the hovered Copal window before the sheet's bubble handler can
+    // restore its managed cell focus. Modal dialogs are checked first so a
+    // menu opened from a sheet still receives native cancel/Escape handling.
+    if (e.target?.closest?.('.copal-sheet-surface')) return;
 
     // Find the single thing to close, in priority order. The first hit wins.
     // Important: if a thinking block is open we MUST handle it ourselves and
@@ -1285,16 +1346,13 @@ if (!window._odyEscExpandGuard) {
       }
       return;
     }
-    const galleryEditor = document.getElementById('gallery-editor-container');
-    const galleryModal = galleryEditor?.closest('.modal');
-    const galleryEditing = !!(
-      galleryEditor &&
-      galleryModal &&
-      !galleryModal.classList.contains('hidden') &&
-      getComputedStyle(galleryEditor).display !== 'none' &&
-      galleryEditor.querySelector('.gallery-editor')
+    const impsEditor = document.getElementById('imps-editor-container');
+    const impsEditing = !!(
+      impsEditor &&
+      getComputedStyle(impsEditor).display !== 'none' &&
+      impsEditor.querySelector('.imps-editor')
     );
-    if (galleryEditing) {
+    if (impsEditing) {
       e.preventDefault();
       e.stopImmediatePropagation();
       return;

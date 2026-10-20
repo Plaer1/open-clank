@@ -1,0 +1,1 @@
+Godot or Bevy: compare speed180 and90 on the same route. A synthetic delta0.1s gives18 versus9 units. Steady traversal takes roughly twice as long at90; an actual observation needs its own run. Rendering more often must not double elapsed-time movement.

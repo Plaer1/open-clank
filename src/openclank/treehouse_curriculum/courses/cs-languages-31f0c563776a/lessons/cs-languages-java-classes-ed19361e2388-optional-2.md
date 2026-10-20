@@ -1,0 +1,1 @@
+Java instance/class int fields default to0 even without an explicit initializer. The example writes =0 to make its starting state visible. Local variables instead must be definitely assigned before use; do not assume every uninitialized local starts at0.

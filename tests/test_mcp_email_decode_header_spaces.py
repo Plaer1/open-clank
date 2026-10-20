@@ -328,28 +328,14 @@ async def test_mcp_draft_email_document_uses_hidden_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ai_reply_resolves_every_model_candidate_for_hidden_owner(monkeypatch):
+async def test_ai_reply_uses_managed_utility_completion_for_hidden_owner(monkeypatch):
     import routes.email_helpers as email_helpers
-    import src.endpoint_resolver as endpoint_resolver
-    import src.llm_core as llm_core
+    from src.openclank import modality_facade
 
     observed = []
 
-    def resolve_endpoint(kind, owner=None):
-        observed.append((kind, owner))
-        if kind == "utility":
-            return "https://alice.invalid/chat", "alice-model", {}
-        return None, None, None
-
-    def utility_fallbacks(owner=None):
-        observed.append(("utility-fallbacks", owner))
-        return []
-
-    def chat_fallbacks(owner=None):
-        observed.append(("chat-fallbacks", owner))
-        return []
-
-    async def llm_call(*_args, **_kwargs):
+    async def complete_text(**kwargs):
+        observed.append(kwargs)
         return "Owner-scoped reply"
 
     monkeypatch.setattr(es, "_read_email", lambda **_kwargs: {
@@ -362,21 +348,49 @@ async def test_ai_reply_resolves_every_model_candidate_for_hidden_owner(monkeypa
     monkeypatch.setattr(email_helpers, "_load_settings", lambda: {})
     monkeypatch.setattr(email_helpers, "_extract_reply", lambda value: value)
     monkeypatch.setattr(email_helpers, "_apply_email_style_mechanics", lambda value: value)
-    monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", resolve_endpoint)
-    monkeypatch.setattr(endpoint_resolver, "resolve_utility_fallback_candidates", utility_fallbacks)
-    monkeypatch.setattr(endpoint_resolver, "resolve_chat_fallback_candidates", chat_fallbacks)
-    monkeypatch.setattr(llm_core, "llm_call_async_with_fallback", llm_call)
+    monkeypatch.setattr(modality_facade, "complete_text", complete_text)
 
     token = es._CURRENT_OWNER.set("alice")
     try:
-        result = await es._ai_draft_reply_to_email("1")
+        result = await es._ai_draft_reply_to_email(
+            "1",
+            root_operation_id="root-email-1",
+        )
     finally:
         es._CURRENT_OWNER.reset(token)
 
     assert result["body"] == "Owner-scoped reply"
-    assert observed == [
-        ("utility", "alice"),
-        ("default", "alice"),
-        ("utility-fallbacks", "alice"),
-        ("chat-fallbacks", "alice"),
-    ]
+    assert len(observed) == 1
+    assert observed[0]["owner"] == "alice"
+    assert observed[0]["purpose"] == "utility"
+    assert observed[0]["max_output_tokens"] == 1024
+    assert observed[0]["root_operation_id"] == "root-email-1"
+    assert not {"url", "headers", "api_key"}.intersection(observed[0])
+
+
+@pytest.mark.asyncio
+async def test_ai_reply_tool_propagates_hidden_root_operation(monkeypatch):
+    observed = {}
+
+    async def ai_draft(**kwargs):
+        observed.update(kwargs)
+        return {
+            "title": "Re: Hello",
+            "doc_id": "doc-1",
+            "account": "",
+        }
+
+    monkeypatch.setattr(es, "_read_accounts_from_db", lambda: [])
+    monkeypatch.setattr(es, "_ai_draft_reply_to_email", ai_draft)
+
+    out = await es.call_tool(
+        "ai_draft_email_reply",
+        {
+            "uid": "7",
+            "_odysseus_owner": "alice",
+            "_open_clank_root_operation_id": "root-email-tool-7",
+        },
+    )
+
+    assert "Generated AI reply" in out[0].text
+    assert observed["root_operation_id"] == "root-email-tool-7"

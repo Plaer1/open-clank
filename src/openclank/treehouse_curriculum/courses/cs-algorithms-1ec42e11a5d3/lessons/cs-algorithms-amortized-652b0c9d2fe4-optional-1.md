@@ -1,0 +1,1 @@
+A costly single operation does not refute a bound on the total sequence.

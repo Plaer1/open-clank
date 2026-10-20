@@ -13,6 +13,58 @@ import { applyEdgeDock, clearDockSide } from './modalSnap.js';
 import { topToolWindowZ, topPortalZ } from './toolWindowZOrder.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
+let _sharedNoteEditorPromise = null;
+async function _loadSharedNoteEditor() {
+  if (!_sharedNoteEditorPromise) _sharedNoteEditorPromise = import('./copal/codemirror.js');
+  return _sharedNoteEditorPromise;
+}
+
+function _wireExpandedNoteEditor(textarea, label = 'note content') {
+  if (!textarea || textarea.dataset.multiEditReady === 'true') return;
+  textarea.dataset.multiEditReady = 'true';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'note-form-expanded-editor';
+  button.textContent = 'Open multi-edit';
+  button.title = 'Open the shared editor with multiple cursors';
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const returnFocus = document.activeElement;
+    const dialog = document.createElement('dialog');
+    dialog.className = 'copal-dialog copal-notes-expanded-editor';
+    const heading = document.createElement('h2'); heading.textContent = `Edit ${label}`;
+    const help = document.createElement('p'); help.className = 'copal-dialog-help'; help.textContent = 'Use Mod-d for the next match, Mod-Shift-L for all matches, and Mod-Alt-arrow for vertical cursors.';
+    const host = document.createElement('div'); host.className = 'copal-codemirror-host copal-notes-expanded-host';
+    const feedback = document.createElement('p'); feedback.className = 'copal-notes-expanded-feedback'; feedback.setAttribute('role', 'status');
+    const actions = document.createElement('div'); actions.className = 'copal-dialog-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'copal-btn'; cancel.textContent = 'Cancel';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'copal-btn primary'; apply.textContent = 'Apply'; apply.disabled = true;
+    actions.append(cancel, apply); dialog.append(heading, help, host, feedback, actions); document.body.append(dialog);
+    let editor = null;
+    const close = () => dialog.close();
+    cancel.addEventListener('click', close);
+    apply.addEventListener('click', () => {
+      if (!editor) return;
+      textarea.value = editor.getValue();
+      textarea.dispatchEvent(new Event('input', { bubbles:true }));
+      close();
+    });
+    dialog.addEventListener('close', () => { editor?.destroy?.(); dialog.remove(); returnFocus?.focus?.(); });
+    dialog.showModal();
+    try {
+      const module = await _loadSharedNoteEditor();
+      const factory = module.createSourceEditor || module.createMarkdownEditor;
+      editor = factory({ parent:host, doc:String(textarea.value || ''), mode:'source', language:'Markdown' });
+      await editor.languageReady;
+      apply.disabled = false; editor.focus();
+    } catch (error) {
+      feedback.textContent = `Expanded editor unavailable: ${error.message}`;
+      feedback.classList.add('error');
+    }
+  });
+  textarea.insertAdjacentElement('afterend', button);
+}
+
 const API_BASE = window.location.origin;
 let _open = false;
 let _notes = [];
@@ -392,6 +444,7 @@ let _loading = false;
 // Undo stack — most recent action is at the end. We cap it small because the
 // only entries that survive a panel reload are in-memory anyway.
 const _undoStack = [];
+const _NOTE_UNDO_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
 function _pushUndo(entry) {
   _undoStack.push(entry);
   if (_undoStack.length > 20) _undoStack.shift();
@@ -414,6 +467,33 @@ function _undoArchive(note, prevIdx) {
     _renderNotes();
     uiModule.showError('Undo failed');
   });
+}
+
+function _archiveNoteById(id, { card = null, celebrate = false } = {}) {
+  if (!id) return false;
+  const idx = _notes.findIndex(n => n.id === id);
+  if (idx < 0) return false;
+  const note = _notes[idx];
+  if (celebrate && card && note && _hasItems(note)) {
+    const undone = (note.items || []).filter(i => !i.done);
+    if (undone.length === 0) {
+      const r = card.getBoundingClientRect();
+      spawnConfetti(r.left + r.width / 2, r.top + r.height / 2, 80);
+    }
+  }
+  const removed = _notes.splice(idx, 1)[0];
+  _editingId = null;
+  _renderNotes();
+  const undo = () => _undoArchive(removed, idx);
+  _pushUndo({ label: 'archive', run: undo });
+  _patchNote(id, { archived: true }).then(() => {
+    uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _NOTE_UNDO_ICON, onAction: undo, actionHint: 'Ctrl+Z' });
+  }).catch(() => {
+    _notes.splice(idx, 0, removed);
+    _renderNotes();
+    uiModule.showError('Failed to archive');
+  });
+  return true;
 }
 
 async function _fetchNotes() {
@@ -1168,7 +1248,7 @@ export function openPanel() {
       <button id="notes-minimize-btn" class="modal-minimize-btn" title="Minimize" aria-label="Minimize notes" style="position:relative;left:2px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="18" x2="18" y2="18"/></svg></button>
     </div>
     <div class="notes-search-bar">
-      <input type="text" id="notes-search" class="memory-search-input" placeholder="Search notes…" autocomplete="off" />
+      <input type="text" id="notes-search" class="memory-search-input" placeholder="Search documents…" autocomplete="off" />
       <button id="notes-select-btn" class="notes-select-trigger" type="button">Select</button>
     </div>
     <div id="notes-bulk-bar" class="memory-bulk-bar hidden">
@@ -2396,34 +2476,12 @@ function _bindCardEvents(body) {
       e.stopPropagation();
       const id = btn.dataset.noteId;
       if (!id) return;
-      const note = _notes.find(n => n.id === id);
       const card = btn.closest('.note-card');
-      // Confetti when archiving a fully-completed checklist (todo or goal).
-      if (note && _hasItems(note) && card) {
-        const undone = (note.items || []).filter(i => !i.done);
-        if (undone.length === 0) {
-          const r = card.getBoundingClientRect();
-          spawnConfetti(r.left + r.width / 2, r.top + r.height / 2, 80);
-        }
-      }
       let done = false;
       const finishRemove = () => {
         if (done) return;
         done = true;
-        const curIdx = _notes.findIndex(n => n.id === id);
-        if (curIdx < 0) return;
-        const removed = _notes.splice(curIdx, 1)[0];
-        _renderNotes();
-        const undo = () => _undoArchive(removed, curIdx);
-        _pushUndo({ label: 'archive', run: undo });
-        const _undoIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
-        _patchNote(id, { archived: true }).then(() => {
-          uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _undoIcon, onAction: undo, actionHint: 'Ctrl+Z' });
-        }).catch(() => {
-          _notes.splice(curIdx, 0, removed);
-          _renderNotes();
-          uiModule.showError('Failed to archive');
-        });
+        _archiveNoteById(id, { card, celebrate: true });
       };
       if (card) {
         card.classList.add('note-card-sliding-out');
@@ -3064,6 +3122,7 @@ function _buildForm(note = null) {
           || (_stashedTodoItems || _stashedGoalItems || []).map(i => i.text).join('\n');
         bodyEl.innerHTML = `<textarea class="note-form-content" placeholder="Take a note..." rows="4">${_esc(text)}</textarea>`;
         _wireHashtag(bodyEl.querySelector('.note-form-content'));
+        _wireExpandedNoteEditor(bodyEl.querySelector('.note-form-content'));
       }
       const focusEl = newType === 'note'
         ? bodyEl.querySelector('.note-form-content')
@@ -3159,6 +3218,7 @@ function _buildForm(note = null) {
   // staying a cramped 4-row box. The user can still drag-resize too.
   const _contentTa = form.querySelector('.note-form-content');
   if (_contentTa) {
+    _wireExpandedNoteEditor(_contentTa);
     const _grow = () => {
       _contentTa.style.height = 'auto';
       // Inline form: cap at ~50vh so a huge note doesn't push the action
@@ -3615,10 +3675,11 @@ function _buildForm(note = null) {
     if (_saveBtn._saving) return;
     // Mobile: when an existing note is opened and closed without edits, the
     // Update (✓) button morphs into Archive (set up below). Route the click
-    // to the hidden archive button so the existing archive flow + undo toast
-    // run unchanged.
+    // directly through the archive flow. Using a DOM .click() proxy here was
+    // fragile on mobile because the real archive button can move from the
+    // footer to the fullscreen header.
     if (_saveBtn.classList.contains('archive-mode')) {
-      form.querySelector('.note-form-archive-btn')?.click();
+      _archiveNoteById(note?.id);
       return;
     }
     _saveBtn._saving = true; _saveBtn.disabled = true; _saveBtn.style.opacity = '0.5';
@@ -3743,22 +3804,7 @@ function _buildForm(note = null) {
   // Archive / Delete — edit-mode-only buttons, mirror the (now-hidden) card actions.
   form.querySelector('.note-form-archive-btn')?.addEventListener('click', () => {
     if (!isEdit) return;
-    const id = note.id;
-    const idx = _notes.findIndex(n => n.id === id);
-    if (idx < 0) return;
-    const removed = _notes.splice(idx, 1)[0];
-    _editingId = null;
-    _renderNotes();
-    const undo = () => _undoArchive(removed, idx);
-    _pushUndo({ label: 'archive', run: undo });
-    const _undoIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;"><polyline points="9 14 4 9 9 4"/><path d="M4 9h11a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5H9"/></svg>';
-    _patchNote(id, { archived: true }).then(() => {
-      uiModule.showToast('Archived', { duration: 6000, action: 'Undo', actionIcon: _undoIcon, onAction: undo, actionHint: 'Ctrl+Z' });
-    }).catch(() => {
-      _notes.splice(idx, 0, removed);
-      _renderNotes();
-      uiModule.showError('Failed to archive');
-    });
+    _archiveNoteById(note.id);
   });
   form.querySelector('.note-form-delete-btn')?.addEventListener('click', async () => {
     if (!isEdit) return;
@@ -3806,6 +3852,7 @@ function _wireGoalForm(form, container) {
   // the same behavior (type "#foo " in the description → tag added to the
   // form's label input) so editing a goal note doesn't ReferenceError.
   const desc = container.querySelector('.note-form-goal-desc');
+  _wireExpandedNoteEditor(desc, 'goal description');
   const labelInput = form?.querySelector('.note-form-label');
   if (desc && labelInput) {
     const tagRe = /(^|\s)#([A-Za-z0-9][\w-]*)\s$/;
@@ -4064,7 +4111,7 @@ function _wireCanvas(container, initialImageUrl) {
 
   const colorInput = container.querySelector('.note-form-draw-color');
   // Swap the native browser color dialog for the in-house HSV picker
-  // (same one used by Themes + the gallery editor). Existing `input` event
+  // (same one used by Themes + Imps). Existing `input` event
   // listeners + .value reads keep working — see colorPicker.js.
   if (colorInput) attachColorPicker(colorInput);
   const sizeInput = container.querySelector('.note-form-draw-size');

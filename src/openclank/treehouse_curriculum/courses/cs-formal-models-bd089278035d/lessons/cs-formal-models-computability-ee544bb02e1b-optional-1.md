@@ -1,0 +1,1 @@
+Undecidable means no algorithm solves every instance under the definition, not that every instance is mysterious.

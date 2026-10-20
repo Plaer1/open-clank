@@ -229,11 +229,23 @@ pub struct CandidateRecord {
     pub source: String,
     pub source_event_id: String,
     pub dedup_key: String,
+    #[serde(default)]
+    pub source_uri: String,
+    #[serde(default = "default_source_revision")]
+    pub source_revision: i64,
+    #[serde(default)]
+    pub content_hash: String,
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
     pub status: CandidateStatus,
     pub reason: String,
     pub accepted_curated_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_source_revision() -> i64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,6 +351,14 @@ pub struct GroomResult {
     pub records_archived: usize,
     pub records_merged: usize,
     pub records_reflected: usize,
+    #[serde(default)]
+    pub records_selected: usize,
+    #[serde(default)]
+    pub records_changed: usize,
+    #[serde(default)]
+    pub records_skipped: usize,
+    #[serde(default)]
+    pub records_conflicted: usize,
     pub alerts: Vec<String>,
 }
 
@@ -406,6 +426,39 @@ mod tests {
         assert_eq!(json, "\"unknown\"");
         let back: MemoryKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, MemoryKind::Unknown);
+    }
+
+    #[test]
+    fn groom_outcome_counts_round_trip_and_default_for_legacy_results() {
+        let result = GroomResult {
+            op: GroomOp::Reflect,
+            records_archived: 0,
+            records_merged: 0,
+            records_reflected: 2,
+            records_selected: 4,
+            records_changed: 2,
+            records_skipped: 1,
+            records_conflicted: 1,
+            alerts: vec![],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["records_selected"], 4);
+        assert_eq!(json["records_changed"], 2);
+        assert_eq!(json["records_skipped"], 1);
+        assert_eq!(json["records_conflicted"], 1);
+
+        let legacy: GroomResult = serde_json::from_value(serde_json::json!({
+            "op": "reflect",
+            "records_archived": 0,
+            "records_merged": 0,
+            "records_reflected": 0,
+            "alerts": [],
+        }))
+        .unwrap();
+        assert_eq!(legacy.records_selected, 0);
+        assert_eq!(legacy.records_changed, 0);
+        assert_eq!(legacy.records_skipped, 0);
+        assert_eq!(legacy.records_conflicted, 0);
     }
 
     #[test]

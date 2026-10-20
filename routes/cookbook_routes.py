@@ -19,6 +19,16 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from src.auth_helpers import effective_user, require_user
 from src.constants import COOKBOOK_STATE_FILE
 from pydantic import BaseModel
+from src.openclank.chat_routing import normalized_provider_owner
+from src.openclank.provider_control import (
+    ManagedProviderEngineControl,
+    ProviderEngineControlError,
+)
+from src.openclank.provider_store import (
+    ProviderNotFound,
+    ProviderStore,
+    ProviderStoreError,
+)
 
 from core.middleware import require_admin
 from routes._validators import validate_remote_host, validate_ssh_port
@@ -68,9 +78,26 @@ _HF_TOKEN_STATUS_SNIPPET = (
     'echo "[odysseus] HF token: applied"; '
     'else '
     'echo "[odysseus] HF token: NOT SET — gated/private models will be denied. '
-    'Add one in Odysseus Cookbook -> Settings -> HuggingFace Token."; '
+    'Add one in Open Clank Cookbook -> Settings -> HuggingFace Token."; '
     'fi'
 )
+
+
+def _append_mlx_image_server_script(runner_lines: list[str]) -> None:
+    """Write the MLX image API helper next to the tmux runner on remote hosts."""
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "mlx_image_server.py"
+    try:
+        script = script_path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.warning("Failed to read mlx_image_server.py: %s", e)
+        runner_lines.append('echo "ERROR: Odysseus could not prepare the MLX image server helper."')
+        runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=127')
+        return
+    runner_lines.append('mkdir -p scripts')
+    runner_lines.append("cat > scripts/mlx_image_server.py <<'PY'")
+    runner_lines.extend(script.splitlines())
+    runner_lines.append("PY")
+    runner_lines.append('chmod +x scripts/mlx_image_server.py 2>/dev/null || true')
 
 
 def _venv_root_from_serve_cmd(cmd: str) -> str:
@@ -353,12 +380,28 @@ def _append_local_ollama_download_command_lines(
     lines.append('if [ -z "$ODYSSEUS_OLLAMA_PULL_CMD" ]; then echo "ERROR: Ollama not found on this server. Install Ollama or start an ollama-rocm/ollama-test container."; exit 127; fi')
 
 
-def setup_cookbook_routes() -> APIRouter:
+def setup_cookbook_routes(
+    provider_store: ProviderStore | None = None,
+    provider_control: ManagedProviderEngineControl | None = None,
+) -> APIRouter:
     router = APIRouter(tags=["cookbook"])
+    provider_store = provider_store or ProviderStore()
+    provider_control = provider_control or ManagedProviderEngineControl()
     _cookbook_state_path = Path(COOKBOOK_STATE_FILE)
     _state_get_cache = {"ts": 0.0, "mtime": 0.0, "value": None}
     _tasks_status_cache = {"ts": 0.0, "value": None}
     _tasks_status_inflight = {"task": None}
+
+    class CookbookProviderRegistration(BaseModel):
+        url: str
+        model_id: str
+        name: str = ""
+        model_type: str = "llm"
+        session_id: str = ""
+        supports_tools: bool = False
+
+    def _cookbook_provider_owner(request: Request) -> str:
+        return normalized_provider_owner(effective_user(request))
 
     def _mask_secret(value: str) -> str:
         if not value:
@@ -493,11 +536,16 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "install mlx-lm in Cookbook Dependencies", "op": "dependency", "package": "mlx-lm"}],
             ),
             (
+                r"OmniGen2Pipeline|module diffusers has no attribute .*Pipeline|custom_pipeline=.*failed",
+                "This image model uses a custom Diffusers pipeline that the launch environment does not know yet.",
+                [{"label": "update Diffusers image dependencies", "op": "dependency", "package": "diffusers transformers accelerate"}],
+            ),
+            (
                 r"Unable to quantize model of type <class ['\"]mlx_lm\.models\.switch_layers\.QuantizedSwitchLinear['\"]>|QuantizedSwitchLinear",
                 "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
                 [
                     {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                    {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
+                    {"label": "Open Clank now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
                 ],
             ),
             # System build deps come BEFORE the generic llama.cpp catch-all
@@ -530,9 +578,9 @@ def setup_cookbook_routes() -> APIRouter:
                 [{"label": "download a GGUF build of this model (repo name usually ends in -GGUF, file like Q4_K_M.gguf)", "op": "manual"}],
             ),
             (
-                r"No module named 'torch'|No module named torch|No module named 'diffusers'|No module named diffusers",
-                "Diffusion serving requires PyTorch and diffusers.",
-                [{"label": "install diffusers[torch] in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch]"}],
+                r"No module named 'torch'|No module named torch|No module named 'torchvision'|No module named torchvision|No module named 'diffusers'|No module named diffusers|No module named 'scipy'|No module named scipy|install scipy if you want to use beta sigmas|requires the Torchvision library",
+                "Diffusion serving requires PyTorch, Torchvision, Diffusers, Accelerate, and SciPy.",
+                [{"label": "install Diffusers image deps in Cookbook Dependencies", "op": "dependency", "package": "diffusers[torch] torchvision accelerate scipy python-multipart"}],
             ),
             (
                 r"403 Forbidden|401 Unauthorized|Access to model.*is restricted|gated repo|not in the authorized list|awaiting a review",
@@ -781,7 +829,7 @@ def setup_cookbook_routes() -> APIRouter:
         )
 
     async def _repair_cookbook_known_host(host: str, ssh_port: str | None = None) -> tuple[bool, str]:
-        """Refresh Odysseus' own known_hosts entry for a validated Cookbook host.
+        """Refresh Open Clank' own known_hosts entry for a validated Cookbook host.
 
         This is intentionally scoped to Cookbook SSH targets and only called
         after OpenSSH reports a changed host key. It fixes container-local
@@ -1063,7 +1111,7 @@ def setup_cookbook_routes() -> APIRouter:
             lines.append(f"export HF_HUB_CACHE={_dl_hf_home_shell}/hub")
         # Ensure pip-user scripts (e.g. hf CLI installed via --user) are on PATH
         lines.append('export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-        # When Odysseus runs from a venv (e.g. native macOS install), put its bin
+        # When Open Clank runs from a venv (e.g. native macOS install), put its bin
         # on PATH so the tmux shell finds the bundled `hf`/`python3` without an
         # activated venv. Local bash runs only — meaningless over SSH.
         if not req.remote_host:
@@ -1276,7 +1324,7 @@ def setup_cookbook_routes() -> APIRouter:
             # Local: run hf download in the background (tmux on POSIX, a detached
             # process + logfile on Windows where tmux doesn't exist).
             if req.env_prefix:
-                lines.append(_safe_env_prefix(req.env_prefix))
+                lines.append(_safe_env_prefix(req.env_prefix, bash_windows=local_windows))
             else:
                 lines.append("deactivate 2>/dev/null; hash -r")
             # Show whether the HF token reached this run (masked) — tells a gated
@@ -1382,7 +1430,7 @@ def setup_cookbook_routes() -> APIRouter:
                     cwd=str(Path.home()),
                 )
             else:
-                # LOCAL scan: use sys.executable (the venv Python Odysseus is already
+                # LOCAL scan: use sys.executable (the venv Python Open Clank is already
                 # running under) — it's guaranteed real Python on all platforms.
                 # Falling back to which_tool on Windows risks hitting the Microsoft
                 # Store stub alias for "python3"/"python", which prints
@@ -1433,9 +1481,11 @@ def setup_cookbook_routes() -> APIRouter:
                     "nb_files": m["nb_files"],
                     "has_incomplete": m["has_incomplete"],
                     "status": "downloading" if m["has_incomplete"] else "ready",
-                    "path": m.get("path", ""),
-                    "is_diffusion": m.get("is_diffusion", False),
-                }
+	                    "path": m.get("path", ""),
+	                    "is_diffusion": m.get("is_diffusion", False),
+	                    "is_video": m.get("is_video", False),
+	                    "is_adapter": m.get("is_adapter", False),
+	                }
                 if m.get("is_local_dir"):
                     entry["is_local_dir"] = True
                 if m.get("is_gguf"):
@@ -1456,65 +1506,283 @@ def setup_cookbook_routes() -> APIRouter:
 
         return {"models": models, "host": host or "local"}
 
-    def _auto_register_image_endpoint(
-        req: ServeRequest, remote: str | None, owner: str | None
-    ) -> str | None:
-        """Register a diffusion model as an image endpoint so it appears in the model selector."""
-        import re
-        from core.database import SessionLocal, ModelEndpoint
+    def _provider_model_id(value: str) -> str:
+        model_id = str(value or "").strip()
+        if (
+            not model_id
+            or len(model_id) > 256
+            or "\x00" in model_id
+            or any(character.isspace() for character in model_id)
+        ):
+            raise HTTPException(422, "Cookbook provider model ID is invalid")
+        return model_id
 
-        # Parse port from command (--port NNNN), default 8100 for diffusion_server
-        port_match = re.search(r'--port\s+(\d+)', req.cmd)
-        port = int(port_match.group(1)) if port_match else 8100
+    def _cookbook_connection_json(connection) -> dict:
+        routes = provider_store.list_model_routes(
+            owner=connection.owner,
+            connection_id=connection.id,
+        )
+        return {
+            "id": connection.id,
+            "name": connection.label,
+            "url": connection.normalized_url,
+            "revision": int(connection.revision),
+            "enabled": bool(connection.enabled),
+            "models": [route.provider_model_id for route in routes if route.enabled],
+            "routes": [
+                {
+                    "id": route.id,
+                    "model_id": route.provider_model_id,
+                    "display_name": route.display_name,
+                    "operations": list(route.operations or ()),
+                }
+                for route in routes
+                if route.enabled
+            ],
+        }
 
-        # Determine host
-        if remote:
-            # SSH alias — use as hostname (Tailscale resolves it later)
-            host = remote.split("@")[-1] if "@" in remote else remote
-        else:
-            host = "localhost"
+    def _cookbook_connections(owner: str):
+        return [
+            connection
+            for connection in provider_store.list_connections(owner=owner)
+            if dict(connection.settings or {}).get("managed_by") == "cookbook"
+        ]
 
-        base_url = f"http://{host}:{port}/v1"
+    async def _ensure_cookbook_provider_connection(
+        *,
+        request: Request,
+        url: str,
+        model_id: str,
+        label: str,
+        model_type: str,
+        session_id: str = "",
+        supports_tools: bool = False,
+        ollama: bool = False,
+    ) -> dict:
+        """Create or reuse a Cookbook-owned normalized local connection.
 
-        # Friendly display name from repo_id
-        short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
-        display_name = f"{short_name} (image)"
+        Provider URL semantics are approved by the managed engine.  The host
+        persists only a keyless connection and stable route IDs; Cookbook
+        never writes credentials or session headers into provider state.
+        """
+        owner = _cookbook_provider_owner(request)
+        model_id = _provider_model_id(model_id)
+        model_type = str(model_type or "llm").strip().lower()
+        if model_type not in {"llm", "image"}:
+            raise HTTPException(422, "Cookbook provider model type is invalid")
+        family_id = "ollama" if ollama else "openai-compatible"
+        adapter_id = "ollama" if ollama else "openai-chat"
+        validated = await provider_control.call(
+            request=request,
+            owner=owner,
+            method="_openclank/provider-control/v1/connection/validate",
+            payload={
+                "familyID": family_id,
+                "adapterID": adapter_id,
+                "kind": "local",
+                "billingLane": "local",
+                "url": url,
+                "settings": {},
+            },
+        )
+        normalized_url = str(validated.get("normalizedURL") or "").strip()
+        if not normalized_url:
+            raise HTTPException(502, "Managed engine omitted the local provider URL")
 
-        db = SessionLocal()
-        try:
-            # Check for existing endpoint with same base_url — update it
-            existing = db.query(ModelEndpoint).filter(
-                ModelEndpoint.base_url == base_url,
-                ModelEndpoint.owner == owner,
-            ).first()
-            if existing:
-                existing.is_enabled = True
-                existing.model_type = "image"
-                existing.name = display_name
-                db.commit()
-                logger.info(f"Updated existing image endpoint: {base_url}")
-                return existing.id
-
-            ep_id = f"img-{uuid.uuid4().hex[:8]}"
-            ep = ModelEndpoint(
-                id=ep_id,
-                name=display_name,
-                base_url=base_url,
-                api_key=None,
-                is_enabled=True,
-                model_type="image",
+        existing = next(
+            (
+                connection
+                for connection in _cookbook_connections(owner)
+                if connection.normalized_url == normalized_url
+                and connection.family_id == validated["familyID"]
+                and connection.adapter_id == validated["adapterID"]
+            ),
+            None,
+        )
+        sessions: list[str] = []
+        if existing is not None:
+            raw_sessions = dict(existing.settings or {}).get("cookbook_sessions") or []
+            sessions = [str(item) for item in raw_sessions if str(item).strip()]
+        if session_id and session_id not in sessions:
+            sessions.append(session_id)
+        settings = {
+            "managed_by": "cookbook",
+            "cookbook_sessions": sessions,
+        }
+        if existing is None:
+            connection = provider_store.create_connection(
                 owner=owner,
+                family_id=validated["familyID"],
+                adapter_id=validated["adapterID"],
+                kind=validated["kind"],
+                billing_lane=validated["billingLane"],
+                label=label or model_id,
+                normalized_url=normalized_url,
+                settings=settings,
+                enabled=True,
             )
-            db.add(ep)
-            db.commit()
-            logger.info(f"Auto-registered image endpoint: {display_name} @ {base_url}")
-            return ep_id
-        except Exception as e:
-            logger.error(f"Failed to auto-register image endpoint: {e}")
-            db.rollback()
+        else:
+            connection = provider_store.update_connection(
+                owner=owner,
+                connection_id=existing.id,
+                expected_revision=int(existing.revision),
+                label=label or model_id,
+                settings=settings,
+                enabled=True,
+            )
+
+        routes = provider_store.list_model_routes(
+            owner=owner,
+            connection_id=connection.id,
+        )
+        route = next(
+            (item for item in routes if item.provider_model_id == model_id and item.enabled),
+            None,
+        )
+        if route is None:
+            image_operations = (
+                "image.generate",
+                "image.edit",
+                "image.inpaint",
+                "image.img2img",
+            )
+            route = provider_store.create_model_route(
+                owner=owner,
+                connection_id=connection.id,
+                provider_model_id=model_id,
+                display_name=label or model_id,
+                operations=(
+                    image_operations
+                    if model_type == "image"
+                    else ("chat.stream", "chat.complete")
+                ),
+                capabilities={
+                    "tool_call": bool(supports_tools),
+                    "modalities": {
+                        "input": ["text"],
+                        "output": ["image" if model_type == "image" else "text"],
+                    },
+                },
+                provenance={
+                    "authority": "managed-engine",
+                    "registration": "cookbook-local-serve-v1",
+                },
+            )
+        result = _cookbook_connection_json(connection)
+        result["model_route_id"] = route.id
+        return result
+
+    def _delete_cookbook_provider_connection(
+        *, owner: str, connection_id: str, session_id: str = ""
+    ) -> dict:
+        connection = provider_store.get_connection(
+            owner=owner,
+            connection_id=connection_id,
+        )
+        settings = dict(connection.settings or {})
+        if settings.get("managed_by") != "cookbook":
+            raise ProviderNotFound("Cookbook provider connection was not found")
+        sessions = [
+            str(item)
+            for item in (settings.get("cookbook_sessions") or [])
+            if str(item).strip() and str(item) != session_id
+        ]
+        if session_id and sessions:
+            settings["cookbook_sessions"] = sessions
+            kept = provider_store.update_connection(
+                owner=owner,
+                connection_id=connection.id,
+                expected_revision=int(connection.revision),
+                settings=settings,
+            )
+            return {"id": kept.id, "status": "retained", "revision": kept.revision}
+        deleted = provider_store.delete_connection(
+            owner=owner,
+            connection_id=connection.id,
+            expected_revision=int(connection.revision),
+        )
+        return {"id": deleted.id, "status": "deleted", "revision": deleted.revision}
+
+    @router.get("/api/cookbook/provider-connections")
+    def list_cookbook_provider_connections(request: Request):
+        require_admin(request)
+        owner = _cookbook_provider_owner(request)
+        try:
+            return {
+                "connections": [
+                    _cookbook_connection_json(connection)
+                    for connection in _cookbook_connections(owner)
+                ]
+            }
+        except ProviderStoreError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/api/cookbook/provider-connections")
+    async def register_cookbook_provider_connection(
+        request: Request, payload: CookbookProviderRegistration
+    ):
+        require_admin(request)
+        try:
+            return await _ensure_cookbook_provider_connection(
+                request=request,
+                url=payload.url,
+                model_id=payload.model_id,
+                label=payload.name,
+                model_type=payload.model_type,
+                session_id=payload.session_id,
+                supports_tools=payload.supports_tools,
+                ollama="ollama" in payload.name.lower(),
+            )
+        except HTTPException:
+            raise
+        except ProviderEngineControlError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ProviderStoreError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.delete("/api/cookbook/provider-connections/{connection_id}")
+    def delete_cookbook_provider_connection(
+        connection_id: str, request: Request, session_id: str = ""
+    ):
+        require_admin(request)
+        try:
+            return _delete_cookbook_provider_connection(
+                owner=_cookbook_provider_owner(request),
+                connection_id=connection_id,
+                session_id=session_id,
+            )
+        except ProviderNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ProviderStoreError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    async def _auto_register_image_provider(
+        request: Request, req: ServeRequest, remote: str | None, session_id: str
+    ) -> str | None:
+        port_match = re.search(r"--port\s+(\d+)", req.cmd)
+        port = int(port_match.group(1)) if port_match else 8100
+        host = remote.split("@")[-1] if remote and "@" in remote else (remote or "localhost")
+        short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
+        try:
+            result = await _ensure_cookbook_provider_connection(
+                request=request,
+                url=f"http://{host}:{port}/v1",
+                model_id=req.repo_id,
+                label=f"{short_name} (image)",
+                model_type="image",
+                session_id=session_id,
+            )
+            from src.settings import load_settings, save_settings
+
+            settings = load_settings()
+            settings["image_gen_enabled"] = True
+            if not settings.get("image_model"):
+                settings["image_model"] = req.repo_id
+            save_settings(settings)
+            return str(result["id"])
+        except Exception as exc:
+            logger.error("Failed to register Cookbook image provider: %s", exc)
             return None
-        finally:
-            db.close()
 
     def _pick_free_port_for_ollama(
         remote: str | None, ssh_port: str | None, start_port: int, max_offset: int
@@ -1571,19 +1839,19 @@ def setup_cookbook_routes() -> APIRouter:
         return None
 
     async def _serve_crash_watchdog(
-        endpoint_id: str,
+        connection_id: str,
         session_id: str,
         remote: str | None,
         ssh_port: str | None,
         is_windows: bool,
-        owner: str | None,
+        owner: str,
     ) -> None:
-        """Drop a freshly-registered endpoint when the cookbook serve dies early.
+        """Drop a freshly-registered provider connection when a serve dies early.
 
         The runner script always emits ``=== Process exited with code N ===``
         when the launched cmd terminates (success or failure). We poll the
         tmux pane periodically; on a non-zero exit detected within the watch
-        window, the endpoint row is deleted so the picker doesn't keep a
+        window, its Cookbook-owned connection is retired so the picker does not keep a
         dead model around. A zero exit (rare for a long-running serve, but
         possible for fast-failing builds that the runner reports as code 0)
         and "missing exit marker" both leave the endpoint alone — that's
@@ -1593,7 +1861,7 @@ def setup_cookbook_routes() -> APIRouter:
         Times are picked to outlast realistic vLLM load times (Qwen3.5-122B
         takes ~3 min to load) without burning resources on a stuck-forever
         wait. After the last check, the watchdog gives up — the picker's
-        per-endpoint probe takes over from there.
+        managed route for a process that never came up.
         """
         # Cumulative wait points: 25 s, 60 s, 2 min, 5 min.
         _waits = [25, 35, 60, 180]
@@ -1643,96 +1911,52 @@ def setup_cookbook_routes() -> APIRouter:
                 # commands like "ollama pull" the user might launch through
                 # the same form. Don't drop the endpoint on a clean exit;
                 # let the probe layer mark it offline if nothing's listening.
-                logger.info(f"crash-watchdog: serve {session_id} exited cleanly (0); leaving endpoint {endpoint_id}")
+                logger.info(
+                    "crash-watchdog: serve %s exited cleanly (0); retaining connection %s",
+                    session_id,
+                    connection_id,
+                )
                 return
-            # Non-zero exit — drop the endpoint.
+            # Non-zero exit — retire only the Cookbook-created connection
+            # membership associated with this serve session. If another live
+            # Cookbook task shares it, the connection remains enabled.
             try:
-                from core.database import SessionLocal as _SL, ModelEndpoint as _ME
-                db = _SL()
-                try:
-                    ep = db.query(_ME).filter(
-                        _ME.id == endpoint_id,
-                        _ME.owner == owner,
-                    ).first()
-                    if ep:
-                        # A scheduled serve can leave old non-zero exit markers
-                        # in tmux scrollback while the current OpenAI endpoint is
-                        # actually alive. Verify reachability before deleting the
-                        # endpoint row; otherwise chats fall back even though the
-                        # served model is ready.
-                        try:
-                            probe_url = ep.base_url.rstrip("/") + "/models"
-                            with urllib.request.urlopen(probe_url, timeout=3) as resp:
-                                if 200 <= getattr(resp, "status", 0) < 300:
-                                    logger.info(
-                                        f"crash-watchdog: serve {session_id} has exit marker {exit_code} "
-                                        f"but endpoint {ep.id} is reachable; leaving it registered"
-                                    )
-                                    return
-                        except Exception:
-                            pass
-                        logger.info(
-                            f"crash-watchdog: dropping endpoint {endpoint_id} "
-                            f"({ep.name} @ {ep.base_url}) — serve exited {exit_code}"
-                        )
-                        db.delete(ep)
-                        db.commit()
-                finally:
-                    db.close()
+                result = _delete_cookbook_provider_connection(
+                    owner=owner,
+                    connection_id=connection_id,
+                    session_id=session_id,
+                )
+                logger.info(
+                    "crash-watchdog: provider connection %s %s after serve %s exited %s",
+                    connection_id,
+                    result["status"],
+                    session_id,
+                    exit_code,
+                )
             except Exception as e:
-                logger.warning(f"crash-watchdog: endpoint cleanup failed: {e!r}")
+                logger.warning("crash-watchdog: provider cleanup failed: %r", e)
             return
-        logger.debug(f"crash-watchdog: no exit marker for {session_id} within window; leaving endpoint {endpoint_id}")
-
-    def _auto_register_llm_endpoint(
-        req: ServeRequest, remote: str | None, owner: str | None
-    ) -> str | None:
-        """Register a freshly-served LLM as a model endpoint so it appears in the
-        model picker without a manual /setup step — the text-model sibling of
-        _auto_register_image_endpoint.
-
-        Cookbook serve commands launch an OpenAI-compatible server (llama.cpp's
-        llama-server, vLLM, SGLang, or Ollama) on a known port. We point an
-        endpoint at that server's /v1; the picker auto-discovers the model id by
-        probing /v1/models and dims the endpoint until the server is reachable,
-        so registering immediately (before the server finishes loading) is safe.
-        """
-        logger.info(
-            f"_auto_register_llm_endpoint: ENTRY repo_id={req.repo_id!r} "
-            f"remote={remote!r} cmd_prefix={req.cmd[:80]!r}"
+        logger.debug(
+            "crash-watchdog: no exit marker for %s within window; retaining connection %s",
+            session_id,
+            connection_id,
         )
-        import re
-        from core.database import SessionLocal, ModelEndpoint
 
-        # Port: ordered fallbacks so we match whatever the user actually
-        # asked for, not a hardcoded default:
-        #   1. explicit `--port N`  (vllm / sglang / llama-server)
-        #   2. `OLLAMA_HOST=host:port`  (the way Ollama specifies its bind)
-        #   3. fallback by backend (11434 ollama / 8080 llama.cpp)
-        # Previously the OLLAMA_HOST form was silently ignored and we
-        # registered every Ollama endpoint at 11434 — even if the user
-        # set OLLAMA_HOST=0.0.0.0:11435 to avoid colliding with an
-        # existing systemd Ollama, the registered endpoint pointed at
-        # the OLD port and showed as offline.
-        port_match = re.search(r'--port\s+(\d+)', req.cmd)
-        ollama_host_match = re.search(r'OLLAMA_HOST=[^\s]*?:(\d+)', req.cmd)
+    async def _auto_register_llm_provider(
+        request: Request, req: ServeRequest, remote: str | None, session_id: str
+    ) -> str | None:
+        """Register one served model through the normalized provider authority."""
+        port_match = re.search(r"--port\s+(\d+)", req.cmd)
+        ollama_host_match = re.search(r"OLLAMA_HOST=[^\s]*?:(\d+)", req.cmd)
         if port_match:
             port = int(port_match.group(1))
         elif ollama_host_match:
             port = int(ollama_host_match.group(1))
-        elif "ollama" in req.cmd:
+        elif "ollama" in req.cmd.lower():
             port = 11434
         else:
-            port = 8080  # llama.cpp's llama-server default — the Apple Silicon path
+            port = 8080
 
-        # Determine host. The cookbook tmux for `local=true` serves runs INSIDE
-        # the odysseus container — so the right URL for the in-container
-        # backend to reach it is `localhost`, NOT `host.docker.internal`
-        # (the latter points at the docker HOST, which doesn't have a server
-        # on that port). The previous host.docker.internal fallback only made
-        # sense for /setup-added external services like systemd Ollama on the
-        # host — and those go through manual setup, not this auto-register
-        # code path. For remote serves we still use the SSH host alias.
         if remote:
             host = remote.split("@")[-1] if "@" in remote else remote
         elif re.search(r"\bdocker\s+exec\s+(?:ollama-rocm|ollama-test)\b", req.cmd or ""):
@@ -1740,154 +1964,37 @@ def setup_cookbook_routes() -> APIRouter:
         else:
             host = "localhost"
 
-        base_url = f"http://{host}:{port}/v1"
-
         short_name = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
-        display_name = short_name or "Local model"
-        is_mlx_deepseek_v4 = (
+        model_id = req.repo_id
+        if (
             "mlx_lm.server" in (req.cmd or "")
             and "deepseek-v4" in ((req.repo_id or "") + " " + (req.cmd or "")).lower()
-        )
-        mlx_shim_model_id = ""
-        if is_mlx_deepseek_v4 and short_name:
+            and short_name
+        ):
             home_match = re.search(r"((?:/Users|/home)/[^/\s'\"]+)", req.cmd or "")
-            remote_home = home_match.group(1) if home_match else ""
-            if remote_home:
-                mlx_shim_model_id = f"{remote_home}/.cache/odysseus/mlx-shims/{short_name}"
+            if home_match:
+                model_id = f"{home_match.group(1)}/.cache/odysseus/mlx-shims/{short_name}"
 
-        is_ollama_endpoint = "ollama" in (req.cmd or "").lower()
-        # Pin the model the user launched for every Cookbook-created LLM
-        # endpoint, not just Ollama. Some OpenAI-compatible servers report a
-        # deployment alias from /v1/models, and a stale server can answer on the
-        # same port while the new launch failed. Keeping the requested model id
-        # pinned makes the picker reflect the actual launch intent.
-        pinned_models = [mlx_shim_model_id] if mlx_shim_model_id else ([req.repo_id] if req.repo_id else [])
-
-        db = SessionLocal()
         try:
-            # Reuse an endpoint already pointed at this URL instead of duplicating.
-            existing = db.query(ModelEndpoint).filter(
-                ModelEndpoint.base_url == base_url,
-                ModelEndpoint.owner == owner,
-            ).first()
-            if existing:
-                existing.is_enabled = True
-                existing.model_type = "llm"
-                existing.name = display_name
-                existing.endpoint_kind = "local"
-                existing.model_refresh_mode = "auto"
-                if pinned_models:
-                    try:
-                        existing_pinned = json.loads(existing.pinned_models or "[]")
-                    except Exception:
-                        existing_pinned = []
-                    merged_pinned = []
-                    for mid in [*existing_pinned, *pinned_models]:
-                        if mid and mid not in merged_pinned:
-                            merged_pinned.append(mid)
-                    existing.pinned_models = json.dumps(merged_pinned) if merged_pinned else None
-                if is_ollama_endpoint:
-                    existing.endpoint_kind = "ollama"
-                    if pinned_models:
-                        existing.cached_models = json.dumps(pinned_models)
-                db.commit()
-                logger.info(f"Updated existing local model endpoint: {base_url}")
-                # Re-probe so cached_models matches what the server actually
-                # serves right now (the URL may have stayed the same but the
-                # model behind it changed across launches).
-                try:
-                    if mlx_shim_model_id:
-                        existing.cached_models = json.dumps([mlx_shim_model_id])
-                        existing.pinned_models = json.dumps([mlx_shim_model_id])
-                        db.commit()
-                    else:
-                        from routes.model_routes import _probe_endpoint
-                        import json as _json2
-                        probed = _probe_endpoint(base_url, existing.api_key, timeout=5)
-                        if probed:
-                            existing.cached_models = _json2.dumps(probed)
-                            db.commit()
-                except Exception as _pe:
-                    logger.warning(f"Re-probe failed for {base_url}: {_pe!r}")
-                # Sweep stale dupes: other endpoints with the same display name
-                # at DIFFERENT URLs (likely failed earlier-attempt ports) get
-                # deleted so the picker doesn't show an offline ghost next to
-                # the working one. Only sweeps endpoints whose id starts with
-                # `local-` so we never touch a user's hand-added DeepSeek/OpenAI/
-                # etc. entry with a coincidentally matching name.
-                stale = (db.query(ModelEndpoint)
-                         .filter(ModelEndpoint.name == display_name)
-                         .filter(ModelEndpoint.base_url != base_url)
-                         .filter(ModelEndpoint.id.like("local-%"))
-                         .filter(ModelEndpoint.owner == owner)
-                         .all())
-                for s in stale:
-                    logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
-                    db.delete(s)
-                if stale:
-                    db.commit()
-                return existing.id
-
-            ep_id = f"local-{uuid.uuid4().hex[:8]}"
-            ep = ModelEndpoint(
-                id=ep_id,
-                name=display_name,
-                base_url=base_url,
-                api_key=None,
-                is_enabled=True,
+            result = await _ensure_cookbook_provider_connection(
+                request=request,
+                url=f"http://{host}:{port}/v1",
+                model_id=model_id,
+                label=short_name or "Local model",
                 model_type="llm",
-                endpoint_kind="ollama" if is_ollama_endpoint else "local",
-                model_refresh_mode="auto",
-                cached_models=json.dumps(pinned_models) if pinned_models else None,
-                pinned_models=json.dumps(pinned_models) if pinned_models else None,
-                supports_tools=None,
-                owner=owner,
+                session_id=session_id,
+                supports_tools="--enable-auto-tool-choice" in (req.cmd or ""),
+                ollama="ollama" in (req.cmd or "").lower(),
             )
-            db.add(ep)
-            db.commit()
-            logger.info(f"Auto-registered local model endpoint: {display_name} @ {base_url}")
-            # Same sweep on first-register path: drop any pre-existing local-*
-            # endpoints with this display name pointed elsewhere.
-            stale = (db.query(ModelEndpoint)
-                     .filter(ModelEndpoint.name == display_name)
-                     .filter(ModelEndpoint.id != ep_id)
-                     .filter(ModelEndpoint.id.like("local-%"))
-                     .filter(ModelEndpoint.owner == owner)
-                     .all())
-            for s in stale:
-                logger.info(f"Sweeping stale local endpoint {s.id} ({s.base_url})")
-                db.delete(s)
-            if stale:
-                db.commit()
-            # Probe /v1/models NOW and write cached_models so the chat
-            # picker actually shows the model on the next /api/models
-            # call. Without this immediate probe, the endpoint has empty
-            # cached_models until the next background refresh fires (up
-            # to a minute later) and the picker shows nothing — even
-            # though the endpoint is in the DB and the server is up.
-            try:
-                if mlx_shim_model_id:
-                    ep.cached_models = json.dumps([mlx_shim_model_id])
-                    ep.pinned_models = json.dumps([mlx_shim_model_id])
-                    db.commit()
-                    logger.info(f"Auto-register: pinned MLX DeepSeek-V4 shim model @ {base_url}")
-                else:
-                    from routes.model_routes import _probe_endpoint
-                    import json as _json2
-                    probed = _probe_endpoint(base_url, None, timeout=5)
-                    if probed:
-                        ep.cached_models = _json2.dumps(probed)
-                        db.commit()
-                        logger.info(f"Auto-register: probed {len(probed)} models @ {base_url}")
-            except Exception as _pe:
-                logger.warning(f"Auto-register: probe-after-create failed for {base_url}: {_pe!r}")
-            return ep_id
-        except Exception as e:
-            logger.error(f"Failed to auto-register local model endpoint: {e}")
-            db.rollback()
+            logger.info(
+                "Registered Cookbook model %s as normalized connection %s",
+                model_id,
+                result["id"],
+            )
+            return str(result["id"])
+        except Exception as exc:
+            logger.error("Failed to register Cookbook local provider: %s", exc)
             return None
-        finally:
-            db.close()
 
     @router.post("/api/model/serve")
     async def model_serve(request: Request, req: ServeRequest):
@@ -1901,7 +2008,7 @@ def setup_cookbook_routes() -> APIRouter:
         a fake org/name wrapper.
         """
         require_admin(request)
-        endpoint_owner = effective_user(request) or None
+        provider_owner = _cookbook_provider_owner(request)
         # Defence-in-depth: reject values that could break out of shell contexts.
         validate_remote_host(req.remote_host)
         req.ssh_port = validate_ssh_port(req.ssh_port)
@@ -2084,13 +2191,13 @@ def setup_cookbook_routes() -> APIRouter:
             )
             runner_lines.extend(_user_shell_path_bootstrap())
             runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=""')
-            # Put Odysseus's own venv bin on PATH (local runs only) so the serve
+            # Put Open Clank's own venv bin on PATH (local runs only) so the serve
             # shell resolves the bundled python3/hf, mirroring the download flow.
             if not remote:
                 runner_lines.append(_local_tooling_path_export(sys.executable))
                 if local_windows:
                     # Detached Git Bash runs do not always inherit recently edited
-                    # user PATH entries from the already-running Odysseus process.
+                    # user PATH entries from the already-running Open Clank process.
                     runner_lines.append('export PATH="$HOME/bin:$HOME/llama.cpp/build-cuda/bin/Release:$HOME/llama.cpp/build/bin/Release:$HOME/llama.cpp/build/bin/Debug:$HOME/llama.cpp/build/bin:$PATH"')
             runner_lines.append("export FLASHINFER_DISABLE_VERSION_CHECK=1")
             if req.hf_token:
@@ -2098,7 +2205,7 @@ def setup_cookbook_routes() -> APIRouter:
             if req.gpus:
                 runner_lines.append(f"export CUDA_VISIBLE_DEVICES='{req.gpus}'")
             if req.env_prefix:
-                runner_lines.append(_safe_env_prefix(req.env_prefix))
+                runner_lines.append(_safe_env_prefix(req.env_prefix, bash_windows=local_windows))
             else:
                 runner_lines.append("deactivate 2>/dev/null; hash -r")
             _append_venv_nvidia_library_path_lines(runner_lines, cmd=req.cmd)
@@ -2182,7 +2289,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('    mkdir -p ~/bin')
                 runner_lines.append('    cat > ~/bin/llama-server <<\'_ODY_LLAMA_SHIM_EOF\'')
                 runner_lines.append('#!/usr/bin/env bash')
-                runner_lines.append('# Auto-generated by Odysseus Cookbook: a `llama-server` lookalike')
+                runner_lines.append('# Auto-generated by Open Clank Cookbook: a `llama-server` lookalike')
                 runner_lines.append('# that translates the native CLI to `python -m llama_cpp.server`.')
                 runner_lines.append('# Lets cookbook-generated launch commands run unchanged on hosts')
                 runner_lines.append('# where only the pip llama-cpp-python package is installed.')
@@ -2256,7 +2363,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
                 runner_lines.append('ODYSSEUS_OLLAMA_URL="http://${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}"')
                 if remote and _ollama_host in ("0.0.0.0", "::"):
-                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Odysseus can reach it from this host."')
+                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Open Clank can reach it from this host."')
                     runner_lines.append('echo "[odysseus] Ollama has no built-in authentication; expose this only on a trusted LAN/VPN or provide an explicit OLLAMA_HOST with your own access controls."')
                 runner_lines.append('echo "Starting ollama server on ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}..."')
                 runner_lines.append('OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve')
@@ -2370,24 +2477,8 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
             elif "sglang.launch_server" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! command -v sglang &>/dev/null; then')
-                runner_lines.append('  echo "ERROR: SGLang is not installed."')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('elif ! ODYSSEUS_SGLANG_IMPORT_ERROR="$(python3 -c "import sglang" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: SGLang is installed but failed to import."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
-            elif "mlx_lm.server" in req.cmd:
-                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_MLX_IMPORT_ERROR="$(python3 -c "import mlx_lm" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: MLX LM is not installed."')
-                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_MLX_IMPORT_ERROR"')
-                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
-                runner_lines.append('fi')
                 runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
-                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
-                runner_lines.append('  ODYSSEUS_MLX_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('ODYSSEUS_SGLANG_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import shlex, sys')
                 runner_lines.append('parts = shlex.split(sys.argv[1])')
                 runner_lines.append('py = "python3"')
@@ -2398,6 +2489,36 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('print(py)')
                 runner_lines.append('PY')
                 runner_lines.append(')"')
+                runner_lines.append('if ! "$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" &>/dev/null; then')
+                runner_lines.append('  if ! command -v sglang &>/dev/null; then')
+                runner_lines.append('    echo "ERROR: SGLang is not installed."')
+                runner_lines.append('  else')
+                runner_lines.append('    echo "ERROR: SGLang is installed but failed to import in the launch Python."')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_SGLANG_IMPORT_ERROR="$("$ODYSSEUS_SGLANG_CMD_PY" -c "import sglang" 2>&1)"')
+                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_SGLANG_IMPORT_ERROR"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+            elif "mlx_lm.server" in req.cmd:
+                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_MLX_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for i, part in enumerate(parts):')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if ! ODYSSEUS_MLX_IMPORT_ERROR="$("$ODYSSEUS_MLX_CMD_PY" -c "import mlx_lm" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: MLX LM is not installed in the launch Python: $ODYSSEUS_MLX_CMD_PY"')
+                runner_lines.append('  printf "%s\\n" "$ODYSSEUS_MLX_IMPORT_ERROR"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+                runner_lines.append('if [ -z "$ODYSSEUS_PREFLIGHT_EXIT" ]; then')
                 runner_lines.append('  ODYSSEUS_SERVE_CMD="$("$ODYSSEUS_MLX_CMD_PY" - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
                 runner_lines.append('import json, os, shlex, sys')
                 runner_lines.append('from pathlib import Path')
@@ -2441,7 +2562,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('                utils_path = Path(mlx_utils.__file__)')
                 runner_lines.append('                utils_text = utils_path.read_text()')
                 runner_lines.append('                utils_needle = \'        def class_predicate(p, m):\\n            # Handle custom per layer quantizations\\n            if p in config["quantization"]:\\n                return config["quantization"][p]\\n            if not hasattr(m, "to_quantized"):\\n                return False\\n            return f"{p}.scales" in weights\\n\'')
-                runner_lines.append('                utils_repl = \'        def class_predicate(p, m):\\n            # Odysseus: DeepSeek-V4 MXFP4 switch layers may already be quantized.\\n            if type(m).__name__ == "QuantizedSwitchLinear":\\n                return False\\n            # Handle custom per layer quantizations\\n            if p in config["quantization"]:\\n                return config["quantization"][p]\\n            if not hasattr(m, "to_quantized"):\\n                return False\\n            return f"{p}.scales" in weights\\n\'')
+                runner_lines.append('                utils_repl = \'        def class_predicate(p, m):\\n            # Open Clank: DeepSeek-V4 MXFP4 switch layers may already be quantized.\\n            if type(m).__name__ == "QuantizedSwitchLinear":\\n                return False\\n            # Handle custom per layer quantizations\\n            if p in config["quantization"]:\\n                return config["quantization"][p]\\n            if not hasattr(m, "to_quantized"):\\n                return False\\n            return f"{p}.scales" in weights\\n\'')
                 runner_lines.append('                if utils_repl not in utils_text and utils_needle in utils_text:')
                 runner_lines.append('                    bak = utils_path.with_suffix(utils_path.suffix + ".odysseus_bak")')
                 runner_lines.append('                    if not bak.exists(): bak.write_text(utils_text)')
@@ -2450,7 +2571,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('                dsv4_path = Path(dsv4.__file__)')
                 runner_lines.append('                dsv4_text = dsv4_path.read_text()')
                 runner_lines.append('                dsv4_needle = \'            for sub in ("attn", "ffn"):\\n                for p in ("fn", "base", "scale"):\\n                    nk = nk.replace(f".hc_{sub}_{p}", f".hc_{sub}.{p}")\\n            for wo, wn in w_remap.items():\\n\'')
-                runner_lines.append('                dsv4_repl = \'            for sub in ("attn", "ffn"):\\n                for p in ("fn", "base", "scale"):\\n                    nk = nk.replace(f".hc_{sub}_{p}", f".hc_{sub}.{p}")\\n            # Odysseus: normalize alternate hyper-connection key aliases.\\n            nk = nk.replace(".attn_hc.", ".hc_attn.")\\n            nk = nk.replace(".ffn_hc.", ".hc_ffn.")\\n            for wo, wn in w_remap.items():\\n\'')
+                runner_lines.append('                dsv4_repl = \'            for sub in ("attn", "ffn"):\\n                for p in ("fn", "base", "scale"):\\n                    nk = nk.replace(f".hc_{sub}_{p}", f".hc_{sub}.{p}")\\n            # Open Clank: normalize alternate hyper-connection key aliases.\\n            nk = nk.replace(".attn_hc.", ".hc_attn.")\\n            nk = nk.replace(".ffn_hc.", ".hc_ffn.")\\n            for wo, wn in w_remap.items():\\n\'')
                 runner_lines.append('                if dsv4_repl not in dsv4_text and dsv4_needle in dsv4_text:')
                 runner_lines.append('                    bak = dsv4_path.with_suffix(dsv4_path.suffix + ".odysseus_bak")')
                 runner_lines.append('                    if not bak.exists(): bak.write_text(dsv4_text)')
@@ -2488,10 +2609,111 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('PY')
                 runner_lines.append(')"')
                 runner_lines.append('fi')
+            elif "scripts/mlx_image_server.py" in req.cmd or ".mlx_image_server.py" in req.cmd:
+                _append_mlx_image_server_script(runner_lines)
+                runner_lines.append('export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for part in parts:')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_BIN_DIR="$(dirname "$ODYSSEUS_MLX_IMAGE_CMD_PY" 2>/dev/null || true)"')
+                runner_lines.append('if [ -n "$ODYSSEUS_MLX_IMAGE_BIN_DIR" ]; then export PATH="$ODYSSEUS_MLX_IMAGE_BIN_DIR:$PATH"; fi')
+                runner_lines.append('if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import fastapi, uvicorn, multipart" >/dev/null 2>&1; then')
+                runner_lines.append('  echo "ERROR: MLX image serving requires FastAPI + uvicorn + python-multipart in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY. Install the MLX image dependencies in Cookbook Dependencies."')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
+                runner_lines.append('ODYSSEUS_MLX_IMAGE_MODEL="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('model = ""')
+                runner_lines.append('for i, part in enumerate(parts):')
+                runner_lines.append('    if part == "--model" and i + 1 < len(parts):')
+                runner_lines.append('        model = parts[i + 1]')
+                runner_lines.append('        break')
+                runner_lines.append('print(model)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi hidream; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import mlx, mlx_vlm, transformers, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: HiDream MLX serving needs the model requirements in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart mlx mlx-vlm \'transformers>=4.57.0,<6.0\' huggingface_hub safetensors numpy pillow tqdm sentencepiece hf_transfer"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -qi boogu; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import boogu_image_mlx, mlx, huggingface_hub, safetensors, numpy, PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: Boogu MLX serving needs boogu-image-mlx in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U git+https://github.com/xocialize/boogu-image-mlx.git fastapi uvicorn python-multipart pillow"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "ddcolor"; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  if ! command -v odysseus-mlx-colorize >/dev/null 2>&1 && ! command -v mlx-ddcolor-serve >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving requires the Odysseus mlx-ddcolor-swift bridge on PATH: odysseus-mlx-colorize or mlx-ddcolor-serve."')
+                runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_DDCOLOR_BIN="$(command -v odysseus-mlx-colorize 2>/dev/null || command -v mlx-ddcolor-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$ODYSSEUS_DDCOLOR_BIN" ]; then')
+                runner_lines.append('    ODYSSEUS_DDCOLOR_DIR="$(dirname "$ODYSSEUS_DDCOLOR_BIN")"')
+                runner_lines.append('    if [ ! -f "$ODYSSEUS_DDCOLOR_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_DDCOLOR_DIR/default.metallib" ]; then')
+                runner_lines.append('      echo "ERROR: DDColor MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
+                runner_lines.append('      echo "Run the DDColor MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
+                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    fi')
+                runner_lines.append('  fi')
+                runner_lines.append('elif printf "%s" "$ODYSSEUS_MLX_IMAGE_MODEL" | grep -Eqi "mi-gan|migan|lama"; then')
+                runner_lines.append('  if ! "$ODYSSEUS_MLX_IMAGE_CMD_PY" -c "import PIL" >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving needs Pillow in the launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('    echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U fastapi uvicorn python-multipart pillow huggingface_hub"')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  if ! command -v odysseus-mlx-inpaint >/dev/null 2>&1 && ! command -v mlx-lama-serve >/dev/null 2>&1; then')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving requires the Odysseus mlx-lama-swift bridge on PATH: odysseus-mlx-inpaint or mlx-lama-serve."')
+                runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
+                runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('  fi')
+                runner_lines.append('  ODYSSEUS_INPAINT_BIN="$(command -v odysseus-mlx-inpaint 2>/dev/null || command -v mlx-lama-serve 2>/dev/null || true)"')
+                runner_lines.append('  if [ -n "$ODYSSEUS_INPAINT_BIN" ]; then')
+                runner_lines.append('    ODYSSEUS_INPAINT_DIR="$(dirname "$ODYSSEUS_INPAINT_BIN")"')
+                runner_lines.append('    if [ ! -f "$ODYSSEUS_INPAINT_DIR/mlx.metallib" ] && [ ! -f "$ODYSSEUS_INPAINT_DIR/default.metallib" ]; then')
+                runner_lines.append('      echo "ERROR: LaMa / MI-GAN MLX serving found the Swift runner, but mlx.metallib/default.metallib is missing next to it."')
+                runner_lines.append('      echo "Run the LaMa / MI-GAN MLX image editing dependency install again; it copies mlx.metallib from the launch Python MLX package."')
+                runner_lines.append('      ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('    fi')
+                runner_lines.append('  fi')
+                runner_lines.append('elif ! command -v mflux-generate >/dev/null 2>&1 && ! command -v mflux-generate-qwen >/dev/null 2>&1; then')
+                runner_lines.append('  echo "ERROR: mflux-compatible MLX image serving requires mflux-generate or mflux-generate-qwen in PATH for launch Python: $ODYSSEUS_MLX_IMAGE_CMD_PY."')
+                runner_lines.append('  echo "Install with: $ODYSSEUS_MLX_IMAGE_CMD_PY -m pip install -U mflux fastapi uvicorn python-multipart"')
+                runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
+                runner_lines.append('fi')
             elif "scripts/diffusion_server.py" in req.cmd or ".diffusion_server.py" in req.cmd:
                 runner_lines.append('export PATH="$HOME/.local/bin:$PATH"')
-                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$(python3 -c "import torch, diffusers" 2>&1)"; then')
-                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + diffusers."')
+                runner_lines.append(f"ODYSSEUS_SERVE_CMD='{_bash_squote(req.cmd)}'")
+                runner_lines.append('ODYSSEUS_DIFFUSION_CMD_PY="$(python3 - "$ODYSSEUS_SERVE_CMD" <<\'PY\'')
+                runner_lines.append('import shlex, sys')
+                runner_lines.append('parts = shlex.split(sys.argv[1])')
+                runner_lines.append('py = "python3"')
+                runner_lines.append('for part in parts:')
+                runner_lines.append('    if part.endswith("/bin/python") or part.endswith("/bin/python3") or "/bin/python3." in part:')
+                runner_lines.append('        py = part')
+                runner_lines.append('        break')
+                runner_lines.append('print(py)')
+                runner_lines.append('PY')
+                runner_lines.append(')"')
+                runner_lines.append('if ! ODYSSEUS_DIFFUSION_IMPORT_ERROR="$("$ODYSSEUS_DIFFUSION_CMD_PY" -c "import torch, torchvision, diffusers" 2>&1)"; then')
+                runner_lines.append('  echo "ERROR: Diffusion serving requires PyTorch + Torchvision + diffusers in the launch Python: $ODYSSEUS_DIFFUSION_CMD_PY."')
                 runner_lines.append('  printf "%s\\n" "$ODYSSEUS_DIFFUSION_IMPORT_ERROR"')
                 runner_lines.append('  ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('fi')
@@ -2597,16 +2819,19 @@ def setup_cookbook_routes() -> APIRouter:
                 stderr = (await proc.stderr.read()).decode(errors="replace")
                 return {"ok": False, "error": stderr, "session_id": session_id}
 
-        # Auto-register a model endpoint so the served model shows up in the model
-        # picker with no manual /setup step. Diffusion models get an image
-        # endpoint; any other real model serve (i.e. not a pip-install task) gets
-        # a local LLM endpoint pointed at its /v1.
-        endpoint_id = None
-        is_diffusion = "diffusion_server.py" in req.cmd
-        if is_diffusion:
-            endpoint_id = _auto_register_image_endpoint(req, remote, endpoint_owner)
+        # Register through the sole normalized provider authority. The model
+        # server URL remains connection metadata; chats receive only stable
+        # connection/route identities and execute through the managed engine.
+        provider_connection_id = None
+        is_image_provider = "diffusion_server.py" in req.cmd or "mlx_image_server.py" in req.cmd
+        if is_image_provider:
+            provider_connection_id = await _auto_register_image_provider(
+                request, req, remote, session_id
+            )
         elif not is_pip_install:
-            endpoint_id = _auto_register_llm_endpoint(req, remote, endpoint_owner)
+            provider_connection_id = await _auto_register_llm_provider(
+                request, req, remote, session_id
+            )
 
         # Crash watchdog: the auto-register above writes the endpoint row
         # IMMEDIATELY (before the server has even bound its port) so the
@@ -2619,14 +2844,14 @@ def setup_cookbook_routes() -> APIRouter:
         # if N != 0 within the watch window, delete the endpoint we just
         # created. Skipped for diffusion (different image-endpoint cleanup
         # path) and pip-install tasks (no endpoint to drop).
-        if endpoint_id and not is_diffusion and not is_pip_install:
+        if provider_connection_id and not is_image_provider and not is_pip_install:
             asyncio.create_task(_serve_crash_watchdog(
-                endpoint_id=endpoint_id,
+                connection_id=provider_connection_id,
                 session_id=session_id,
                 remote=remote,
                 ssh_port=req.ssh_port,
                 is_windows=is_windows,
-                owner=endpoint_owner,
+                owner=provider_owner,
             ))
 
         # Log to assistant
@@ -2644,7 +2869,7 @@ def setup_cookbook_routes() -> APIRouter:
             pass
 
         return {"ok": True, "session_id": session_id, "remote": remote or "local",
-                "endpoint_id": endpoint_id}
+                "provider_connection_id": provider_connection_id}
 
     # ── Server setup (install deps on remote) ──
 
@@ -3667,7 +3892,7 @@ def setup_cookbook_routes() -> APIRouter:
                     "sshPort": sport,
                     "platform": "linux",
                     "_serveReady": False,
-                    "_endpointAdded": False,
+                    "_providerConnected": False,
                     "_adoptedExternally": True,
                 })
                 known_sids.add(sid)
@@ -4213,7 +4438,7 @@ def setup_cookbook_routes() -> APIRouter:
                 # Capture 500 lines (was 50) so a Python traceback survives
                 # the post-crash neofetch banner + bash prompt that otherwise
                 # fills the visible tail. Without this, output_tail ends up
-                # as just "Locale: C / Ubuntu_Odysseus ❯" and the agent
+                # as just "Locale: C / Ubuntu_Open Clank ❯" and the agent
                 # can't diagnose the actual error.
                 capture_cmd = ssh_base + [remote, _remote_tmux_command("capture-pane", "-t", session_id, "-p", "-S", "-500")]
             elif IS_WINDOWS:

@@ -161,3 +161,38 @@ test("remaps fallback oauth model urls to the enterprise host", async () => {
   expect(models.claude.api.url).toBe("https://copilot-api.ghe.example.com")
   expect(models.claude.api.npm).toBe("@ai-sdk/github-copilot")
 })
+
+test("Copilot hooks recognize normalized managed connection IDs", async () => {
+  const hooks = await CopilotAuthPlugin({
+    client: {} as never,
+    project: {} as never,
+    directory: "",
+    worktree: "",
+    experimental_workspace: { register() {} },
+    serverUrl: new URL("https://example.com"),
+    $: {} as never,
+  })
+  const output = {
+    temperature: 0,
+    topP: 1,
+    topK: 0,
+    maxOutputTokens: 8192,
+    options: {},
+  }
+  await hooks["chat.params"]!(
+    {
+      model: {
+        providerID: "connection-123",
+        api: { id: "gpt-5.6", npm: "@ai-sdk/github-copilot" },
+      },
+      provider: {
+        options: {
+          _openclankFamilyID: "github-copilot",
+          _openclankAdapterID: "copilot-chat",
+        },
+      },
+    } as never,
+    output,
+  )
+  expect(output.maxOutputTokens).toBeUndefined()
+})

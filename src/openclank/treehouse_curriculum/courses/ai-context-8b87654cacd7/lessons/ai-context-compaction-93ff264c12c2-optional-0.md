@@ -1,0 +1,1 @@
+Goal: CSV import without network access. Parser A failed on a comma inside a quoted field; do not retry it without a relevant change. Exact input is in quoted.csv. Next: inspect parser B against that fixture. Retrieve the fixture before claiming a pass.

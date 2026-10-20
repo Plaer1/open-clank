@@ -1,0 +1,2066 @@
+{
+  "schema": "openclank.mimo-runtime-delta-ledger.v1",
+  "source": {
+    "path_prefix": "packages/mimo-code",
+    "command": "git status --porcelain=v1 --untracked-files=all -- packages/mimo-code",
+    "captured_on": "2026-08-16",
+    "baseline_sha256": "e1b162a4468d4fcef2903a58bd830f9161a736243b54c5f82f14e2f6ea6f3936",
+    "tracked_modified": 101,
+    "untracked": 36,
+    "total": 137
+  },
+  "rows": [
+    {
+      "path": "packages/mimo-code/bun.lock",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/local-install.sh",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/package.json",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/script/build.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/script/generate.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/acp/agent.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/auth/index.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/session.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/tui/app.tsx",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/tui/context/sync.tsx",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/tui/feature-plugins/sidebar/goal.tsx",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/tui/routes/session/permission.tsx",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/upgrade.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/control-plane/workspace.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/flag/flag.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/format/index.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/index.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/installation/index.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/mcp/index.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/authored-ingest.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/compaction-capture.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/frankenmemory.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/mcp-client.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/service.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/memory/session-scope.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/patch/index.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/permission/index.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/plugin/codex.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/plugin/github-copilot/copilot.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/plugin/mimo.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/plugin/xai.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/provider/auth.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/provider/provider.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/server/middleware.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/server/routes/instance/bash-interactive.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/server/routes/instance/permission.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/server/routes/instance/session.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/server/server.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/goal.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/llm.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/processor.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/prompt.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/skill/discovery.ts",
+      "git_state": "modified",
+      "category": "skills",
+      "future_owner": "host_service",
+      "behavior": "skill discovery/trust/catalog behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns trust/catalog; retain engine discovery as input",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/skill/index.ts",
+      "git_state": "modified",
+      "category": "skills",
+      "future_owner": "host_service",
+      "behavior": "skill discovery/trust/catalog behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns trust/catalog; retain engine discovery as input",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/storage/schema.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/apply_patch.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/bash-interactive.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/bash.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/bash_token_efficient_pipeline.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/change-directory.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/edit.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/external-directory.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/glob.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/grep.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/history.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/lsp.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/multiedit.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/notebook-edit.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/read-state.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/read.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/registry.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/skill.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/tool.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/truncate.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/view-image.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/write.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/fake/provider.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/fixture/skills/index.json",
+      "git_state": "modified",
+      "category": "skills",
+      "future_owner": "host_service",
+      "behavior": "skill discovery/trust/catalog behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns trust/catalog; retain engine discovery as input",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/memory/authored-ingest.test.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/memory/session-scope.test.ts",
+      "git_state": "modified",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/permission/next.test.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/permission/skip-all-timeout.test.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/permission/skip-all.test.ts",
+      "git_state": "modified",
+      "category": "permissions_interactive_terminal",
+      "future_owner": "host_service",
+      "behavior": "permission and interactive terminal behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "route authority through host supervisor; terminal behavior remains bounded/deferred",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/plugin/github-copilot-models.test.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/plugin/mimo.test.ts",
+      "git_state": "modified",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/server/session-actions.test.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/session/goal.test.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/session/llm-system-prompt.test.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/session/snapshot-tool-race.test.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/session/system.test.ts",
+      "git_state": "modified",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/skill/discovery.test.ts",
+      "git_state": "modified",
+      "category": "skills",
+      "future_owner": "host_service",
+      "behavior": "skill discovery/trust/catalog behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns trust/catalog; retain engine discovery as input",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/skill/skill.test.ts",
+      "git_state": "modified",
+      "category": "skills",
+      "future_owner": "host_service",
+      "behavior": "skill discovery/trust/catalog behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns trust/catalog; retain engine discovery as input",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/apply_patch.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/bash.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/bash_token_efficient_pipeline.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/edit.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/glob.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/grep.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/read.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/skill.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/tool-define.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/truncation.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/view-image.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/write.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/plugin/src/tui.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/script/src/index.ts",
+      "git_state": "modified",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/sdk/js/src/v2/client.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/sdk/js/src/v2/gen/sdk.gen.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/sdk/js/src/v2/gen/types.gen.ts",
+      "git_state": "modified",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/shared/src/filesystem.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/shared/test/filesystem/filesystem.test.ts",
+      "git_state": "modified",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/openclank-vendor.json",
+      "git_state": "untracked",
+      "category": "build_provenance_package",
+      "future_owner": "retained_engine_driver",
+      "behavior": "build/provenance/package behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain provenance inputs; retire ACP-only entry assumptions after direct-driver parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/migration/20260728184500_goal_lifecycle/migration.sql",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/acp/managed-operations.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/acp/managed-provider.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/acp/openclank-protocol.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/acp/provider-control.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/provider/account-selection.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/goal-state.ts",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/goal-store.ts",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/session/goal.sql.ts",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/file-contract.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/manage-files.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/project-policy.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/tool/shell-containment.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/util/security-redact.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "runtime/TUI/session behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "retain as driver/reference until semantic parity; redact independently",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/acp/managed-operations.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/acp/managed-provider.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/acp/model-metadata.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/acp/openclank-protocol.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/auth/pool.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/memory/frankenmemory-live.test.ts",
+      "git_state": "untracked",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/memory/mcp-client.test.ts",
+      "git_state": "untracked",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/memory/provenance-dedup.test.ts",
+      "git_state": "untracked",
+      "category": "memory",
+      "future_owner": "host_service",
+      "behavior": "memory scope/trust/storage behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "host owns scope/storage; retain engine adapter for compatibility",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/provider/account-selection.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/provider/managed-adapters.test.ts",
+      "git_state": "untracked",
+      "category": "managed_acp_provider_auth",
+      "future_owner": "retained_engine_driver",
+      "behavior": "provider/credential and managed-protocol behavior",
+      "owning_slice": "S03",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "preserve provider code as rollback driver; retire ACP transport after parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/server/session-goal.test.ts",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/session/goal-state.test.ts",
+      "git_state": "untracked",
+      "category": "goal_session_api_sdk",
+      "future_owner": "host_service",
+      "behavior": "goal/session/API/SDK behavior",
+      "owning_slice": "S05",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "move canonical durability to host; retain generated compatibility until parity",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/file-contract.test.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/manage-files.test.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/tool/multiedit.test.ts",
+      "git_state": "untracked",
+      "category": "files_tools_shell",
+      "future_owner": "host_service",
+      "behavior": "file/tool/shell behavior",
+      "owning_slice": "S04",
+      "dependencies": [
+        "S00 neutral supervisor contract",
+        "retained-engine parity fixtures"
+      ],
+      "retirement_action": "disable vendor authority; execute side effects through host broker",
+      "current_tests": [],
+      "evidence": "S00 research baseline 2026-08-16; scoped vendor snapshot"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/openclank-runtime/protocol.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "direct Open Clank driver wire validation",
+      "owning_slice": "S03",
+      "dependencies": [
+        "Rust driver wire validator",
+        "host authority and callback contract"
+      ],
+      "retirement_action": "retain as the engine-side direct-driver protocol; do not route through ACP",
+      "current_tests": ["packages/mimo-code/packages/opencode/test/openclank-runtime/protocol.test.ts"],
+      "evidence": "S03 implementation 2026-08-16; bun test and bun typecheck passed"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/openclank-runtime/protocol.test.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "direct driver wire regression corpus",
+      "owning_slice": "S03",
+      "dependencies": [
+        "direct Open Clank driver protocol"
+      ],
+      "retirement_action": "retain as conformance evidence; never replace with Kimi payloads",
+      "current_tests": ["bun test test/openclank-runtime/protocol.test.ts"],
+      "evidence": "S03 implementation 2026-08-16; 3 tests passed"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/cli/cmd/openclank-driver.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "direct Open Clank driver lifecycle/control loop",
+      "owning_slice": "S03",
+      "dependencies": [
+        "direct Open Clank driver protocol",
+        "host authority and callback contract"
+      ],
+      "retirement_action": "retain as the engine-side direct-driver entrypoint; do not route through ACP",
+      "current_tests": ["packages/mimo-code/packages/opencode/test/openclank-runtime/driver.test.ts"],
+      "evidence": "S03 implementation 2026-08-16; inherited-fd hello/activation/shutdown smoke passed"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/openclank-runtime/driver.test.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "direct driver lifecycle identity and readiness tests",
+      "owning_slice": "S03",
+      "dependencies": [
+        "direct Open Clank driver protocol"
+      ],
+      "retirement_action": "retain as conformance evidence; never replace with Kimi payloads",
+      "current_tests": ["bun test test/openclank-runtime/protocol.test.ts test/openclank-runtime/driver.test.ts"],
+      "evidence": "S03 implementation 2026-08-16; 2 lifecycle tests passed"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/src/openclank-runtime/credential-callback.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "one-shot driver credential callback wire validation",
+      "owning_slice": "S05",
+      "dependencies": [
+        "host credential lease authority",
+        "direct Open Clank driver protocol"
+      ],
+      "retirement_action": "retain as the engine-side callback contract; never expose credentials through ACP/PTY",
+      "current_tests": ["packages/mimo-code/packages/opencode/test/openclank-runtime/credential-callback.test.ts"],
+      "evidence": "S05 bounded contract increment 2026-08-16; Bun tests and typecheck passed"
+    },
+    {
+      "path": "packages/mimo-code/packages/opencode/test/openclank-runtime/credential-callback.test.ts",
+      "git_state": "untracked",
+      "category": "generic_runtime_tui_session",
+      "future_owner": "retained_engine_driver",
+      "behavior": "one-shot credential callback hash and forbidden-field tests",
+      "owning_slice": "S05",
+      "dependencies": [
+        "one-shot driver credential callback contract"
+      ],
+      "retirement_action": "retain as conformance evidence; no credential bytes in fixtures",
+      "current_tests": ["bun test test/openclank-runtime/credential-callback.test.ts"],
+      "evidence": "S05 bounded contract increment 2026-08-16; 2 tests passed"
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+{
+  "id": "batch-041",
+  "group": "graph",
+  "surface": "graph",
+  "entry_count": 13,
+  "character_count": 851,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.edges",
+      "source": "edges",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:35"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.edges.dffa33ca",
+      "source": "Edges",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:80"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.failed.to.parse.bw.output",
+      "source": "Failed to parse bw output",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tools/vault.py:117",
+        "src/tools/vault.py:69"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.gravity.1.anchor.today",
+      "source": "Gravity ∝ 1 / |anchor − today|",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/GalaxyView.tsx:524"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.loading.vault.graph",
+      "source": "Loading vault graph...",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:43"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.no.vault.items.match.value",
+      "source": "No vault items match '{query}'.",
+      "placeholders": [
+        "query"
+      ],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/tools/vault.py:72"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.nodes",
+      "source": "nodes ·",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:35"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.sources",
+      "source": "Sources",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:89",
+        "static/js/documentLibrary.js:2106"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.fuzzy",
+      "source": "Start: ? (fuzzy)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/GalaxyView.tsx:547",
+        "packages/Copal/src/components/views/TimelineView.tsx:780"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.start.value",
+      "source": "Start: {0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/GalaxyView.tsx:548",
+        "packages/Copal/src/components/views/TimelineView.tsx:781"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.today.24345a14",
+      "source": "Today",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/GalaxyView.tsx:371",
+        "packages/Copal/src/components/views/TimelineView.tsx:250",
+        "static/js/calendar.js:1693",
+        "static/js/calendar.js:912",
+        "static/js/document.js:1359",
+        "static/js/document.js:1737",
+        "static/js/document.js:880"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vault.graph",
+      "source": "Vault graph",
+      "placeholders": [],
+      "kind": "jsx-text",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/components/views/VaultGraphView.tsx:33"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vault.index.request.failed",
+      "source": "vault index request failed",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "packages/Copal/src/hooks/useVaultIndex.ts:38"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

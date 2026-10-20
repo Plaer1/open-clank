@@ -1,0 +1,35 @@
+{
+  "id": "batch-029",
+  "group": "docs.openclank-docs-home",
+  "surface": "docs",
+  "entry_count": 2,
+  "character_count": 1597,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-home.body",
+      "source": "# Open Clank Handbook\n\nWelcome. This is the maintained handbook that ships with Open Clank. It is\nread-only: use **Make editable copy** on any page to keep your own notes beside\nit. Updates replace these pages in place and never touch your personal copies.\n\n## Start here\n\n- [[Getting Work Done]] — the shape of a normal session\n- [[Editor]] — documents, Wiki pages, templates and media\n- [[Files and Imps]] — the file tree and managed image projects\n- [[Graph]] — how your documents connect\n\n## Your account and tools\n\n- [[Accounts and Models]] — identity, providers and model choice\n- [[Chat and Workspaces]] — conversations, drafts and context\n- [[Tasks and Continuations]] — turning notes into follow-through\n\n## The rest of the handbook\n\n- [[Memory and Lore]] — what the assistant remembers and how recovery works\n- [[Settings and Themes]] — appearance, panels and preferences\n- [[Recovery]] — history, backups and when things go wrong\n- [[Limits and Platform Support]] — honest capability limits\n- [[Markdown Formatting Demo]] — every rendered element with its source\n\n## Go somewhere in the app\n\nThese links open the real screen. They never close a window you already have\nopen and never start a chat on your behalf.\n\n- Open [Settings](clank://settings) or jump to [appearance](clank://settings/appearance)\n- Browse [Files](clank://files) or open the [Graph](clank://graph)\n- Continue in [Editor](clank://editor) or the [Wiki library](clank://wiki)",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:61"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "docs.openclank-docs-home.title",
+      "source": "Open Clank Handbook",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:61"
+      ],
+      "context": "title",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "id": "batch-028",
+  "group": "docs.openclank-docs-graph",
+  "surface": "docs",
+  "entry_count": 1,
+  "character_count": 1637,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "docs.openclank-docs-graph.body",
+      "source": "# Graph\n\nGraph shows how your documents connect: wikilinks, embeds, tags and typed\nrelations all become edges. Galaxy mode arranges documents and calendar\nevents together; structure mode turns a document's headings and bullets into\na navigable outline.\n\nOpen the [Graph](clank://graph) or jump to [Galaxy](clank://galaxy).\n\n## What you see\n\nNodes are documents. Edges are relationships — a link, an embed, a tag\nmembership or a typed relation from a note's properties. Clicking a node\nopens that document in Editor.\n\n## Filters\n\nThe filter panel narrows by kind, folder, tag and property value. Facets come\nfrom real document metadata, so a value that exists only on a document you\nhave not loaded yet is still discoverable — the facet list pages through the\nserver until it has seen everything.\n\nEmpty selections narrow the result; clearing a filter opens it back up.\n\n## Official documentation in Graph\n\nThis handbook is provisioned documentation. Graph hides provisioned documents\nby default so your personal notes are what you see first. Turn on **Include\nofficial docs** to add them back, or click the `OpenClank` folder chip to\ninclude just that folder.\n\nHiding is based on real identity metadata — the shipped product marker — not\non the folder name. Your own notes in any folder, including `OpenClank/`, are\nnever hidden just because of where they live.\n\n## Structure mode\n\nFor a single document, structure mode lists headings and bullets and lets you\nrearrange sections. It is the right tool for reshaping a long page; [[Editor]]\nis the right tool for rewriting one.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/official_docs.py:439"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    }
+  ]
+}

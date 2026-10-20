@@ -215,6 +215,17 @@ describe("tool.edit", () => {
           )
 
           expect(result.output).toContain("Edit applied successfully")
+          expect(result.metadata.file.contract).toBe("open-clank.file-result/v1")
+          expect(result.metadata.file.operation).toBe("edit")
+          expect(result.metadata.file.page).toEqual({
+            unit: "byte",
+            cursor: 0,
+            next_cursor: null,
+            has_more: false,
+            returned: 16,
+            total: 16,
+          })
+          expect(result.metadata.file.fingerprint).toBe(result.metadata.fingerprint!)
 
           const content = await fs.readFile(filepath, "utf-8")
           expect(content).toBe("new content here")

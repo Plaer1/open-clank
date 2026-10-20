@@ -1,0 +1,19 @@
+{
+  "id": "ko",
+  "name": "한국어",
+  "dir": "ltr",
+  "catalog": "ko",
+  "html_lang": "ko",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 7222,
+    "english_fallback": 2400
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

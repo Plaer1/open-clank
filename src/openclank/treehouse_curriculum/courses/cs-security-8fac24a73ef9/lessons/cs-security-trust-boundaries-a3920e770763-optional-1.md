@@ -1,0 +1,1 @@
+Parsing a valid ID does not authorize using the identified resource.

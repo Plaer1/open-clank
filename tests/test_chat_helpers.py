@@ -343,10 +343,10 @@ def test_clean_thinking_for_save_extracts_thought_tag():
     assert metadata["thinking"] == "internal reasoning"
 
 
-def test_save_assistant_response_preserves_actual_and_requested_model():
+def test_save_assistant_response_incognito_does_not_mutate_session_history():
     sess = _FakeSession("selected-model")
 
-    save_assistant_response(
+    saved_id = save_assistant_response(
         sess,
         session_manager=None,
         session_id="s1",
@@ -355,8 +355,24 @@ def test_save_assistant_response_preserves_actual_and_requested_model():
         incognito=True,
     )
 
-    assert sess.history[-1].metadata["requested_model"] == "selected-model"
-    assert sess.history[-1].metadata["model"] == "actual-model"
+    assert saved_id is None
+    assert sess.history == []
+
+
+def test_add_user_message_incognito_does_not_mutate_session_history():
+    sess = _FakeSession("selected-model")
+    chat_handler = SimpleNamespace(update_session_name_if_needed=lambda *_args, **_kwargs: None)
+    preprocessed = PreprocessedMessage(
+        enhanced_message="secret",
+        user_content="secret",
+        text_for_context="secret",
+        youtube_transcripts=[],
+        attachment_meta=[],
+    )
+
+    chat_helpers.add_user_message(sess, chat_handler, preprocessed, incognito=True)
+
+    assert sess.history == []
 
 
 def test_save_assistant_response_builds_valid_reference_layout():
@@ -364,12 +380,12 @@ def test_save_assistant_response_builds_valid_reference_layout():
 
     save_assistant_response(
         sess,
-        session_manager=None,
+        session_manager=SimpleNamespace(save_sessions=lambda: None),
         session_id="s1",
         full_response="<think>reason</think>Answer U0001f600",
         last_metrics={},
         tool_events=[{"round": 1, "tool": "read", "output": "ok"}],
-        incognito=True,
+        incognito=False,
     )
 
     message = sess.history[-1]
@@ -382,12 +398,12 @@ def test_transcript_layout_rejects_hash_range_and_tool_tampering():
     sess = _FakeSession()
     save_assistant_response(
         sess,
-        session_manager=None,
+        session_manager=SimpleNamespace(save_sessions=lambda: None),
         session_id="s1",
         full_response="answer",
         last_metrics={},
         tool_events=[{"id": "call-1", "round": 1, "tool": "read"}],
-        incognito=True,
+        incognito=False,
     )
     message = sess.history[-1]
 
@@ -420,28 +436,16 @@ def test_spinoff_detected_from_chatmessage_history():
     assert _session_is_research_spinoff(sess) is True
 
 
-def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch):
-    import src.llm_core as llm_core
-    import src.task_endpoint as task_endpoint
+def test_auto_name_session_uses_managed_utility_route(monkeypatch):
+    from src.openclank import modality_facade
 
-    resolver_calls = []
     llm_calls = []
 
-    def fake_resolve_task_endpoint(
-        fallback_url=None,
-        fallback_model=None,
-        fallback_headers=None,
-        owner=None,
-    ):
-        resolver_calls.append((fallback_url, fallback_model, fallback_headers, owner))
-        return fallback_url, fallback_model, fallback_headers
-
-    async def fake_llm_call(url, model, messages, **kwargs):
-        llm_calls.append((url, model, messages, kwargs))
+    async def fake_complete_text(**kwargs):
+        llm_calls.append(kwargs)
         return "Focused Fix"
 
-    monkeypatch.setattr(task_endpoint, "resolve_task_endpoint", fake_resolve_task_endpoint)
-    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+    monkeypatch.setattr(modality_facade, "complete_text", fake_complete_text)
 
     session_headers = {"Authorization": "Bearer session"}
     sess = SimpleNamespace(
@@ -450,6 +454,7 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
         endpoint_url="http://session.example/v1/chat/completions",
         model="session-model",
         headers=session_headers,
+        mimo_state={"last_root_operation_id": "root-turn-1"},
         history=[SimpleNamespace(role="user", content="Please fix the endpoint fallback bug.")],
     )
     updates = []
@@ -459,15 +464,12 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
 
     asyncio.run(auto_name_session(session_manager, sess))
 
-    assert resolver_calls == [(
-        "http://session.example/v1/chat/completions",
-        "session-model",
-        session_headers,
-        "alice",
-    )]
-    assert llm_calls[0][0] == "http://session.example/v1/chat/completions"
-    assert llm_calls[0][1] == "session-model"
-    assert llm_calls[0][3]["headers"] == session_headers
+    assert llm_calls[0]["owner"] == "alice"
+    assert llm_calls[0]["purpose"] == "utility"
+    assert llm_calls[0]["root_operation_id"] == "root-turn-1"
+    assert llm_calls[0]["idempotency_key"] == "auto-name-session-session-1"
+    assert "endpoint_url" not in llm_calls[0]
+    assert "headers" not in llm_calls[0]
     assert updates == [("session-1", "Focused Fix")]
 
 
@@ -497,11 +499,19 @@ def test_empty_or_missing_history():
     assert _session_is_research_spinoff(SimpleNamespace()) is False
 
 
-async def _build_context_owner_probe(monkeypatch, request_state):
+async def _build_context_owner_probe(
+    monkeypatch,
+    request_state,
+    *,
+    prefs=None,
+    incognito=True,
+    message="hello",
+):
     captured = {
         "prefs_owner": None,
         "preface_owner": None,
         "compact_owner": None,
+        "preface_use_memory": None,
     }
 
     async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
@@ -526,13 +536,18 @@ async def _build_context_owner_probe(monkeypatch, request_state):
 
     def fake_load_prefs(owner):
         captured["prefs_owner"] = owner
-        return {"memory_enabled": True, "skills_enabled": True}
+        return dict(
+            prefs
+            if prefs is not None
+            else {"memory_enabled": True, "skills_enabled": True}
+        )
 
     def fake_build_context_preface(**kwargs):
         captured["preface_owner"] = kwargs["owner"]
+        captured["preface_use_memory"] = kwargs["use_memory"]
         return [], [], []
 
-    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
+    async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None, **kwargs):
         captured["compact_owner"] = owner
         return messages, 8192, False
 
@@ -540,8 +555,6 @@ async def _build_context_owner_probe(monkeypatch, request_state):
     monkeypatch.setattr(chat_helpers, "extract_preset", fake_extract_preset)
     monkeypatch.setattr(chat_helpers, "add_user_message", fake_add_user_message)
     monkeypatch.setattr(chat_helpers, "load_prefs_for_user", fake_load_prefs)
-    monkeypatch.setattr(chat_helpers, "_normalize_model_id_from_cache", lambda sess: None)
-    monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
 
@@ -569,9 +582,9 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         request=request,
         chat_handler=SimpleNamespace(),
         chat_processor=SimpleNamespace(build_context_preface=fake_build_context_preface),
-        message="hello",
+        message=message,
         session_id="session-1",
-        incognito=True,
+        incognito=incognito,
     )
 
     return ctx, captured
@@ -593,6 +606,7 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         "prefs_owner": "alice",
         "preface_owner": "alice",
         "compact_owner": "alice",
+        "preface_use_memory": False,
     }
 
 
@@ -611,4 +625,33 @@ async def test_build_chat_context_keeps_cookie_user_owner_scope(monkeypatch):
         "prefs_owner": "bob",
         "preface_owner": "bob",
         "compact_owner": "bob",
+        "preface_use_memory": False,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (("automatic", True), ("manual", True), ("off", False)),
+)
+async def test_build_chat_context_respects_memory_mode_read_gate(
+    monkeypatch,
+    mode,
+    expected,
+):
+    _ctx, captured = await _build_context_owner_probe(
+        monkeypatch,
+        {
+            "api_token": False,
+            "current_user": "alice",
+        },
+        prefs={
+            "memory_enabled": True,
+            "skills_enabled": True,
+            "memory_mode": mode,
+        },
+        incognito=False,
+        message="Please use my saved project details to plan the next milestone.",
+    )
+
+    assert captured["preface_use_memory"] is expected

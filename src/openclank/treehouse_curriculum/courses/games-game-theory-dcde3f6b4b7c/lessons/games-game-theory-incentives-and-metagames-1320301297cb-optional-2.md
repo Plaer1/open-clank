@@ -1,0 +1,1 @@
+A vote aggregates preferences rather than maximizing a single player's payoff. With three voters ranking A>B>C, B>C>A and C>A>B, pairwise majority chooses A over B, B over C and C over A. Verify all three comparisons. This original cycle illustrates why the aggregation rule matters; it does not establish every voting impossibility theorem.

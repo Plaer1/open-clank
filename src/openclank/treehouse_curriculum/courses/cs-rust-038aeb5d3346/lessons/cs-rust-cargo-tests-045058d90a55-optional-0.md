@@ -1,0 +1,1 @@
+Use assert_eq for both cases and distinguish ordinary addition from overflow handling; disclose whether tests ran.

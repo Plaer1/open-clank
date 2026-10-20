@@ -1,0 +1,1 @@
+An assertion only about the final answer is not a loop invariant.

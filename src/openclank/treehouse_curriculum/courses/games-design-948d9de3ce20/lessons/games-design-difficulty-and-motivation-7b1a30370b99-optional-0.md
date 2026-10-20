@@ -1,0 +1,1 @@
+Each change targets a different demand and preserves a stated learning or play objective.

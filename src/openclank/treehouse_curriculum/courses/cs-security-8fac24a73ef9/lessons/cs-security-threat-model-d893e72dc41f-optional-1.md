@@ -1,0 +1,1 @@
+A control name without its enforcement point leaves the model incomplete.

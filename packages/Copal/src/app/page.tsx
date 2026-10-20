@@ -13,7 +13,6 @@ import { NotesView } from '@/components/views/NotesView';
 import { VaultGraphView } from '@/components/views/VaultGraphView';
 import { MindMapView } from '@/components/views/MindMapView';
 import { BasesView } from '@/components/views/BasesView';
-import { WikiView } from '@/components/views/WikiView';
 import { TreehouseView } from '@/components/views/TreehouseView';
 import { TrackTogglePanel } from '@/components/views/TrackTogglePanel';
 import { TaskDetailSheet } from '@/components/views/TaskDetailSheet';
@@ -22,7 +21,6 @@ import { FloatingTodosPanel } from '@/components/views/FloatingTodosPanel';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import {
-  Blocks,
   Download,
   Calendar,
   Sparkles,
@@ -38,7 +36,7 @@ import {
 import { resolveTracks } from '@/lib/hammock';
 import { readNoteJumpFromHash } from '@/lib/noteNavigation';
 
-const TAB_IDS = new Set(['galaxy', 'timeline', 'calendar', 'notes', 'graph', 'mind', 'bases', 'wiki', 'treehouse', 'todo']);
+const TAB_IDS = new Set(['galaxy', 'timeline', 'calendar', 'notes', 'graph', 'mind', 'bases', 'treehouse', 'todo']);
 const PLANNING_TAB_IDS = new Set(['galaxy', 'timeline', 'calendar', 'todo']);
 
 export default function Home() {
@@ -56,7 +54,8 @@ export default function Home() {
     function syncHash() {
       const params = new URLSearchParams(window.location.hash.replace(/^#/, ''));
       const tab = params.get('tab');
-      if (tab && TAB_IDS.has(tab)) setActiveTab(tab);
+      if (tab === 'wiki') { window.location.assign('/wiki' + window.location.search); return; }
+      else if (tab && TAB_IDS.has(tab)) setActiveTab(tab);
       if (readNoteJumpFromHash(window.location.hash)) setActiveTab('notes');
     }
     syncHash();
@@ -203,6 +202,7 @@ export default function Home() {
           {/* Right: views */}
           <section className="flex flex-col gap-2 min-h-0 lg:overflow-hidden flex-1 lg:pl-2">
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col gap-3">
+              <a href="/wiki" className="text-sm text-cyan-300">Open Wiki page workspace ↗</a>
               <TabsList className="w-full max-w-full justify-start overflow-x-auto h-auto flex flex-nowrap bg-[#171a21] border border-slate-800 lg:w-auto">
                 <TabsTrigger
                   value="galaxy"
@@ -252,13 +252,6 @@ export default function Home() {
                 >
                   <Table2 className="w-3.5 h-3.5 mr-1.5" />
                   Bases
-                </TabsTrigger>
-                <TabsTrigger
-                  value="wiki"
-                  className="data-[state=active]:bg-slate-800 data-[state=active]:text-cyan-300"
-                >
-                  <Blocks className="w-3.5 h-3.5 mr-1.5" />
-                  Wiki
                 </TabsTrigger>
                 <TabsTrigger
                   value="treehouse"
@@ -323,13 +316,6 @@ export default function Home() {
                 className="flex-1 min-h-[560px] lg:min-h-0 overflow-hidden data-[state=inactive]:hidden"
               >
                 <BasesView />
-              </TabsContent>
-
-              <TabsContent
-                value="wiki"
-                className="flex-1 min-h-[560px] lg:min-h-0 overflow-hidden data-[state=inactive]:hidden"
-              >
-                <WikiView />
               </TabsContent>
 
               <TabsContent

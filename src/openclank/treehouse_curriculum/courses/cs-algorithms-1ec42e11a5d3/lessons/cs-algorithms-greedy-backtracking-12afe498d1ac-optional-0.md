@@ -1,0 +1,1 @@
+Use remaining sum/current coins; prune negative remaining sum for positive coins; identify the better two-coin solution.

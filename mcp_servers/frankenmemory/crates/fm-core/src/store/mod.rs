@@ -1,5 +1,11 @@
 pub mod graph;
 pub mod sqlite;
+pub mod code_evidence;
+pub mod code_query;
+pub mod code_visual;
+pub(crate) mod code_partitioned;
+pub(crate) mod code_partition_validation;
+pub(crate) mod code_cache_lifecycle;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

@@ -1,0 +1,1 @@
+Save an owned HTML/CSS page and open it in a local browser. Record browser/version, keyboard path, narrow/wide layouts, and a zoom/reflow observation. Repair a barrier, repeat the affected check, and retain the source plus observations. A predicted audit explains a concept; an actual inspection provides additional practical evidence.

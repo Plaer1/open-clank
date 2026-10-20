@@ -1,0 +1,1 @@
+If H predicts halt D loops; if predicts loop D halts; limited program classes/instances may be decidable.

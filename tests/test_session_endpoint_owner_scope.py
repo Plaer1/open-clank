@@ -1,65 +1,125 @@
+"""Session model changes persist only normalized, secret-free route identity."""
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+
 from core.database import Session as DbSession
-
-# Import the route helper during collection so sibling session tests that use
-# partial import stubs do not become the first loader of core.session_manager.
 import routes.session_routes as session_routes
-from routes.session_routes import _reject_raw_endpoint_url_for_non_admin
+from src.openclank.chat_routing import MANAGED_ENGINE_PUBLIC_URL, ChatRouteUnavailable
 
 
-def _request(user, *, admin=False):
-    auth_manager = SimpleNamespace(is_admin=lambda username: bool(admin))
+def _route():
     return SimpleNamespace(
-        state=SimpleNamespace(current_user=user),
+        provider_model_id="model-a",
+        model_route_id="pmr-a",
+        provider_grant_id=None,
+        connection_id="pcn-a",
+        public_endpoint_id="pcn-a",
+    )
+
+
+def _request(*, privileges=None):
+    auth_manager = SimpleNamespace(
+        get_privileges=lambda _user: dict(privileges or {}),
+    )
+    return SimpleNamespace(
+        state=SimpleNamespace(current_user="alice"),
         app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
     )
 
 
-def test_non_admin_session_create_rejects_raw_endpoint_url_without_endpoint_id():
-    with pytest.raises(HTTPException) as exc:
-        _reject_raw_endpoint_url_for_non_admin(
-            _request("alice", admin=False),
-            "alice",
-            "",
-            "http://169.254.169.254/latest/meta-data",
-        )
-
-    assert exc.value.status_code == 403
-
-
-def test_admin_and_registered_endpoint_can_use_endpoint_url():
-    _reject_raw_endpoint_url_for_non_admin(
-        _request("alice", admin=False),
-        "alice",
-        "endpoint-id",
-        "http://127.0.0.1:8000/v1/chat/completions",
-    )
-    _reject_raw_endpoint_url_for_non_admin(
-        _request("admin", admin=True),
-        "admin",
-        "",
-        "http://127.0.0.1:8000/v1/chat/completions",
+def _handler(router, path, method):
+    return next(
+        route.endpoint
+        for route in reversed(router.routes)
+        if getattr(route, "path", "") == path
+        and method in getattr(route, "methods", set())
     )
 
 
 @pytest.mark.asyncio
-async def test_existing_session_can_switch_to_virtual_mimo_endpoint(monkeypatch):
+async def test_new_session_persists_normalized_route_and_no_headers(monkeypatch):
+    class Manager:
+        def __init__(self):
+            self.created = None
+
+        def create_session(self, **kwargs):
+            self.created = kwargs
+            return SimpleNamespace(name=kwargs["name"], headers={})
+
+    manager = Manager()
+    monkeypatch.setattr(session_routes, "effective_user", lambda _request: "alice")
+    monkeypatch.setattr(session_routes, "resolve_chat_route", lambda **_kwargs: _route())
+    monkeypatch.setattr("src.event_bus.fire_event", lambda *_args, **_kwargs: None)
+    create = _handler(session_routes.setup_session_routes(manager, {}), "/api/session", "POST")
+
+    result = await create(
+        _request(),
+        name="Managed chat",
+        endpoint_url="https://attacker.invalid/v1",
+        model="model-a",
+        rag=None,
+        skip_validation=None,
+        incognito=None,
+        api_key="",
+        endpoint_id="pcn-a",
+    )
+
+    assert manager.created["owner"] == "alice"
+    assert manager.created["endpoint_url"] == MANAGED_ENGINE_PUBLIC_URL
+    assert manager.created["endpoint_id"] == "pcn-a"
+    assert manager.created["provider_model_route_id"] == "pmr-a"
+    assert result.endpoint_url == MANAGED_ENGINE_PUBLIC_URL
+    assert result.endpoint_id == "pcn-a"
+
+
+@pytest.mark.asyncio
+async def test_raw_url_without_normalized_route_fails_closed(monkeypatch):
+    monkeypatch.setattr(session_routes, "effective_user", lambda _request: "alice")
+
+    def reject(**_kwargs):
+        raise ChatRouteUnavailable("Choose a provider connection and model")
+
+    monkeypatch.setattr(session_routes, "resolve_chat_route", reject)
+    create = _handler(
+        session_routes.setup_session_routes(SimpleNamespace(), {}),
+        "/api/session",
+        "POST",
+    )
+    with pytest.raises(HTTPException) as rejected:
+        await create(
+            _request(),
+            name="Raw",
+            endpoint_url="http://169.254.169.254/latest/meta-data",
+            model="model-a",
+            rag=None,
+            skip_validation=None,
+            incognito=None,
+            api_key="",
+            endpoint_id="",
+        )
+    assert rejected.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_patch_atomically_publishes_normalized_route(monkeypatch):
     session = SimpleNamespace(
         id="session-1",
         owner="alice",
-        model="old-model",
-        endpoint_url="https://old.example/v1/chat/completions",
-        endpoint_id="old-endpoint",
-        headers={"Authorization": "old"},
+        model="old",
+        endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+        endpoint_id="pcn-old",
+        provider_model_route_id="pmr-old",
+        headers={"Authorization": "stale"},
     )
     persisted = SimpleNamespace(
         model=session.model,
         endpoint_url=session.endpoint_url,
         endpoint_id=session.endpoint_id,
+        provider_model_route_id=session.provider_model_route_id,
         headers=session.headers,
         updated_at=None,
     )
@@ -73,74 +133,189 @@ async def test_existing_session_can_switch_to_virtual_mimo_endpoint(monkeypatch)
 
     class Db:
         def query(self, model_cls):
-            assert model_cls is DbSession, "virtual MiMo must not query ModelEndpoint"
+            assert model_cls is DbSession
             return Query()
 
         def commit(self):
-            pass
+            return None
 
         def close(self):
-            pass
+            return None
 
-    manager = SimpleNamespace(get_session=lambda sid: session)
-    supervisor = SimpleNamespace(
-        available_models=lambda owner=None: [{"modelId": "xiaomi/mimo-v2.5-pro"}],
-    )
-    auth_manager = SimpleNamespace(
-        is_admin=lambda user: False,
-        get_privileges=lambda user: {},
-    )
-    request = SimpleNamespace(
-        state=SimpleNamespace(current_user="alice"),
-        app=SimpleNamespace(state=SimpleNamespace(
-            auth_manager=auth_manager,
-            mimo_supervisor=supervisor,
-        )),
-    )
-
-    monkeypatch.setattr(session_routes, "SessionLocal", Db)
-    monkeypatch.setattr(session_routes, "effective_user", lambda request: "alice")
-    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda request, sid: None)
-
-    async def prepare_context_mutation(request, sid):
+    async def prepared(_request, _sid):
         return None
 
-    monkeypatch.setattr(session_routes, "_prepare_context_mutation", prepare_context_mutation)
-    router = session_routes.setup_session_routes(manager, {})
-    patch_session = next(
-        route.endpoint
-        for route in reversed(router.routes)
-        if getattr(route, "path", "") == "/api/session/{sid}"
-        and "PATCH" in getattr(route, "methods", set())
+    monkeypatch.setattr(session_routes, "SessionLocal", Db)
+    monkeypatch.setattr(session_routes, "effective_user", lambda _request: "alice")
+    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr(session_routes, "_prepare_context_mutation", prepared)
+    monkeypatch.setattr(session_routes, "resolve_chat_route", lambda **_kwargs: _route())
+    manager = SimpleNamespace(get_session=lambda _sid: session)
+    patch_session = _handler(
+        session_routes.setup_session_routes(manager, {}),
+        "/api/session/{sid}",
+        "PATCH",
     )
 
     result = await patch_session(
-        request,
+        _request(),
         "session-1",
         name=None,
         folder=None,
-        model="xiaomi/mimo-v2.5-pro",
-        endpoint_url="mimo://acp",
-        endpoint_id="mimo",
+        model="model-a",
+        endpoint_url="https://ignored.invalid/v1",
+        endpoint_id="pcn-a",
     )
 
-    assert result["model"] == "xiaomi/mimo-v2.5-pro"
-    assert result["endpoint_url"] == "mimo://acp"
-    assert result["endpoint_id"] == "mimo"
-    assert session.model == persisted.model == "xiaomi/mimo-v2.5-pro"
-    assert session.endpoint_url == persisted.endpoint_url == "mimo://acp"
-    assert session.endpoint_id == persisted.endpoint_id == "mimo"
+    assert result["endpoint_url"] == MANAGED_ENGINE_PUBLIC_URL
+    assert session.endpoint_id == persisted.endpoint_id == "pcn-a"
+    assert session.provider_model_route_id == persisted.provider_model_route_id == "pmr-a"
     assert session.headers == persisted.headers == {}
 
 
-def test_chat_endpoint_recovery_paths_are_owner_scoped():
-    root = Path(__file__).resolve().parents[1]
-    chat_routes = (root / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-    chat_helpers = (root / "routes" / "chat_helpers.py").read_text(encoding="utf-8")
+@pytest.mark.asyncio
+async def test_failed_route_commit_does_not_publish_in_memory_route(monkeypatch):
+    session = SimpleNamespace(
+        id="session-1",
+        owner="alice",
+        model="old",
+        endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+        endpoint_id="pcn-old",
+        provider_model_route_id="pmr-old",
+        headers={},
+    )
+    persisted = SimpleNamespace(
+        model=session.model,
+        endpoint_url=session.endpoint_url,
+        endpoint_id=session.endpoint_id,
+        provider_model_route_id=session.provider_model_route_id,
+        headers={},
+        updated_at=None,
+    )
 
-    assert "def _clear_orphaned_session_endpoint(sess, owner:" in chat_routes
-    assert "def _recover_empty_session_model(sess, session_id: str, owner:" in chat_routes
-    assert 'q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)' in chat_routes
-    assert "resolve_session_auth(sess, session, owner=effective_user(request))" in chat_routes
-    assert "def resolve_session_auth(sess, session_id: str, owner:" in chat_helpers
-    assert "update_q = update_q.filter(DBSession.owner == owner)" in chat_helpers
+    class Query:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return persisted
+
+    class FailingDb:
+        def query(self, model_cls):
+            assert model_cls is DbSession
+            return Query()
+
+        def commit(self):
+            raise RuntimeError("disk full")
+
+        def close(self):
+            return None
+
+    async def prepared(_request, _sid):
+        return None
+
+    monkeypatch.setattr(session_routes, "SessionLocal", FailingDb)
+    monkeypatch.setattr(session_routes, "effective_user", lambda _request: "alice")
+    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr(session_routes, "_prepare_context_mutation", prepared)
+    monkeypatch.setattr(session_routes, "resolve_chat_route", lambda **_kwargs: _route())
+    patch_session = _handler(
+        session_routes.setup_session_routes(
+            SimpleNamespace(get_session=lambda _sid: session),
+            {},
+        ),
+        "/api/session/{sid}",
+        "PATCH",
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        await patch_session(
+            _request(),
+            "session-1",
+            name=None,
+            folder=None,
+            model="model-a",
+            endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+            endpoint_id="pcn-a",
+        )
+
+    assert session.model == "old"
+    assert session.endpoint_id == "pcn-old"
+    assert session.provider_model_route_id == "pmr-old"
+
+
+@pytest.mark.asyncio
+async def test_patch_binds_and_unbinds_stable_workspace_after_validation(monkeypatch):
+    session = SimpleNamespace(id="session-1", owner="alice", workspace_id=None)
+    updates = []
+    preparations = []
+
+    class Manager:
+        def get_session(self, _sid):
+            return session
+
+        def update_session_workspace(self, sid, workspace_id):
+            updates.append((sid, workspace_id))
+            session.workspace_id = workspace_id
+            return True
+
+    async def prepared(_request, sid):
+        preparations.append(sid)
+
+    validated = []
+    monkeypatch.setattr(session_routes, "effective_user", lambda _request: "alice")
+    monkeypatch.setattr(session_routes, "_verify_session_owner", lambda *_args: None)
+    monkeypatch.setattr(session_routes, "_prepare_context_mutation", prepared)
+    monkeypatch.setattr(
+        session_routes,
+        "_validated_session_workspace",
+        lambda _request, owner, workspace_id: validated.append((owner, workspace_id)),
+    )
+    patch_session = _handler(
+        session_routes.setup_session_routes(Manager(), {}),
+        "/api/session/{sid}",
+        "PATCH",
+    )
+
+    bound = await patch_session(
+        _request(),
+        "session-1",
+        name=None,
+        folder=None,
+        model=None,
+        endpoint_url=None,
+        endpoint_id=None,
+        workspace_id="workspace-a",
+    )
+    cleared = await patch_session(
+        _request(),
+        "session-1",
+        name=None,
+        folder=None,
+        model=None,
+        endpoint_url=None,
+        endpoint_id=None,
+        workspace_id="",
+    )
+
+    assert validated == [("alice", "workspace-a")]
+    assert updates == [("session-1", "workspace-a"), ("session-1", None)]
+    assert preparations == ["session-1", "session-1"]
+    assert bound["workspace_id"] == "workspace-a"
+    assert cleared["workspace_id"] is None
+
+
+def test_session_and_chat_sources_have_no_legacy_provider_authority():
+    root = Path(__file__).resolve().parents[1]
+    session_source = (root / "routes" / "session_routes.py").read_text(encoding="utf-8")
+    chat_source = (root / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+    helpers_source = (root / "routes" / "chat_helpers.py").read_text(encoding="utf-8")
+
+    for source in (session_source, chat_source, helpers_source):
+        assert "ModelEndpoint" not in source
+        assert "routes.model_routes" not in source
+        assert "resolve_chat_fallback_candidates" not in source
+    assert "resolve_chat_route(" in session_source
+    assert "resolve_chat_route(" in chat_source
+    assert "def resolve_session_auth(" not in helpers_source
+    assert "def try_fallback_endpoint(" not in helpers_source

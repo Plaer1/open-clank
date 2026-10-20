@@ -1,0 +1,1 @@
+First domains reduce to ABA. Second needs A in a domain containing only B, a contradiction. First grid route (0,0),(1,0),(2,0),(2,1),(2,2),4 moves. Doorway grid straight row2,4 moves. Local tile rules do not prove gameplay reachability; restart/backtracking is a separate policy.

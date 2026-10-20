@@ -1,92 +1,43 @@
-# Acknowledgments
+# Acknowledgments and third-party notices
 
-Odysseus stands on the shoulders of a lot of open-source work. This file
-credits the projects whose code, assets, or designs are included in or
-adapted by this repository, and notes their licenses.
+Open Clank builds on Odysseus and brings together Copal’s document workspace, MiMo Code/opencode agent foundations, and Epic Games’ Lore history technology. We thank the authors of included code and assets, and the projects that informed its design.
 
-If you believe something here is mis-attributed or missing, please open an
-issue — it will be corrected promptly.
+Open Clank is distributed under **AGPL-3.0-or-later**; see [LICENSE](LICENSE). Included components keep their own copyright and license terms. This document does not relicense them or describe the core as MIT/permissive. Full path/pin/version qualifications and asset fingerprints are in [Included component provenance](licenses/BUNDLED-COMPONENTS.md). If a credit is missing or misattributed, please open an issue.
 
----
+## Integrated roots and adapted code
 
-## Adapted / borrowed code
+- **[Odysseus](https://github.com/odysseus-dev/odysseus)** — major inherited application/code lineage, AGPLv3; incorporated base and adaptation scope in the [source-root record](licenses/BUNDLED-COMPONENTS.md#integrated-source-roots).
+- **Copal** — integrated document/knowledge workspace, Editor/Wiki and native storage/shell foundations. Its local source is packages/Copal/ and related Open Clank adapters. No verified public upstream/author or separate package-root license was found; the record retains that qualification rather than inventing a license.
+- **[MiMo Code](https://github.com/XiaomiMiMo/mimo-code) / [opencode](https://github.com/anomalyco/opencode)** — included managed agent/model engine in packages/mimo-code/. MIT, copyright Xiaomi Corporation / MiMo Code 2026 and opencode 2025; [retained license](packages/mimo-code/LICENSE), [historical opencode notice](licenses/opencode-MIT-LICENSE.txt). Open Clank adaptations do not imply upstream parity.
+- **[Lore](https://github.com/EpicGames/lore)** — included storage technology under packages/openclank-history/vendor/lore/, used by the Open Clank History wrapper. MIT, copyright 2026 Epic Games Inc.; [license](packages/openclank-history/vendor/lore/LICENSE) and [nested notices](licenses/BUNDLED-COMPONENTS.md#integrated-source-roots).
+- **[llmfit](https://github.com/AlexsJones/llmfit)**, Alex Jones — Cookbook hardware/model fit adaptations; [MIT notice](licenses/llmfit-MIT-LICENSE.txt).
+- **[Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)**, Alibaba-NLP/Tongyi Lab — research/search pipeline adaptations; [Apache-2.0 notice](licenses/DeepResearch-Apache-2.0.txt).
 
-Portions of this project were adapted from other open-source repositories.
-Their original authors retain copyright over the adapted portions, under the
-licenses noted below.
+## Inspiration and studies
 
-The sources below are under permissive licenses (MIT / Apache-2.0), which permit
-this use as long as their original copyright and license notices are preserved.
-The full license texts are kept in [`licenses/`](licenses/).
+**[AgentsView](https://github.com/kenn-io/agentsview)**, Kenn Software LLC, informed Usage/activity interface layout and workflows. **[llm_intercept](https://github.com/mlech26l/llm_intercept)**, Mathias Lechner, and **[llm.log](https://github.com/lanesket/llm.log)**, lanesket, informed logging design studies. These credits describe the established study/design relationship; current records do not establish a substantial copied-source ledger or shipment of their proxy/telemetry products. Immutable inspected pins and distinctions are in the [study record](licenses/BUNDLED-COMPONENTS.md#adapted-code-and-design-studies).
 
-- **[opencode](https://github.com/anomalyco/opencode)** — open-source AI coding
-  agent (originally [opencode-ai/opencode](https://github.com/opencode-ai/opencode),
-  archived Sep 2025; now maintained at `anomalyco/opencode`). Copyright © the
-  opencode authors. **MIT License.** Adapted for agent-loop / tool-execution
-  patterns and UI concepts.
-- **[llmfit](https://github.com/AlexsJones/llmfit)** by **Alex Jones** — the
-  engine behind the Cookbook's model download / serve / "What Fits?" feature.
-  Copyright © Alex Jones. **MIT License.** Adapted in `services/hwfit/`
-  (hardware detection, quant-aware fit scoring, model catalog),
-  `routes/cookbook_*.py`, `routes/hwfit_routes.py`, `static/js/cookbook*.js`,
-  and `scripts/odysseus-cookbook`.
-- **[Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)** by
-  **Alibaba-NLP / Tongyi Lab** — the multi-step deep-research agent pipeline.
-  Copyright © Alibaba-NLP / Tongyi Lab. **Apache-2.0.** Adapted for Odysseus's
-  Deep Research feature (`services/research/`, `src/research_handler.py`,
-  `routes/research_routes.py`, `services/search/`). Full text in
-  [`licenses/DeepResearch-Apache-2.0.txt`](licenses/DeepResearch-Apache-2.0.txt).
+Open Clank Hexes was inspired by **[Henxels](https://github.com/benquemax/henxels)**. The first-party implementation has no runtime Henxels dependency; its [existing MIT notice](licenses/henxels-MIT-LICENSE.txt) is preserved.
 
----
+## Google artwork
 
-## Bundled via Docker Compose
+**Google** provides [Noto Emoji](https://github.com/googlefonts/noto-emoji) and Emoji Kitchen artwork; **[Xavier Salazar](https://github.com/xsalazar/emoji-kitchen)** provides the Kitchen combination catalogue. Noto **SVG artwork is Apache-2.0**, with its [retained SVG text](static/vendor/google-emoji/noto-svg/SVG-LICENSE). The [separate Noto font OFL text](static/vendor/google-emoji/noto-svg/FONT-OFL-LICENSE) is distinct. Neither license is applied to Google Kitchen mashups. The accepted Google/Xavier Kitchen attribution is retained without inventing a redistribution-license label.
 
-These services are pulled as images by the project's `docker-compose.yml`
-and run alongside Odysseus on `docker compose up`. They are not modified —
-just composed.
+The local pack has 146,983 available Kitchen combinations and 17 recorded upstream 404 exceptions (of 147,000 expected). Noto acquisition records and runtime/sample identities are different counts. See the [artwork record](licenses/BUNDLED-COMPONENTS.md#google-artwork-and-catalogue) for pins, exact counts and local delivery scope.
 
-| Service | Image | Purpose | License |
-|---|---|---|---|
-| [SearXNG](https://github.com/searxng/searxng) | `searxng/searxng:2026.5.31-7159b8aed` (pinned tag; see compose) | Default metasearch backend | AGPL-3.0 |
-| [ChromaDB](https://github.com/chroma-core/chroma) | `chromadb/chroma:latest` | Vector store for memory / RAG | Apache-2.0 |
-| [ntfy](https://github.com/binwiederhier/ntfy) | `binwiederhier/ntfy` | Push notifications (self-hosted reminders) | Apache-2.0 / GPL-2.0 |
+## Editors, spelling, icons and fonts
 
-## Bundled front-end libraries
+- **CodeMirror / Lezer** — selected editor/parser packages and lazy language chunks; [versions and full MIT/dependency notices](licenses/CODEMIRROR-LICENSES.md).
+- **Shiki** and its JavaScript regex/TextMate dependencies, plus **Mermaid** — local highlighting/diagram bundles; [retained frontend notices](licenses/FRONTEND-LICENSES.md).
+- **nspell 2.1.5**, Titus Wormer and contributors, with **dictionary-en 4.0.0 / SCOWL** — [complete spelling and compound dictionary notices](static/js/copal/SPELLING-LICENSES.md). The dictionary is not described as a single MIT work.
+- **Icons** — original shared Open Clank SVG geometry is separate from Lucide assets used in Copal React source; [Lucide ISC / Feather MIT texts](licenses/FRONTEND-LICENSES.md).
+- **Fonts** — Fira Code 6.002, Inter 4.001, Fredoka 2.001, Comic Neue 2.003, OpenDyslexic 0.920 and their authors; [exact variants, copyright and OFL texts](licenses/FONT-NOTICES.md). Liga Comic Mono 0.1.1 credits Comic Mono and Ilya Skriblovsky’s Fira Code ligatures; its combined-font provenance remains unresolved. The file named GohuFont.ttf identifies internally as Untitled1/Unknown 2025, so the inherited Gohu/WTFPL claim is unverified for these bytes. Both files remain present.
 
-Vendored in `static/lib/` and served directly:
+## Other frontend and service dependencies
 
-| Library | Purpose | License |
-|---|---|---|
-| [highlight.js](https://github.com/highlightjs/highlight.js) v11.9.0 | Code syntax highlighting | BSD-3-Clause |
-| [SheetJS / xlsx](https://github.com/SheetJS/sheetjs) (`xlsx.full.min.js`) | Spreadsheet (`.xlsx`) read/write | Apache-2.0 |
-| [docx](https://github.com/dolanmiu/docx) (`docx.umd.min.js`) | Generate `.docx` documents | MIT |
-| [mammoth.js](https://github.com/mwilliamson/mammoth.js) | Convert `.docx` → HTML | BSD-2-Clause |
-| [html2pdf.js](https://github.com/eKoopmans/html2pdf.js) | HTML → PDF export (bundles jsPDF + html2canvas) | MIT |
-| [jsPDF](https://github.com/parallax/jsPDF) (bundled in html2pdf) | PDF generation | MIT |
-| [html2canvas](https://github.com/niklasvh/html2canvas) (bundled in html2pdf) | DOM → canvas rasterization | MIT |
-| [node-qrcode](https://github.com/soldair/node-qrcode) (`qrcode.min.js`) | QR-code rendering (2FA setup) | MIT |
+Bundled SheetJS/xlsx, docx, mammoth.js, html2pdf.js (including jsPDF/html2canvas) and node-qrcode retain their component terms. KaTeX 0.16.22 and optional browser Python/Pyodide 0.27.5 load from CDNs. Mermaid 11.16.1 is local. Historical highlight.js/PDFObject credits are qualified separately; see the [actual load/version/license record and remaining acquisition gaps](licenses/BUNDLED-COMPONENTS.md#other-frontend-bundles-and-runtime-loads).
 
-## Front-end libraries loaded at runtime (CDN)
-
-Referenced from `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` at runtime — not vendored:
-
-| Library | Purpose | License |
-|---|---|---|
-| [KaTeX](https://github.com/KaTeX/KaTeX) 0.16.22 | Math typesetting | MIT |
-| [Mermaid](https://github.com/mermaid-js/mermaid) 11 | Diagrams from text | MIT |
-| [Pyodide](https://github.com/pyodide/pyodide) 0.27.5 | In-browser Python runtime | MPL-2.0 |
-| [PDFObject](https://github.com/pipwerks/PDFObject) 2.1.1 | Inline PDF embedding | MIT |
-
-## Fonts
-
-Bundled in `static/fonts/`:
-
-| Font | License | Author |
-|---|---|---|
-| [Fira Code](https://github.com/tonsky/FiraCode) | SIL Open Font License 1.1 | Nikita Prokopov & contributors |
-| [Inter](https://github.com/rsms/inter) | SIL Open Font License 1.1 | Rasmus Andersson |
-| [GohuFont](https://font.gohu.org/) (`fonts/custom/GohuFont.ttf`) | WTFPL | Hugo Chargois |
-| [OpenDyslexic](https://opendyslexic.org/) (`fonts/OpenDyslexic-{Regular,Bold}.woff2`) | SIL Open Font License 1.1 ([`licenses/OpenDyslexic-OFL.txt`](licenses/OpenDyslexic-OFL.txt)) | Abbie Gonzalez |
+Current Docker Compose files pull SearXNG and ntfy alongside Open Clank; their own licenses apply to those services. Chroma is a historical/compatibility credit and is absent from current Compose/requirements. [Service/dependency scope](licenses/BUNDLED-COMPONENTS.md#services-and-installation-dependencies) distinguishes those services from optional install/runtime dependencies.
 
 ## Python dependencies
 
@@ -105,7 +56,7 @@ Core (`requirements.txt`) and optional (`requirements-optional.txt`):
 | BeautifulSoup4 | MIT |
 | charset-normalizer | MIT |
 | NumPy | BSD-3-Clause |
-| ChromaDB (chromadb-client) | Apache-2.0 |
+| ChromaDB (historical compatibility; absent from current requirements) | Apache-2.0 |
 | fastembed | Apache-2.0 |
 | youtube-transcript-api | MIT |
 | markdown | BSD-3-Clause |
@@ -118,52 +69,30 @@ Core (`requirements.txt`) and optional (`requirements-optional.txt`):
 | qrcode\[pil] | BSD-3-Clause |
 | croniter | MIT |
 | pytest / pytest-asyncio | MIT / Apache-2.0 |
-| duckduckgo-search (optional) | MIT |
+| ddgs (optional, replaces the former duckduckgo-search package name) | MIT |
 | markitdown (optional — Office/EPUB text extraction) | MIT |
 | **PyMuPDF** *(optional — form-filling only)* | **AGPL-3.0** — see note below |
 
-## Companion services (interoperated with, not bundled)
+## Companion services and tools
 
-Odysseus talks to these over the network/API. They are **not** distributed
-with this project; their licenses do not bind this codebase, but they deserve
-credit:
+Open Clank interoperates with or invokes these when configured; this credit does not claim their complete products are bundled:
 
-- [Ollama](https://github.com/ollama/ollama) — local model serving (MIT)
-- [Radicale](https://github.com/Kozea/Radicale) — CardDAV/CalDAV server (GPL-3.0)
-- [Dovecot](https://www.dovecot.org/) — IMAP server
-- [isync / mbsync](https://isync.sourceforge.io/) — IMAP mailbox sync (GPL-2.0)
-- [tmux](https://github.com/tmux/tmux) — terminal multiplexer; Cookbook shells out to it on Linux/macOS for background model downloads and serves (ISC)
-- [OpenSSH](https://www.openssh.com/) (`ssh`, `ssh-keygen`, `ssh-copy-id`) — Cookbook shells out to it to manage remote model servers and provision keys (BSD-style permissive)
-- Model/API providers: Anthropic, OpenAI, Google (Gemini), DuckDuckGo
+- [Ollama](https://github.com/ollama/ollama) — local model serving (MIT).
+- [Radicale](https://github.com/Kozea/Radicale) — CardDAV/CalDAV (GPL-3.0).
+- [Dovecot](https://www.dovecot.org/) — IMAP server.
+- [isync / mbsync](https://isync.sourceforge.io/) — mailbox sync (GPL-2.0).
+- [tmux](https://github.com/tmux/tmux) — terminal multiplexer (ISC).
+- [OpenSSH](https://www.openssh.com/) — remote server/key-management tools (BSD-style terms).
+- Configured model/API providers, including Anthropic, OpenAI, Google and DuckDuckGo.
 
----
+## Optional features and license scope
 
-### License-compatibility notes (for the repo's own LICENSE choice)
-
-The **core ships fully permissive** (MIT-compatible), so the two copyleft
-concerns from earlier are resolved:
-
-- **PDF text extraction** now uses **`pypdf`** (BSD-3-Clause) and **encoding
-  detection** uses **`charset-normalizer`** (MIT). chardet (LGPL-2.1) has been
-  removed entirely.
-- **PyMuPDF (AGPL-3.0)** is no longer a core dependency. It is **optional** and
-  used *only* by the PDF form-filling feature (`src/pdf_forms.py` and the form
-  endpoints in `routes/document_routes.py`), lazy-imported and listed in
-  `requirements-optional.txt`. The MIT core runs without it. If you choose to
-  install it, AGPL's network clause then applies to *that feature* for your
-  deployment (Artifex also sells a commercial PyMuPDF license that lifts this).
-- **`caldav`** (Python lib) is **dual-licensed GPL-3.0-or-later OR Apache-2.0**.
-  Odysseus uses it under **Apache-2.0**, which is permissive and MIT-compatible.
-- **`markitdown`** (Microsoft) is **MIT** and used only as an *optional* dependency for Office/EPUB text
-  extraction (`src/markitdown_runtime.py`), lazy-imported with graceful fallback — the MIT core runs without
-  it. The cloud `az-doc-intel` extra is deliberately **not** installed, keeping extraction fully local.
-
----
+pypdf and charset-normalizer support extraction/encoding; PyMuPDF is optional for PDF forms and has its own AGPL/commercial terms. markitdown is optional for Office/EPUB extraction (MIT); the configured extras are declared in requirements-optional.txt. caldav is dual GPL-3.0-or-later/Apache-2.0. Installing or omitting these does not change Open Clank’s root AGPL license. Earlier prose about an MIT core or copyleft applying only to one feature was incorrect and is withdrawn. The manifests, lockfiles and dependency distributions determine installed versions and their full notices; this table preserves inherited credits, not a complete resolved dependency bill of materials.
 
 ## Thanks to
 
-Most of Odysseus's code was written *with* AI models, not just by a human.
-The project would not exist without them — credit where credit is due:
+The inherited Odysseus acknowledgments thanked these models and contributors.
+We preserve that historical credit:
 
 - **gpt-oss-120b** — the legend that kicked this project off.
 - **Qwen3-235B**

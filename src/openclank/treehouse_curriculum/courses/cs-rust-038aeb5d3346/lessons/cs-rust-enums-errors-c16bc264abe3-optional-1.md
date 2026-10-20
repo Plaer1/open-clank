@@ -1,0 +1,1 @@
+Treating None as zero invents a successful result.

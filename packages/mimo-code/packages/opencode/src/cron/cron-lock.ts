@@ -3,6 +3,7 @@ import { join } from "path"
 import { mkdir, readFile, rename, unlink, writeFile, open } from "fs/promises"
 import { readFileSync } from "fs"
 import { Log } from "@/util"
+import { ensureMimocodeGitignore } from "@/config/gitignore"
 
 const log = Log.create({ service: "cron-lock" })
 
@@ -199,6 +200,11 @@ export const tryAcquireSchedulerLock = (opts?: { dir?: string; lockIdentity?: st
     const path = getLockFilePath(opts?.dir)
     yield* Effect.tryPromise({
       try: () => mkdir(join(path, ".."), { recursive: true }),
+      catch: () => undefined,
+    }).pipe(Effect.orElseSucceed(() => undefined))
+
+    yield* Effect.tryPromise({
+      try: () => ensureMimocodeGitignore(join(path, "..")),
       catch: () => undefined,
     }).pipe(Effect.orElseSucceed(() => undefined))
 

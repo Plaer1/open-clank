@@ -1,0 +1,1 @@
+Without a hit: 1×2 + 0.1×4 = 2.4 credits. The toy saving is 0.9 credits. Real billing can include other charges and accounting rules; use current reported usage and rates rather than treating these exercise numbers as prices.

@@ -9,11 +9,13 @@ import mimetypes
 import shutil
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Mapping, Optional
 from fastapi import HTTPException, UploadFile
 
 from src.upload_limits import format_byte_limit, get_chat_upload_max_bytes
+from services.memory.skill_lifecycle import locked
 
 
 def secure_filename(filename: str) -> str:
@@ -36,8 +38,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+UploadIndexFileSignature = tuple[
+    str,
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[int],
+]
+UploadIndexSignature = tuple[UploadIndexFileSignature, ...]
+
+
 class UploadCleanupSafetyError(RuntimeError):
     """Raised when cleanup cannot prove that destructive work is safe."""
+
+
+class UploadOwnerLifecycleError(RuntimeError):
+    """Raised when an owner lifecycle transition cannot be proven safe."""
 
 # The extension is optional: save_upload builds the id as `{uuid.hex}{ext}`,
 # and a file with no extension (Dockerfile, README, ...) yields a bare 32-hex
@@ -108,6 +125,7 @@ def reserve_upload_references(
     upload_handler: Any,
     owner: Optional[str],
     *values: Any,
+    db: Any = None,
 ) -> Optional[str]:
     """Reserve upload IDs in values before a caller persists references.
 
@@ -118,15 +136,28 @@ def reserve_upload_references(
     if upload_handler is None:
         return None
     upload_ids: set[str] = set()
+    from src.openclank.attachment_inventory import resource_references
+    image_ids = set()
     for value in values:
         upload_ids.update(extract_internal_upload_ids(value))
-    return reserve_upload_ids(upload_handler, owner, upload_ids)
+        image_ids.update(identifier for provider, identifier in resource_references(value) if provider == "image")
+    if image_ids:
+        from src.openclank.files_image_store import FilesImageStore
+        store = FilesImageStore()
+        for identifier in sorted(image_ids):
+            scope = "pending:" + uuid.uuid4().hex if db is not None else "independent"
+            store.claim_reference(owner, identifier, scope)
+            if db is not None:
+                _bind_upload_claim_to_transaction(db, store, identifier, scope)
+    return reserve_upload_ids(upload_handler, owner, upload_ids, db=db)
 
 
 def reserve_upload_ids(
     upload_handler: Any,
     owner: Optional[str],
     upload_ids: Any,
+    *, reference_scope: str = "independent",
+    db: Any = None,
 ) -> Optional[str]:
     """Owner-reserve canonical IDs from a trusted structured reference field."""
     if upload_handler is None:
@@ -138,11 +169,16 @@ def reserve_upload_ids(
     }
     for upload_id in sorted(canonical_ids):
         try:
-            resolved = upload_handler.reserve_upload(
+            scope = reference_scope
+            if reference_scope == "independent" and db is not None:
+                scope = "pending:" + uuid.uuid4().hex
+            resolved = upload_handler.claim_upload_reference(
                 upload_id,
                 owner=owner,
-                allow_admin=False,
+                reference_scope=scope,
             )
+            if resolved and scope.startswith("pending:"):
+                _bind_upload_claim_to_transaction(db, upload_handler, upload_id, scope)
         except Exception:
             resolved = None
         if not resolved:
@@ -150,14 +186,51 @@ def reserve_upload_ids(
     return None
 
 
+def _bind_upload_claim_to_transaction(db, handler, upload_id, scope):
+    """Settle only the outer SQL transaction; savepoints cannot publish refs."""
+    from sqlalchemy import event
+    db.info.setdefault("attachment_pending_claims", []).append((handler, upload_id, scope))
+    if db.info.get("attachment_claim_listeners"):
+        return
+    db.info["attachment_claim_listeners"] = True
+    def committed(session):
+        if session.in_nested_transaction():
+            return
+        for current, identifier, token in session.info.pop("attachment_pending_claims", []):
+            try:
+                current.settle_reference_claim(identifier, token, committed=True)
+            except Exception:
+                logger.warning("Committed attachment claim remains unsettled: %s", identifier, exc_info=True)
+    def rolled_back(session):
+        if session.in_nested_transaction():
+            # Preserve until the outer transaction ends; an interrupted nested
+            # rollback is not evidence that every admitted ref was rolled back.
+            return
+        for current, identifier, token in session.info.pop("attachment_pending_claims", []):
+            try:
+                current.settle_reference_claim(identifier, token, committed=False)
+            except Exception:
+                logger.warning("Rolled-back attachment claim remains unsettled: %s", identifier, exc_info=True)
+    event.listen(db, "after_commit", committed)
+    event.listen(db, "after_rollback", rolled_back)
+
+
 def reserve_message_upload_references(
     upload_handler: Any,
     owner: Optional[str],
     content: Any,
     metadata: Any = None,
+    *, session_id: str | None = None,
 ) -> Optional[str]:
     """Reserve explicit chat references, including structured attachment IDs."""
     upload_ids = extract_internal_upload_ids(content)
+    from src.openclank.attachment_inventory import resource_references
+    image_ids = {identifier for provider, identifier in resource_references([content, metadata]) if provider == "image"}
+    if image_ids:
+        from src.openclank.files_image_store import FilesImageStore
+        store = FilesImageStore()
+        for identifier in sorted(image_ids):
+            store.claim_reference(owner, identifier, f"chat:{session_id}" if session_id else "independent")
     if metadata not in (None, ""):
         if isinstance(metadata, str):
             metadata = json.loads(metadata)
@@ -171,7 +244,7 @@ def reserve_message_upload_references(
             for ref in attachment_refs_from_metadata(metadata)
             if ref.get("attachment_id")
         )
-    return reserve_upload_ids(upload_handler, owner, upload_ids)
+    return reserve_upload_ids(upload_handler, owner, upload_ids, reference_scope=f"chat:{session_id}" if session_id else "independent")
 
 
 def _build_upload_id(safe_filename: str) -> str:
@@ -221,13 +294,10 @@ class UploadHandler:
         self._upload_rate_lock = threading.Lock()
         self._upload_rate_counter = 0
         self._upload_rate_max_entries = 1000
-        # Serialise the read-modify-write of uploads.json within one
-        # Python process. Scope: single FastAPI worker (the default
-        # uvicorn deployment). Cross-process / multi-worker deployments
-        # need an additional file-level lock (flock) or a database;
-        # the atomic-rename write below keeps on-disk state consistent
-        # on its own but does not serialise writers across processes.
-        self._index_lock = threading.Lock()
+        # Pair a process-local re-entrant lock with the repository's portable
+        # file lock. Atomic replacement prevents torn JSON; the guard also
+        # prevents multi-worker lost updates and lifecycle/upload races.
+        self._index_lock = threading.RLock()
         
         # Create upload directory
         os.makedirs(self.upload_dir, exist_ok=True)
@@ -243,6 +313,382 @@ class UploadHandler:
         # In-memory index cache to avoid O(N) disk I/O on every request
         self._index_cache: Optional[Dict[str, Any]] = None
         self._index_mtime: float = 0.0
+        self._index_signature: Optional[tuple[int, int, int, int]] = None
+        self._cache_signature: Optional[UploadIndexSignature] = None
+        from src.openclank.attachment_inventory import initialize_known_empty_owner
+        initialize_known_empty_owner(self)
+
+    def _live_index_signature(self) -> Optional[tuple[int, int, int, int]]:
+        try:
+            stat_result = os.stat(os.path.join(self.upload_dir, "uploads.json"))
+        except FileNotFoundError:
+            return None
+        return (
+            int(stat_result.st_dev),
+            int(stat_result.st_ino),
+            int(stat_result.st_size),
+            int(stat_result.st_mtime_ns),
+        )
+
+    @staticmethod
+    def _upload_index_signature(paths: tuple[str, ...]) -> Optional[UploadIndexSignature]:
+        """Identify both live and recovery files for safe cache validation."""
+        signature: list[UploadIndexFileSignature] = []
+        for candidate in paths:
+            try:
+                stat_result = os.stat(candidate)
+            except FileNotFoundError:
+                signature.append((candidate, None, None, None, None, None))
+                continue
+            except OSError:
+                return None
+            signature.append((
+                candidate,
+                stat_result.st_dev,
+                stat_result.st_ino,
+                stat_result.st_size,
+                stat_result.st_mtime_ns,
+                stat_result.st_ctime_ns,
+            ))
+        return tuple(signature)
+
+    @contextmanager
+    def _index_guard(self):
+        lock_target = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_lock:
+            with locked(lock_target):
+                signature = self._live_index_signature()
+                if signature != self._index_signature:
+                    self._index_cache = None
+                    self._index_mtime = 0.0
+                    self._cache_signature = None
+                    self._index_signature = signature
+                yield
+
+    @staticmethod
+    def _owner_key(owner: Any) -> str:
+        key = str(owner or "").strip().lower()
+        if not key or "\x00" in key:
+            raise UploadOwnerLifecycleError("upload lifecycle owner is required")
+        return key
+
+    @staticmethod
+    def _inventory_for_rows(rows: list[Mapping[str, Any]]) -> Dict[str, Any]:
+        """Return a content- and path-free identity inventory."""
+        identities = sorted(
+            f"{row.get('id', '')}\0{row.get('hash') or row.get('checksum_sha256') or ''}"
+            for row in rows
+        )
+        digest = hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest()
+        return {"count": len(rows), "digest": digest}
+
+    def owner_inventory(self, owner: str) -> Dict[str, Any]:
+        """Inventory upload metadata for one owner without leaking paths/content."""
+        key = self._owner_key(owner)
+        with self._index_guard():
+            index_path = os.path.join(self.upload_dir, "uploads.json")
+            index = self._load_upload_index(fail_on_error=True) if os.path.exists(index_path) else {}
+            rows = [
+                dict(row)
+                for row in index.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == key
+            ]
+        return self._inventory_for_rows(rows)
+
+    def preview_owner_rename(self, source_owner: str, target_owner: str) -> Dict[str, Any]:
+        """Freeze the evidence needed for a strict, replayable owner rename."""
+        source = self._owner_key(source_owner)
+        target = self._owner_key(target_owner)
+        if source == target:
+            raise UploadOwnerLifecycleError("source and target owners must differ")
+        source_inventory = self.owner_inventory(source)
+        target_inventory = self.owner_inventory(target)
+        if target_inventory["count"]:
+            raise UploadOwnerLifecycleError("target owner already has upload metadata")
+        return {"version": 1, "source": source_inventory, "target": target_inventory}
+
+    preview_rename = preview_owner_rename
+
+    @staticmethod
+    def _same_inventory(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return (
+            int(left.get("count", -1)) == int(right.get("count", -2))
+            and str(left.get("digest") or "") == str(right.get("digest") or "!")
+        )
+
+    def reconcile_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Complete or accept an atomic upload-owner rename after a crash.
+
+        Upload bytes are globally ID-addressed, so owner rename changes only the
+        atomic metadata index.  A split source+target state is never merged.
+        """
+        source = self._owner_key(source_owner)
+        target = self._owner_key(target_owner)
+        expected_source = dict(manifest.get("source") or {})
+        expected_target = dict(manifest.get("target") or {})
+        if int(expected_target.get("count", -1)) != 0:
+            raise UploadOwnerLifecycleError("rename manifest target is not empty")
+        empty = self._inventory_for_rows([])
+        uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_guard():
+            current = dict(self._load_upload_index(fail_on_error=True)) if os.path.exists(uploads_db_path) else {}
+            source_rows = [
+                row for row in current.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == source
+            ]
+            target_rows = [
+                row for row in current.values()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == target
+            ]
+            source_now = self._inventory_for_rows(source_rows)
+            target_now = self._inventory_for_rows(target_rows)
+            if self._same_inventory(source_now, empty) and self._same_inventory(target_now, expected_source):
+                return {"state": "staged", "source": source_now, "target": target_now}
+            if not self._same_inventory(source_now, expected_source) or not self._same_inventory(target_now, expected_target):
+                raise UploadOwnerLifecycleError("upload owner state conflicts with rename manifest")
+
+            updated: Dict[str, Any] = {}
+            original_keys = set(current)
+            for storage_key, raw in current.items():
+                row = dict(raw) if isinstance(raw, dict) else raw
+                next_key = storage_key
+                if isinstance(row, dict) and str(row.get("owner") or "").strip().lower() == source:
+                    row["owner"] = target
+                    base_key = self._renamed_upload_index_key(storage_key, row, source, target)
+                    next_key = self._unique_upload_index_key(
+                        base_key, set(updated), original_keys - {storage_key}, row
+                    )
+                if next_key in updated:
+                    raise UploadOwnerLifecycleError("upload rename produced an ambiguous index key")
+                updated[next_key] = row
+            self._atomic_write_json(uploads_db_path, updated, sync_backup=True)
+
+        after_source = self.owner_inventory(source)
+        after_target = self.owner_inventory(target)
+        if not self._same_inventory(after_source, empty) or not self._same_inventory(after_target, expected_source):
+            raise UploadOwnerLifecycleError("upload owner rename verification failed")
+        return {"state": "staged", "source": after_source, "target": after_target}
+
+    reconcile_rename = reconcile_owner_rename
+
+    def stage_owner_to_tombstone(
+        self,
+        source_owner: str,
+        tombstone_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        return self.reconcile_owner_rename(source_owner, tombstone_owner, manifest)
+
+    stage_to_tombstone = stage_owner_to_tombstone
+
+    def compensate_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        reverse = {
+            "version": 1,
+            "source": dict(manifest.get("source") or {}),
+            "target": dict(manifest.get("target") or {}),
+        }
+        # Accept an already-restored state, otherwise reverse the staged state.
+        if self._same_inventory(self.owner_inventory(source_owner), reverse["source"]):
+            if self.owner_inventory(target_owner)["count"]:
+                raise UploadOwnerLifecycleError("source and target upload owners both contain state")
+            return {
+                "state": "restored",
+                "source": self.owner_inventory(source_owner),
+                "target": self.owner_inventory(target_owner),
+            }
+        staged_manifest = {"version": 1, "source": reverse["source"], "target": reverse["target"]}
+        receipt = self.reconcile_owner_rename(target_owner, source_owner, {
+            "version": 1,
+            "source": staged_manifest["source"],
+            "target": staged_manifest["target"],
+        })
+        return {"state": "restored", "source": receipt["target"], "target": receipt["source"]}
+
+    compensate = compensate_owner_rename
+
+    def verify_owner_rename(
+        self,
+        source_owner: str,
+        target_owner: str,
+        manifest: Mapping[str, Any],
+        *,
+        expected: str = "staged",
+    ) -> Dict[str, Any]:
+        source = self.owner_inventory(source_owner)
+        target = self.owner_inventory(target_owner)
+        empty = self._inventory_for_rows([])
+        closure = dict(manifest.get("source") or {})
+        valid = (
+            self._same_inventory(source, empty)
+            and self._same_inventory(target, closure)
+            if expected == "staged"
+            else self._same_inventory(source, closure)
+            and self._same_inventory(target, empty)
+            if expected == "restored"
+            else False
+        )
+        if not valid:
+            raise UploadOwnerLifecycleError(f"upload owner lifecycle did not reach {expected}")
+        return {"state": expected, "source": source, "target": target}
+
+    verify = verify_owner_rename
+
+    def preview_owner_purge(self, owner: str) -> Dict[str, Any]:
+        return self.owner_inventory(owner)
+
+    def _lifecycle_journal_path(self) -> str:
+        return os.path.join(self.upload_dir, ".owner-lifecycle.json")
+
+    def _load_lifecycle_journal(self) -> Dict[str, Any]:
+        path = self._lifecycle_journal_path()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return {"version": 1, "operations": {}}
+        except Exception as exc:
+            raise UploadOwnerLifecycleError("upload lifecycle journal is unreadable") from exc
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("operations"), dict):
+            raise UploadOwnerLifecycleError("upload lifecycle journal is malformed")
+        return data
+
+    def _save_lifecycle_journal(self, journal: Mapping[str, Any]) -> None:
+        self._atomic_write_json(self._lifecycle_journal_path(), dict(journal), sync_backup=True)
+
+    def purge_owner_lifecycle(
+        self,
+        owner: str,
+        *,
+        expected: Optional[Mapping[str, Any]] = None,
+        operation_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Purge one owner's rows and exclusively-owned bytes, replayably.
+
+        A private journal retains byte locations across the metadata commit.
+        Public receipts expose only an opaque token, counts, and digests.
+        """
+        owner_key = self._owner_key(owner)
+        token = str(operation_token or uuid.uuid4().hex)
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise UploadOwnerLifecycleError("invalid upload lifecycle token")
+        index_path = os.path.join(self.upload_dir, "uploads.json")
+        with self._index_guard():
+            journal = self._load_lifecycle_journal()
+            operations = journal["operations"]
+            operation = operations.get(token)
+            current = dict(self._load_upload_index(fail_on_error=True)) if os.path.exists(index_path) else {}
+            owner_items = [
+                (key, dict(row)) for key, row in current.items()
+                if isinstance(row, dict)
+                and str(row.get("owner") or "").strip().lower() == owner_key
+            ]
+            current_inventory = self._inventory_for_rows([row for _, row in owner_items])
+            if operation is None:
+                if expected is not None and not self._same_inventory(current_inventory, expected):
+                    raise UploadOwnerLifecycleError("upload purge inventory changed after preview")
+                exclusive: list[dict[str, str]] = []
+                other_rows = [row for key, row in current.items() if key not in {item[0] for item in owner_items} and isinstance(row, dict)]
+                referenced = {
+                    os.path.normcase(os.path.realpath(str(row.get("path"))))
+                    for row in other_rows if row.get("path")
+                }
+                referenced_ids = {str(row.get("id") or "") for row in other_rows}
+                referenced_hashes = {
+                    str(row.get("hash") or row.get("checksum_sha256") or "")
+                    for row in other_rows
+                }
+                staged_reals: set[str] = set()
+                quarantine = os.path.join(self.upload_dir, ".owner-lifecycle", token)
+                for _key, row in owner_items:
+                    source = str(row.get("path") or "")
+                    if not source:
+                        continue
+                    if os.path.islink(source) or not self._inside_upload_dir(source):
+                        raise UploadOwnerLifecycleError("upload purge refused an unsafe path")
+                    real = os.path.normcase(os.path.realpath(source))
+                    identity_shared = (
+                        str(row.get("id") or "") in referenced_ids
+                        or str(row.get("hash") or row.get("checksum_sha256") or "") in referenced_hashes
+                    )
+                    if real in referenced or identity_shared or real in staged_reals or not os.path.exists(source):
+                        continue
+                    target = os.path.join(quarantine, os.path.basename(source))
+                    if os.path.lexists(target):
+                        raise UploadOwnerLifecycleError("upload purge quarantine target already exists")
+                    exclusive.append({"source": source, "target": target})
+                    staged_reals.add(real)
+                operation = {
+                    "owner": owner_key,
+                    "state": "prepared",
+                    "inventory": current_inventory,
+                    "row_keys": [key for key, _ in owner_items],
+                    "files": exclusive,
+                }
+                operations[token] = operation
+                self._save_lifecycle_journal(journal)
+            elif operation.get("owner") != owner_key:
+                raise UploadOwnerLifecycleError("upload lifecycle token belongs to another owner")
+
+            for item in operation.get("files", []):
+                source = str(item.get("source") or "")
+                target = str(item.get("target") or "")
+                if not self._inside_upload_dir(source) or not self._inside_upload_dir(target):
+                    raise UploadOwnerLifecycleError("upload lifecycle journal contains an unsafe path")
+                if os.path.islink(source) or os.path.islink(target):
+                    raise UploadOwnerLifecycleError("upload purge refused a symlink")
+                if os.path.exists(source) and os.path.exists(target):
+                    raise UploadOwnerLifecycleError("upload purge source and target both exist")
+                if os.path.exists(source):
+                    os.makedirs(os.path.dirname(target), exist_ok=True, mode=0o700)
+                    os.replace(source, target)
+                elif not os.path.exists(target) and operation.get("state") == "prepared":
+                    raise UploadOwnerLifecycleError("upload purge lost staged bytes")
+            operation["state"] = "bytes_staged"
+            self._save_lifecycle_journal(journal)
+
+            reduced = {key: row for key, row in current.items() if key not in set(operation.get("row_keys", []))}
+            self._atomic_write_json(index_path, reduced, sync_backup=True)
+            operation["state"] = "metadata_removed"
+            self._save_lifecycle_journal(journal)
+
+            deleted = 0
+            for item in operation.get("files", []):
+                target = str(item.get("target") or "")
+                if os.path.isfile(target):
+                    os.remove(target)
+                    deleted += 1
+            operation["state"] = "complete"
+            operation["exclusive_file_count"] = len(operation.get("files", []))
+            operation.pop("files", None)
+            operation.pop("row_keys", None)
+            self._save_lifecycle_journal(journal)
+
+        after = self.owner_inventory(owner_key)
+        if after["count"]:
+            raise UploadOwnerLifecycleError("upload owner purge verification failed")
+        return {
+            "state": "purged",
+            "operation_token": token,
+            "before": dict(operation.get("inventory") or {}),
+            "after": after,
+            "metadata_rows_removed": int((operation.get("inventory") or {}).get("count", 0)),
+            "exclusive_files_removed": int(operation.get("exclusive_file_count", 0)),
+        }
+
+    purge_owner = purge_owner_lifecycle
     
     def inside_base_dir(self, path: str) -> bool:
         """Check if path is inside base directory"""
@@ -515,7 +961,7 @@ class UploadHandler:
             # Keep index mutation and file removal serialized with upload writes.
             # Each row removal is atomically persisted before the bytes are
             # deleted; if deletion fails, the previous index is restored.
-            with self._index_lock:
+            with self._index_guard():
                 current_index = dict(self._load_upload_index(fail_on_error=True))
 
                 for root, dirs, files in os.walk(self.upload_dir, followlinks=False):
@@ -731,67 +1177,77 @@ class UploadHandler:
                 self._index_mtime = os.path.getmtime(path)
             except OSError:
                 self._index_mtime = time.time()
+            self._index_signature = self._live_index_signature()
+            self._cache_signature = self._upload_index_signature((path, path + ".bak"))
 
     def _load_upload_index(self, *, fail_on_error: bool = False) -> Dict[str, Any]:
-        """Load the upload index from disk/cache. Uses mtime-based validation
-        to avoid redundant parsing on hot paths. When ``fail_on_error`` is
-        true, a missing, malformed, or unreadable live index raises so
-        destructive callers cannot mistake corruption for an empty store.
+        """Load uploads.json with stable live-plus-backup cache validation.
+
+        A cache hit must observe both the live index and its recovery sibling.
+        Filesystems can preserve an mtime across a replacement, so identity, size,
+        and ctime are included and a read is retried if either file changes.
         """
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
         candidates = (uploads_db_path, uploads_db_path + ".bak")
-        if fail_on_error:
-            # A backup is intentionally the previous snapshot. It is useful for
-            # non-destructive reads, but cannot authorize deletion when the live
-            # index is missing or corrupt.
-            if not os.path.exists(uploads_db_path):
-                raise ValueError("live uploads database is missing")
-            existing_candidates = [uploads_db_path]
-        else:
-            existing_candidates = [path for path in candidates if os.path.exists(path)]
-        if not existing_candidates:
-            self._index_cache = {}
-            self._index_mtime = 0.0
-            return {}
+        for _attempt in range(3):
+            signature = self._upload_index_signature(candidates)
+            if fail_on_error:
+                if not os.path.exists(uploads_db_path):
+                    raise ValueError("live uploads database is missing")
+                existing_candidates = [uploads_db_path]
+            else:
+                existing_candidates = [path for path in candidates if os.path.exists(path)]
+            if not existing_candidates:
+                self._index_cache = {}
+                self._cache_signature = signature
+                self._index_mtime = 0.0
+                return {}
 
-        # Check cache validity
-        try:
-            mtime = max(os.path.getmtime(path) for path in existing_candidates)
             if (
                 not fail_on_error
+                and signature is not None
                 and self._index_cache is not None
-                and mtime <= self._index_mtime
+                and signature == self._cache_signature
             ):
                 return self._index_cache
-        except OSError:
-            mtime = 0.0
 
-        # Try the live file first, fall back to the .bak sibling if the
-        # live file is truncated/corrupted.
-        for candidate in existing_candidates:
-            try:
-                with open(candidate, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            changed_during_read = False
+            for candidate in existing_candidates:
+                try:
+                    with open(candidate, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as exc:
+                    logger.warning("Failed to read uploads database (%s): %s", candidate, exc)
+                    data = None
+                verified = self._upload_index_signature(candidates)
+                if signature is not None and verified is not None and verified != signature:
+                    changed_during_read = True
+                    break
                 if isinstance(data, dict):
                     self._index_cache = data
-                    self._index_mtime = mtime
+                    self._cache_signature = verified
+                    self._index_mtime = 0.0
+                    self._index_signature = self._live_index_signature()
                     return data
-            except Exception as e:
-                logger.warning(f"Failed to read uploads database ({candidate}): {e}")
+            if changed_during_read:
                 continue
+            break
 
         if fail_on_error:
             raise ValueError("live uploads database is unreadable")
         self._index_cache = {}
+        self._cache_signature = self._upload_index_signature(candidates)
+        self._index_mtime = 0.0
         return {}
 
     def get_upload_info(self, upload_id: str) -> Optional[Dict[str, Any]]:
         """Return the uploads.json metadata row for an upload ID, if present."""
         if not self.validate_upload_id(upload_id):
             return None
-        for info in self._load_upload_index().values():
-            if isinstance(info, dict) and info.get("id") == upload_id:
-                return dict(info)
+        with self._index_guard():
+            for info in self._load_upload_index().values():
+                if isinstance(info, dict) and info.get("id") == upload_id:
+                    return dict(info)
         return None
 
     def reserve_upload(
@@ -816,7 +1272,7 @@ class UploadHandler:
             return None
 
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
-        with self._index_lock:
+        with self._index_guard():
             try:
                 current = dict(self._load_upload_index(fail_on_error=True))
             except Exception:
@@ -932,6 +1388,133 @@ class UploadHandler:
                 resolved["created_at"] = resolved["uploaded_at"]
             return resolved
 
+    def claim_upload_reference(self, upload_id: str, *, owner: str, reference_scope: str = "independent") -> Optional[Dict[str, Any]]:
+        """Admit a durable writer before its domain transaction commits.
+
+        Claims survive interrupted writes. Only explicit offline reconciliation
+        may discard a claim whose owning transaction cannot be proven. Reads
+        continue to use reserve_upload and do not create reference claims.
+        """
+        with self._index_guard():
+            resolved = self.reserve_upload(upload_id, owner=owner, allow_admin=False)
+            if not resolved:
+                return None
+            current = self._load_upload_index(fail_on_error=True)
+            for key, row in list(current.items()):
+                if isinstance(row, dict) and row.get("id") == upload_id:
+                    updated = dict(row)
+                    claims = set(updated.get("reference_claims") or [])
+                    claims.add(str(reference_scope))
+                    updated["reference_claims"] = sorted(claims)
+                    updated["reference_generation"] = int(updated.get("reference_generation") or 0) + 1
+                    current[key] = updated
+            self._atomic_write_json(os.path.join(self.upload_dir, "uploads.json"), current, sync_backup=True)
+            return resolved
+
+    def settle_reference_claim(self, upload_id: str, scope: str, *, committed: bool, settled_scope: str = "domain:core") -> None:
+        with self._index_guard():
+            current = self._load_upload_index(fail_on_error=True)
+            for key, row in list(current.items()):
+                if not isinstance(row, dict) or row.get("id") != upload_id or scope not in (row.get("reference_claims") or []):
+                    continue
+                updated = dict(row)
+                claims = set(updated.get("reference_claims") or []) - {scope}
+                if committed:
+                    claims.add(settled_scope)
+                updated["reference_claims"] = sorted(claims)
+                updated["reference_generation"] = int(updated.get("reference_generation") or 0) + 1
+                current[key] = updated
+            self._atomic_write_json(os.path.join(self.upload_dir, "uploads.json"), current, sync_backup=True)
+
+    def attachment_reference_generations(self) -> Dict[str, str]:
+        with self._index_guard():
+            index = self._load_upload_index(fail_on_error=True)
+            grouped = {}
+            for row in index.values():
+                if isinstance(row, dict) and row.get("id"):
+                    grouped.setdefault(str(row["id"]), []).append({key: row.get(key) for key in ("owner", "path", "hash", "checksum_sha256", "reference_generation")})
+            return {identifier: hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest() for identifier, rows in grouped.items()}
+
+    def attachment_inventory_status(self) -> Dict[str, Any]:
+        """Read explicit offline schema admission; startup never backfills it."""
+        path = os.path.join(self.upload_dir, ".attachment-inventory.json")
+        try:
+            with open(path, encoding="utf-8") as stream:
+                value = json.load(stream)
+            if value.get("contract") != "openclank.attachment-reference-inventory/v1":
+                raise ValueError("unsupported inventory contract")
+            return value
+        except (OSError, ValueError, AttributeError):
+            return {"complete": False, "errors": ["Run .clanker/tools/attachment_inventory.py offline to reconcile retained references"]}
+
+    def conversation_attachment_intent(self, *, owner: str, session_id: str, candidate_ids=(), image_ids=(), persist: bool = False) -> Dict[str, Any]:
+        """Durable identities precede transcript/provenance erasure and survive retries."""
+        path = os.path.join(self.upload_dir, ".conversation-deletions.json")
+        key = json.dumps([self._owner_key(owner), str(session_id)], separators=(",", ":"))
+        with self._index_guard():
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    intents = json.load(stream)
+            except FileNotFoundError:
+                intents = {}
+            if not isinstance(intents, dict):
+                raise UploadCleanupSafetyError("attachment deletion journal is invalid")
+            intent = dict(intents.get(key) or {})
+            intent["candidate_ids"] = sorted(set(intent.get("candidate_ids") or []) | set(candidate_ids))
+            intent["image_ids"] = sorted(set(intent.get("image_ids") or []) | set(image_ids))
+            if persist:
+                intents[key] = intent
+                self._atomic_write_json(path, intents)
+            return intent
+
+    def conversation_attachment_impact(self, *, owner: str, candidate_ids: set[str], shared_ids: set[str], shared_hashes: set[str], session_id: str | None = None, observed_generations: Dict[str, str] | None = None) -> Dict[str, Any]:
+        """Review only indexed owned uploads with a complete reference snapshot."""
+        owner = self._owner_key(owner)
+        with self._index_guard():
+            index = self._load_upload_index(fail_on_error=True)
+            exclusive, shared = set(), set()
+            total_bytes = 0
+            for upload_id in candidate_ids:
+                rows = [row for row in index.values() if isinstance(row, dict) and row.get("id") == upload_id]
+                if not rows:
+                    continue
+                if any(row.get("owner") != owner for row in rows):
+                    shared.add(upload_id)
+                    continue
+                independent_claims = any(set(row.get("reference_claims") or []) - ({f"chat:{session_id}", "domain:core"} if session_id else {"domain:core"}) for row in rows)
+                changed = observed_generations is not None and observed_generations.get(upload_id) != self.attachment_reference_generations().get(upload_id)
+                if changed or independent_claims or upload_id in shared_ids or any(str(row.get("hash") or row.get("checksum_sha256") or "") in shared_hashes for row in rows):
+                    shared.add(upload_id)
+                    continue
+                paths = {os.path.realpath(str(row.get("path") or "")) for row in rows}
+                if any(os.path.islink(str(row.get("path") or "")) for row in rows) or any(isinstance(row, dict) and row.get("id") != upload_id and os.path.realpath(str(row.get("path") or "")) in paths for row in index.values()):
+                    shared.add(upload_id)
+                    continue
+                if len(paths) != 1 or not all(self._inside_upload_dir(path) and os.path.basename(path) == upload_id for path in paths):
+                    raise UploadCleanupSafetyError("conversation attachment ownership/path is ambiguous")
+                exclusive.add(upload_id)
+                path = next(iter(paths))
+                if os.path.isfile(path):
+                    total_bytes += os.path.getsize(path)
+            return {"exclusive_ids": sorted(exclusive), "shared_ids": sorted(shared), "exclusive_bytes": total_bytes}
+
+    def erase_conversation_attachments(self, *, owner: str, candidate_ids: set[str], shared_ids: set[str], shared_hashes: set[str], session_id: str | None = None, observed_generations: Dict[str, str] | None = None) -> Dict[str, Any]:
+        """Erase exact exclusive uploads; atomic index retirement is retryable."""
+        with self._index_guard():
+            impact = self.conversation_attachment_impact(owner=owner, candidate_ids=candidate_ids, shared_ids=shared_ids, shared_hashes=shared_hashes, session_id=session_id, observed_generations=observed_generations)
+            current = self._load_upload_index(fail_on_error=True)
+            for upload_id in impact["exclusive_ids"]:
+                rows = [row for row in current.values() if isinstance(row, dict) and row.get("id") == upload_id]
+                paths = {os.path.realpath(str(row["path"])) for row in rows}
+                # Remove bytes first: a failure keeps the indexed identity for
+                # a retry; a missing file after a crash is safe to retire.
+                for path in paths:
+                    if os.path.lexists(path):
+                        os.unlink(path)
+                current = {key: row for key, row in current.items() if not isinstance(row, dict) or row.get("id") != upload_id}
+                self._atomic_write_json(os.path.join(self.upload_dir, "uploads.json"), current, sync_backup=True)
+            return impact
+
     def _renamed_upload_index_key(self, key: str, info: Dict[str, Any], old_owner: str, new_owner: str) -> str:
         """Return the storage key to use after renaming an owned upload row.
 
@@ -942,7 +1525,7 @@ class UploadHandler:
         if file_hash:
             return f"{new_owner}:{file_hash}"
 
-        # Fallback for rows without an explicit hash (should not happen in modern Odysseus)
+        # Fallback for rows without an explicit hash (should not happen in modern Open Clank)
         if isinstance(key, str) and ":" in key:
             # Join all but the last part if there are multiple colons
             parts = key.rsplit(":", 1)
@@ -984,7 +1567,7 @@ class UploadHandler:
             return 0
 
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
-        with self._index_lock:
+        with self._index_guard():
             current = self._load_upload_index()
             if not current:
                 return 0
@@ -1036,7 +1619,8 @@ class UploadHandler:
             dirs[:] = [
                 directory
                 for directory in dirs
-                if not os.path.islink(os.path.join(root, directory))
+                if directory != ".owner-lifecycle"
+                and not os.path.islink(os.path.join(root, directory))
                 and not is_junction(os.path.join(root, directory))
             ]
             if upload_id in files:
@@ -1116,7 +1700,8 @@ class UploadHandler:
             total_size = 0
             file_types = {}
             
-            files = self._load_upload_index()
+            with self._index_guard():
+                files = dict(self._load_upload_index())
             if files:
                 total_files = len(files)
                 for file_info in files.values():
@@ -1200,7 +1785,7 @@ class UploadHandler:
         uploads_db_path = os.path.join(self.upload_dir, "uploads.json")
         existing_file = None
         existing_key = None
-        with self._index_lock:
+        with self._index_guard():
             existing_files = self._load_upload_index()
             stale_keys = []
             for key, info in existing_files.items():
@@ -1223,7 +1808,7 @@ class UploadHandler:
             logger.info(f"Duplicate file upload detected: {original_filename} -> {existing_file['id']}")
 
             existing_file["last_accessed"] = datetime.now().isoformat()
-            with self._index_lock:
+            with self._index_guard():
                 try:
                     current = self._load_upload_index()
                     # Re-resolve the key inside the lock: a concurrent
@@ -1313,7 +1898,7 @@ class UploadHandler:
                 logger.warning(f"Failed to read image dimensions for {file_id}: {e}")
         
         # Update uploads database
-        with self._index_lock:
+        with self._index_guard():
             try:
                 current = self._load_upload_index() if os.path.exists(uploads_db_path) else {}
                 storage_key = f"{owner}:{file_hash}" if owner else file_hash

@@ -9,6 +9,7 @@ import {
   closeWorkspaceOtherLeaves,
   findWorkspaceLeaf,
   moveWorkspaceLeaf,
+  navigationIntentFromEvent,
   normalizeNotesSettings,
   normalizeNotesWorkspace,
   noteViewType,
@@ -60,36 +61,81 @@ assert.equal(clean.left.sort, 'name');
 assert.deepEqual(clean.bookmarks, []);
 assert.equal(findWorkspaceLeaf(clean)?.docId, 'a');
 assert.deepEqual(normalizeNotesSettings({ previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true }), {
-  previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true, completedVisibility:'show',
+  previewLayout:'side-by-side', lineNumbers:true, readableLineWidth:false, ribbon:true, completedVisibility:'show', showTutorialFolder:true, showCopalInFolderWorkspace:false, templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ previewLayout:'invalid', lineNumbers:'yes' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show', showTutorialFolder:true, showCopalInFolderWorkspace:false, templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ completedVisibility:'hide' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'hide',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'hide', showTutorialFolder:true, showCopalInFolderWorkspace:false, templateFolder:'', dailyTemplateId:'',
 });
 assert.deepEqual(normalizeNotesSettings({ completedVisibility:'invalid' }), {
-  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show',
+  previewLayout:'inline', lineNumbers:false, readableLineWidth:true, ribbon:false, completedVisibility:'show', showTutorialFolder:true, showCopalInFolderWorkspace:false, templateFolder:'', dailyTemplateId:'',
 });
+// Existing defaults: handbook is visible, global Copal collections are not
+// mixed into an authorized Host folder unless explicitly opted in.
+for (const raw of [undefined, null, {}, { showTutorialFolder:undefined, showCopalInFolderWorkspace:undefined }]) {
+  const settings = normalizeNotesSettings(raw);
+  assert.equal(settings.showTutorialFolder, true);
+  assert.equal(settings.showCopalInFolderWorkspace, false);
+}
+for (const value of [true, false]) {
+  const settings = normalizeNotesSettings({ showTutorialFolder:value, showCopalInFolderWorkspace:value });
+  assert.equal(settings.showTutorialFolder, value);
+  assert.equal(settings.showCopalInFolderWorkspace, value);
+}
+for (const value of ['true', 'false', 0, 1, null]) {
+  const settings = normalizeNotesSettings({ showTutorialFolder:value, showCopalInFolderWorkspace:value });
+  assert.equal(settings.showTutorialFolder, true, 'Only literal false hides the handbook');
+  assert.equal(settings.showCopalInFolderWorkspace, false, 'Only literal true opts global Copal into Host folders');
+}
 
-const legacy = normalizeNotesWorkspace({
+// Historical layouts are explicit-tool migration inputs, not runtime imports.
+// Normalization must leave their source intact and show temporary current state.
+const legacySource = {
   tabs:['a', 'missing'], selected:'a', split:'b', mode:'reading', sidebarOpen:true,
   sidebar:'outline', expanded:['Projects'], pinned:['a'], cursors:{ a:{ anchor:2, head:4 } },
-}, docs);
-assert.equal(workspaceGroups(legacy).length, 2);
-assert.equal(workspaceLeaves(legacy).length, 2);
-assert.equal(legacy.right.open, true);
-assert.equal(legacy.right.tab, 'outline');
-assert.equal(workspaceLeaves(legacy)[0].mode, 'reading');
-assert.equal(workspaceLeaves(legacy)[0].pinned, true);
+};
+const legacyBytes = JSON.stringify(legacySource);
+const legacy = normalizeNotesWorkspace(legacySource, docs);
+assert.equal(JSON.stringify(legacySource), legacyBytes);
+assert.equal(workspaceGroups(legacy).length, 1);
+assert.equal(workspaceLeaves(legacy).length, 1);
+assert.equal(workspaceLeaves(legacy)[0].docId, 'a');
+assert.equal(legacy.right.open, false);
+assert.equal(legacy.right.tab, 'properties');
+assert.equal(workspaceLeaves(legacy)[0].mode, 'live');
+assert.equal(workspaceLeaves(legacy)[0].pinned, false);
+assert.deepEqual(legacy.bookmarks, []);
 assert.equal(legacy.settings.previewLayout, 'inline');
 assert.equal(normalizeNotesWorkspace({ version:999, root:{ type:'group', tabs:[] }, settings:{ previewLayout:'side-by-side' } }, docs, 'a').settings.previewLayout, 'inline');
+for (const version of [2, 999]) {
+  const unsupported = { version, root:{ type:'group', tabs:[{ docId:'b', pinned:true }] }, settings:{ previewLayout:'side-by-side' } };
+  const original = structuredClone(unsupported);
+  const display = normalizeNotesWorkspace(unsupported, docs, 'd');
+  assert.deepEqual(unsupported, original, 'Unsupported saved layout source is never rewritten');
+  assert.equal(findWorkspaceLeaf(display)?.docId, 'd');
+  assert.equal(workspaceLeaves(display).length, 1);
+  assert.equal(display.settings.previewLayout, 'inline');
+}
 const cyclic = { type:'split', id:'cycle', children:[], sizes:[] }; cyclic.children.push(cyclic);
 assert.equal(workspaceLeaves(normalizeNotesWorkspace({ version:NOTES_WORKSPACE_VERSION, root:cyclic }, docs, 'a')).length, 1);
 
-const restored = normalizeNotesWorkspace(JSON.parse(serializeNotesWorkspace(legacy)), docs);
+// Current-version splits, modes and pins must still round-trip unchanged.
+const currentLayout = normalizeNotesWorkspace({}, docs, 'a');
+const currentLeaf = findWorkspaceLeaf(currentLayout);
+currentLeaf.mode = 'reading';
+currentLeaf.pinned = true;
+currentLayout.right.open = true;
+currentLayout.right.tab = 'outline';
+splitWorkspaceGroup(currentLayout, workspaceGroups(currentLayout)[0].id, docs[1], 'horizontal');
+const restored = normalizeNotesWorkspace(JSON.parse(serializeNotesWorkspace(currentLayout)), docs);
 assert.equal(workspaceGroups(restored).length, 2);
 assert.equal(workspaceLeaves(restored).length, 2);
+assert.equal(restored.right.open, true);
+assert.equal(restored.right.tab, 'outline');
+assert.equal(workspaceLeaves(restored).find(leaf=>leaf.docId==='a')?.mode, 'reading');
+assert.equal(workspaceLeaves(restored).find(leaf=>leaf.docId==='a')?.pinned, true);
 const routed = normalizeNotesWorkspace(JSON.parse(serializeNotesWorkspace(restored)), docs, 'd');
 assert.equal(findWorkspaceLeaf(routed)?.docId, 'd');
 
@@ -289,7 +335,7 @@ const panelRestored = normalizeNotesWorkspace(JSON.parse(serializeNotesWorkspace
 assert.deepEqual(workspacePanelsForSide(panelRestored, 'left'), ['files', 'search', 'recent']);
 assert.equal(panelRestored.panels.tags.side, 'right');
 
-// Legacy v2 workspace without panels gets default panels
+// Unsupported flat layout gets temporary current defaults, not migration.
 const legacyPanels = normalizeNotesWorkspace({ tabs:['a'] }, docs);
 assert.ok(legacyPanels.panels);
 assert.deepEqual(workspacePanelsForSide(legacyPanels, 'left'), ['files', 'search', 'tags', 'bookmarks', 'recent']);
@@ -299,6 +345,105 @@ assert(setWorkspacePanelPlacement(panelWs, 'outline', { side:'left' }));
 const leftPanels = workspacePanelsForSide(panelWs, 'left');
 assert.ok(leftPanels.includes('outline'));
 assert.ok(!workspacePanelsForSide(panelWs, 'right').includes('outline'));
+
+// ── S15: navigation intent (current / newTab / splitRight / splitBelow) ──
+{
+  const ws = normalizeNotesWorkspace({}, docs, 'a');
+  const group = workspaceGroups(ws)[0];
+  const originalLeaf = findWorkspaceLeaf(ws);
+  assert.equal(originalLeaf.docId, 'a');
+
+  // intent:'current' replaces the active tab's document in place.
+  const replaced = openWorkspaceDocument(ws, docs[1], { intent:'current' });
+  assert.equal(replaced.id, originalLeaf.id, 'current intent keeps the leaf id');
+  assert.equal(replaced.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 1, 'current intent does not add a tab');
+  assert.equal(findWorkspaceLeaf(ws)?.docId, 'b');
+
+  // intent:'newTab' always creates a new tab even for the same document.
+  const second = openWorkspaceDocument(ws, docs[1], { intent:'newTab' });
+  assert.notEqual(second.id, replaced.id);
+  assert.equal(second.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 2, 'newTab intent adds a tab');
+  // Multiple views of one resource are allowed; they share its save owner.
+
+  // intent:'splitRight' creates a sibling group oriented horizontally.
+  const splitRightLeaf = openWorkspaceDocument(ws, docs[0], { intent:'splitRight' });
+  assert.equal(splitRightLeaf.docId, 'a');
+  assert.equal(workspaceGroups(ws).length, 2);
+  const splits = [];
+  const collect = (node) => { if (node.type === 'split') splits.push(node); else for (const child of node.children || []) collect(child); };
+  collect(ws.root);
+  assert.equal(splits.length, 1);
+  assert.equal(splits[0].orientation, 'horizontal');
+
+  // intent:'splitBelow' creates a vertical sibling split.
+  const ws2 = normalizeNotesWorkspace({}, docs, 'a');
+  const splitBelowLeaf = openWorkspaceDocument(ws2, docs[2], { intent:'splitBelow' });
+  assert.equal(splitBelowLeaf.docId, 'c');
+  assert.equal(workspaceGroups(ws2).length, 2);
+  const splits2 = [];
+  const collect2 = (node) => { if (node.type === 'split') splits2.push(node); else for (const child of node.children || []) collect2(child); };
+  collect2(ws2.root);
+  assert.equal(splits2[0].orientation, 'vertical');
+
+  // Legacy reuse:false is newTab; reuse:true keeps find-or-create.
+  const ws3 = normalizeNotesWorkspace({}, docs, 'a');
+  const legacyNew = openWorkspaceDocument(ws3, docs[0], { reuse:false });
+  assert.notEqual(legacyNew.id, findWorkspaceLeaf(ws3, legacyNew.id)?.id === legacyNew.id ? null : legacyNew.id);
+  assert.equal(workspaceLeaves(ws3).length, 2);
+}
+
+// ── S15 nit-fix: pin guard, same-doc scroll/selection, dirty-buffer survival ──
+{
+  const ws = normalizeNotesWorkspace({}, docs, 'a');
+  const active = findWorkspaceLeaf(ws);
+  active.pinned = true;
+  active.selection = { anchor:1, head:3 };
+  active.scrollTop = 40;
+  const opened = openWorkspaceDocument(ws, docs[1], { intent:'current' });
+  assert.notEqual(opened.id, active.id, 'current intent does not replace a pinned leaf');
+  assert.equal(active.docId, 'a', 'pinned leaf keeps its document');
+  assert.equal(opened.docId, 'b');
+  assert.equal(workspaceLeaves(ws).length, 2, 'pinned replace falls through to a new tab');
+  const group = workspaceGroups(ws)[0];
+  assert(activateWorkspaceLeaf(ws, group.id, active.id));
+  const again = openWorkspaceDocument(ws, docs[0], { intent:'current' });
+  assert.equal(again.id, active.id, 'pinned tab showing the target is activated');
+  assert.equal(workspaceLeaves(ws).length, 2, 'no duplicate tab for an already-open pinned doc');
+
+  const ws4 = normalizeNotesWorkspace({}, docs, 'a');
+  const leaf4 = findWorkspaceLeaf(ws4);
+  leaf4.selection = { anchor:2, head:5 };
+  leaf4.scrollTop = 120;
+  const same = openWorkspaceDocument(ws4, docs[0], { intent:'current' });
+  assert.equal(same.id, leaf4.id);
+  assert.deepEqual(same.selection, { anchor:2, head:5 }, 'same-doc current keeps selection');
+  assert.equal(same.scrollTop, 120, 'same-doc current keeps scrollTop');
+
+  const ws5 = normalizeNotesWorkspace({}, docs, 'a');
+  const dirtyBuffers = new Map([['a', { dirty:true, text:'unsaved alpha' }]]);
+  const leaf5 = findWorkspaceLeaf(ws5);
+  const replaced5 = openWorkspaceDocument(ws5, docs[1], { intent:'current' });
+  assert.equal(replaced5.id, leaf5.id);
+  assert.equal(replaced5.docId, 'b');
+  assert.equal(dirtyBuffers.get('a')?.text, 'unsaved alpha', 'dirty buffer for the replaced doc survives');
+  assert.equal(dirtyBuffers.get('a')?.dirty, true);
+  assert.equal(dirtyBuffers.has('b'), false, 'replace does not fabricate a buffer for the new doc');
+}
+
+// ── S15: navigationIntentFromEvent modifier mapping ──
+{
+  assert.equal(navigationIntentFromEvent(null), 'current');
+  assert.equal(navigationIntentFromEvent({}), 'current');
+  assert.equal(navigationIntentFromEvent({ ctrlKey:true }, { mac:false }), 'newTab');
+  assert.equal(navigationIntentFromEvent({ metaKey:true }, { mac:true }), 'newTab');
+  assert.equal(navigationIntentFromEvent({ metaKey:true }, { mac:false }), 'current', 'Cmd on non-Mac is not newTab');
+  assert.equal(navigationIntentFromEvent({ shiftKey:true }), 'splitRight');
+  assert.equal(navigationIntentFromEvent({ altKey:true }), 'splitBelow');
+  // Alt wins over Shift when both are held.
+  assert.equal(navigationIntentFromEvent({ altKey:true, shiftKey:true }), 'splitBelow');
+}
 
 console.log('copal notes workspace tests passed');
 

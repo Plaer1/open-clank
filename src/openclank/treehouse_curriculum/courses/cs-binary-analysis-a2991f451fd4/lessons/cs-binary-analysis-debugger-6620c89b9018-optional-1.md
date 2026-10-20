@@ -1,0 +1,1 @@
+A missing local in optimized code is not evidence that the source never had that variable.

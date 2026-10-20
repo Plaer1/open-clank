@@ -1,5 +1,6 @@
 # routes/model_routes.py
 """Routes for model and provider management."""
+import asyncio
 import os
 import re
 import uuid
@@ -11,20 +12,34 @@ import time as _time
 import logging
 import httpx
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
-from core.database import SessionLocal, ModelEndpoint, Session as DbSession, utcnow_naive
+from core.database import (
+    ModelEndpoint,
+    ModelShare,
+    ModelShareSubscription,
+    Session as DbSession,
+    SessionLocal,
+    utcnow_naive,
+)
 from core.log_safety import redact_url as _redact_url_for_log
 from core.middleware import require_admin
+from core.mimo_model_prefs import (
+    owner_hidden_mimo_model_ids as _owner_hidden_mimo_model_ids,
+    set_owner_hidden_mimo_models as _set_owner_hidden_mimo_models,
+)
 from src.constants import COOKBOOK_STATE_FILE
 from src.llm_core import _detect_provider, _host_match, ANTHROPIC_MODELS
 from src.tls_overrides import llm_verify
 from src.settings import load_settings as _load_settings, save_settings as _save_settings
 from src.endpoint_resolver import (
+    DIRECT_ENDPOINT_PROVIDER_PREFIX,
     normalize_base as _normalize_base,
+    canonical_endpoint_base,
+    matching_endpoint,
     build_chat_url,
     build_models_url,
     build_headers,
@@ -32,9 +47,56 @@ from src.endpoint_resolver import (
 )
 from src.model_catalog import build_model_catalog
 from src.chatgpt_subscription import is_chatgpt_subscription_base
-from src.auth_helpers import _auth_disabled, effective_user, owner_filter
+from src.auth_helpers import effective_user, owner_filter
+from src.openclank.mimo_projection import public_native_model_id
+from src.openclank.chat_routing import (
+    ChatRouteUnavailable,
+    MANAGED_ENGINE_PUBLIC_URL,
+    group_chat_routes,
+    list_chat_routes,
+    normalized_provider_owner,
+)
+from src.openclank.provider_store import (
+    ProviderStore,
+    ProviderStoreError,
+    provider_family_display_name,
+)
+from src.model_shares import SharedModelAccess, own_native_auth, shared_endpoint_id
 
 logger = logging.getLogger(__name__)
+
+_MODEL_CATALOG_REVISION = 0
+_MODEL_CATALOG_OWNER_REVISIONS: Dict[str, int] = {}
+
+
+class ModelShareUpdate(BaseModel):
+    endpoint_id: str
+    model_id: str
+    shared: bool
+    recipients: list[str] = Field(default_factory=list, max_length=500)
+
+
+class ModelShareSubscriptionUpdate(BaseModel):
+    enabled: bool
+
+
+def model_catalogue_revision(owner: str | None = None) -> tuple[int, int]:
+    """Return the global and owner-local catalogue revision."""
+    key = (owner or "").strip().lower()
+    return _MODEL_CATALOG_REVISION, _MODEL_CATALOG_OWNER_REVISIONS.get(key, 0)
+
+
+def invalidate_model_catalogue_revision(owner: str | None = None) -> int:
+    """Invalidate all catalogues, or only one owner's catalogue."""
+    global _MODEL_CATALOG_REVISION
+    if owner is None:
+        _MODEL_CATALOG_REVISION += 1
+        return _MODEL_CATALOG_REVISION
+    key = (owner or "").strip().lower()
+    _MODEL_CATALOG_OWNER_REVISIONS[key] = (
+        _MODEL_CATALOG_OWNER_REVISIONS.get(key, 0) + 1
+    )
+    return _MODEL_CATALOG_OWNER_REVISIONS[key]
 
 _SPEECH_ENDPOINT_SETTINGS = (
     ("tts_provider", "tts_model", "tts-1", "Text to Speech"),
@@ -44,6 +106,7 @@ _SPEECH_ENDPOINT_SETTINGS = (
 _ENDPOINT_SETTING_FIELDS = {
     "default_endpoint_id":  ("default_model",  "Default Model"),
     "utility_endpoint_id":  ("utility_model",   "Utility Model"),
+    "memory_endpoint_id":   ("memory_model",    "Memory Model"),
     "research_endpoint_id": ("research_model",  "Deep Research"),
     "task_endpoint_id":     ("task_model",       "Background Tasks"),
 }
@@ -51,6 +114,7 @@ _ENDPOINT_SETTING_FIELDS = {
 _ENDPOINT_FALLBACK_FIELDS = {
     "default_model_fallbacks": "Default Model Fallbacks",
     "utility_model_fallbacks": "Utility Model Fallbacks",
+    "memory_model_fallbacks": "Memory Model Fallbacks",
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
 
@@ -250,6 +314,26 @@ def _default_endpoint_needs_assignment(
     return bool(visible and current_default_model not in visible)
 
 
+def _stable_endpoint_choice(endpoints, preferred_model: str = ""):
+    """Choose an owned endpoint deterministically, preferring model intent."""
+    candidates = [
+        endpoint
+        for endpoint in endpoints
+        if bool(getattr(endpoint, "is_enabled", True))
+    ]
+    candidates.sort(
+        key=lambda endpoint: (
+            str(getattr(endpoint, "name", "") or "").casefold(),
+            str(getattr(endpoint, "id", "") or ""),
+        )
+    )
+    if preferred_model:
+        for endpoint in candidates:
+            if preferred_model in _endpoint_visible_model_ids(endpoint):
+                return endpoint
+    return candidates[0] if candidates else None
+
+
 # Loopback hosts a user might type for a local model server (LM Studio,
 # llama.cpp, vLLM, …). Inside Docker these point at the *container*, not the
 # host the server actually runs on.
@@ -281,7 +365,7 @@ def _container_loopback_reachable(base_url: str, timeout: float = 0.2) -> bool:
     """True when the requested loopback host:port is already reachable from
     inside the current container.
 
-    This distinguishes "a model server running alongside Odysseus in the same
+    This distinguishes "a model server running alongside Open Clank in the same
     container" from "a model server running on the Docker host". Only the
     latter should be rewritten to host.docker.internal.
     """
@@ -307,11 +391,11 @@ def _container_loopback_reachable(base_url: str, timeout: float = 0.2) -> bool:
 def _rewrite_loopback_for_docker(base_url: str, *, container_local: bool = False) -> str:
     """Rewrite a loopback model-endpoint URL to ``host.docker.internal`` when
     running in Docker. A URL like ``http://localhost:1234/v1`` (the LM Studio
-    default) otherwise targets the Odysseus container itself, so the probe gets
+    default) otherwise targets the Open Clank container itself, so the probe gets
     a connection error and the endpoint is rejected with a misleading "No
     models found for that provider/key".
 
-    Cookbook local serves are the opposite case: Odysseus started the model
+    Cookbook local serves are the opposite case: Open Clank started the model
     server inside the same container/process environment, so the saved endpoint
     must remain container-local. In that mode, normalize a bind address such as
     0.0.0.0 to a connectable loopback host, but do not jump to the Docker host.
@@ -496,7 +580,11 @@ def _endpoint_kind(ep: Any) -> str:
 
 
 def _endpoint_refresh_mode(ep: Any, endpoint_kind: str | None = None) -> str:
-    return _normalize_refresh_mode(getattr(ep, "model_refresh_mode", None), endpoint_kind or _endpoint_kind(ep))
+    return _normalize_endpoint_refresh_mode(
+        getattr(ep, "model_refresh_mode", None),
+        endpoint_kind or _endpoint_kind(ep),
+        getattr(ep, "base_url", ""),
+    )
 
 
 def _endpoint_refresh_interval(ep: Any, category: str) -> float:
@@ -669,17 +757,214 @@ _MIMO_FAMILY_NAMES = {
     "zai": "Zhipu",
 }
 
+_MIMO_PROVIDER_NAMES = {
+    "anthropic": "Anthropic",
+    "deepseek": "DeepSeek",
+    "github-copilot": "GitHub Copilot",
+    "google": "Google",
+    "moonshotai": "Moonshot",
+    "openai": "OpenAI",
+    "xiaomi": "Xiaomi",
+    "zai": "Z.AI",
+}
+
+
+def normalize_mimo_connection_id(endpoint_id: Any) -> Optional[str]:
+    """Return the canonical native connection id, accepting legacy ``mimo``."""
+    value = str(endpoint_id or "").strip().lower()
+    if value in {"mimo", "mimo:auto"}:
+        return "mimo:auto"
+    if value.startswith("mimo:") and value[5:]:
+        return value
+    return None
+
+
+def is_mimo_connection_id(endpoint_id: Any) -> bool:
+    """Whether an endpoint id selects the native Open Clank agent runtime."""
+    return normalize_mimo_connection_id(endpoint_id) is not None
+
 
 def _mimo_endpoint_provider(ep_id) -> tuple[bool, str]:
-    """(is_mimo, provider_prefix) for the runtime's endpoint ids.
-
-    "mimo" is the legacy whole-runtime id; "mimo:<provider>" is one of the
-    per-provider Settings rows. Both dispatch over mimo://acp."""
-    if ep_id == "mimo":
+    """Return whether an id is native MiMo and its optional provider key."""
+    connection_id = normalize_mimo_connection_id(ep_id)
+    if connection_id is None:
+        return False, ""
+    if connection_id == "mimo:auto":
         return True, ""
-    if isinstance(ep_id, str) and ep_id.startswith("mimo:"):
-        return True, ep_id.split(":", 1)[1]
-    return False, ""
+    return True, connection_id.split(":", 1)[1]
+
+
+def _supervisor_available_models(supervisor, owner: str | None = None) -> list:
+    if supervisor is None:
+        return []
+    try:
+        try:
+            return list(supervisor.available_models(owner=owner) or [])
+        except TypeError:
+            return list(supervisor.available_models() or [])
+    except Exception:
+        return []
+
+
+def _connected_mimo_provider_ids(owner: str | None) -> set[str]:
+    """Return provider accounts connected by this Open Clank user."""
+    try:
+        db = SessionLocal()
+    except Exception as exc:
+        logger.warning("Could not open provider connections for owner %r: %s", owner, exc)
+        return set()
+    try:
+        return {
+            _canonical_mimo_provider_id(provider_id)
+            for provider_id in own_native_auth(db, owner or "")
+            if _canonical_mimo_provider_id(provider_id)
+        }
+    except Exception as exc:
+        logger.warning("Could not read provider connections for owner %r: %s", owner, exc)
+        return set()
+    finally:
+        db.close()
+
+
+def _public_mimo_model_ids(
+    supervisor,
+    owner: str | None = None,
+    include_owner_hidden: bool = False,
+) -> list[str]:
+    """Return models backed by this user's connected provider accounts.
+
+    Owner-hidden models (Settings toggles on provider accounts) are dropped
+    unless ``include_owner_hidden`` — inventory counting needs the full set,
+    display surfaces need the visible set."""
+    models: list[str] = []
+    seen: set[str] = set()
+    connected = _connected_mimo_provider_ids(owner)
+    hidden_by_owner = (
+        set() if include_owner_hidden else _owner_hidden_mimo_model_ids(owner)
+    )
+    for item in _supervisor_available_models(supervisor, owner):
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("modelId")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        provider = model_id.split("/", 1)[0].lower()
+        if provider.startswith(DIRECT_ENDPOINT_PROVIDER_PREFIX):
+            continue
+        model_id = public_native_model_id(model_id)
+        if model_id in hidden_by_owner:
+            continue
+        public_provider = _canonical_mimo_provider_id(
+            model_id.split("/", 1)[0] if "/" in model_id else ""
+        )
+        if model_id != "xiaomi/mimo-auto" and public_provider not in connected:
+            continue
+        if model_id not in seen:
+            seen.add(model_id)
+            models.append(model_id)
+    return models
+
+
+def _mimo_model_relations(
+    supervisor,
+    owner: str | None,
+    model_ids: Iterable[str],
+) -> dict[str, dict[str, str]]:
+    """Keep ACP's explicit model/preset/variant hierarchy for visible models."""
+    visible = set(model_ids)
+    relations: dict[str, dict[str, str]] = {}
+    for item in _supervisor_available_models(supervisor, owner):
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("modelId")
+        if not isinstance(model_id, str):
+            continue
+        model_id = public_native_model_id(model_id)
+        if model_id not in visible or model_id in relations:
+            continue
+        relation: dict[str, str] = {}
+        base_model_id = item.get("baseModelId")
+        if isinstance(base_model_id, str) and base_model_id.strip():
+            relation["base_model_id"] = public_native_model_id(base_model_id)
+        for wire_key in ("preset", "variant"):
+            value = item.get(wire_key)
+            if isinstance(value, str) and value.strip():
+                relation[wire_key] = value.strip()
+        if relation:
+            relations[model_id] = relation
+    return relations
+
+
+def ensure_owner_mimo_worker(supervisor, owner: str | None = None) -> bool:
+    """Synchronously start a cold owner worker for sync catalogue routes."""
+    if supervisor is None or _supervisor_available_models(supervisor, owner):
+        return True
+    starter = getattr(supervisor, "for_owner", None)
+    if not callable(starter):
+        return True
+    runner = getattr(supervisor, "run_sync", None)
+    if callable(runner):
+        # MimoSupervisorPool owns a long-lived ACP event loop.  Sync FastAPI
+        # routes execute in a thread, so marshal the coroutine back there;
+        # never use asyncio.run() against the live supervisor.
+        pending = starter(owner)
+        try:
+            runner(pending)
+            return True
+        except Exception as exc:
+            close = getattr(pending, "close", None)
+            if callable(close):
+                close()
+            logger.warning("Could not start model worker for owner %r: %s", owner, exc)
+            return False
+    try:
+        import asyncio
+
+        asyncio.run(starter(owner))
+        return True
+    except Exception as exc:
+        logger.warning("Could not start model worker for owner %r: %s", owner, exc)
+        return False
+
+
+def mimo_connection_model_ids(
+    supervisor,
+    owner: str | None,
+    endpoint_id: Any,
+    include_owner_hidden: bool = False,
+) -> list[str]:
+    """Return chat models reachable through one canonical native connection."""
+    is_mimo, provider = _mimo_endpoint_provider(endpoint_id)
+    if not is_mimo:
+        return []
+    models = [
+        model_id
+        for model_id in _public_mimo_model_ids(
+            supervisor, owner, include_owner_hidden=include_owner_hidden
+        )
+        if _is_chat_model(model_id)
+    ]
+    hidden = {
+        item.strip()
+        for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",")
+        if item.strip()
+    }
+    if hidden:
+        models = [
+            model_id
+            for model_id in models
+            if model_id not in hidden and model_id.rsplit("/", 1)[0] not in hidden
+        ]
+    if provider:
+        models = [
+            model_id
+            for model_id in models
+            if model_id.split("/", 1)[0] == provider
+        ]
+    covered = _covered_direct_models(models, owner)
+    if covered:
+        models = [model_id for model_id in models if model_id not in covered]
+    return models
 
 
 def _mimo_model_families(model_ids) -> dict[str, str]:
@@ -692,82 +977,181 @@ def _mimo_model_families(model_ids) -> dict[str, str]:
     return families
 
 
-def _covered_direct_providers(mimo_prefixes: set[str], owner: str | None = None) -> dict[str, dict]:
-    """Map mimo provider prefixes to the enabled direct endpoint covering them.
+def _canonical_mimo_provider_id(provider: str) -> str:
+    value = _DIRECT_PROVIDER_TO_MIMO.get(
+        str(provider or "").strip().lower(),
+        str(provider or "").strip().lower(),
+    )
+    if value.endswith("-coding"):
+        value = value[: -len("-coding")]
+    return {"z-ai": "zai"}.get(value, value)
 
-    MiMo fills gaps only: a provider Odysseus reaches natively must not show
-    up a second time through the agent transport (e's no-duplicates rule).
-    The returned map records WHICH endpoint won, so Settings can show the
-    suppression instead of making providers silently vanish."""
-    if not mimo_prefixes:
+
+def _direct_endpoint_matches_provider(ep, provider: str) -> bool:
+    """Match one direct endpoint to a native provider without generic aliases."""
+    base = str(getattr(ep, "base_url", "") or "")
+    detected = _canonical_mimo_provider_id(_safe_detect_provider(base))
+    curated = _canonical_mimo_provider_id(
+        _match_provider_curated(base, detected)
+    )
+    wanted = _canonical_mimo_provider_id(provider)
+    host = (urlparse(base).hostname or "").lower()
+    compact_host = re.sub(r"[^a-z0-9]", "", host)
+    compact_wanted = re.sub(r"[^a-z0-9]", "", wanted)
+    if compact_wanted and compact_wanted in compact_host:
+        return True
+    if curated == wanted:
+        return True
+    # Provider detection calls most OpenAI-compatible APIs "openai". Do not
+    # let that generic result claim a host that the URL curator identified as
+    # a more specific provider such as DeepSeek or Z.AI.
+    return detected == wanted and curated in {"", detected}
+
+
+def _logical_model_id(model_id: str, provider: str) -> str:
+    value = str(model_id or "").strip().casefold()
+    prefix, separator, remainder = value.partition("/")
+    if separator and _canonical_mimo_provider_id(prefix) == _canonical_mimo_provider_id(provider):
+        return remainder
+    return value
+
+
+def _covered_direct_models(
+    mimo_models: list[str],
+    owner: str | None = None,
+) -> dict[str, dict]:
+    """Map only exact logical model overlaps to the direct endpoint that wins."""
+    native_by_provider: dict[str, list[str]] = {}
+    for model_id in mimo_models:
+        provider, separator, _ = model_id.partition("/")
+        if separator:
+            native_by_provider.setdefault(provider, []).append(model_id)
+    if not native_by_provider:
         return {}
+
     covered: dict[str, dict] = {}
-
-    def _claim(prefix: str, ep) -> None:
-        covered.setdefault(prefix, {
-            "endpoint_id": getattr(ep, "id", ""),
-            "endpoint_name": getattr(ep, "name", "") or getattr(ep, "id", ""),
-        })
-
     try:
         db = SessionLocal()
         try:
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
             q = owner_filter(q, ModelEndpoint, owner or "", include_shared=False)
-            for ep in q.all():
+            endpoints = sorted(
+                q.all(),
+                key=lambda ep: (
+                    str(getattr(ep, "name", "") or "").casefold(),
+                    str(getattr(ep, "id", "") or ""),
+                ),
+            )
+            for ep in endpoints:
                 if (getattr(ep, "model_type", None) or "llm") != "llm":
                     continue
-                base = getattr(ep, "base_url", "") or ""
-                provider = _safe_detect_provider(base).lower()
-                provider = _DIRECT_PROVIDER_TO_MIMO.get(provider, provider)
-                if provider in mimo_prefixes:
-                    _claim(provider, ep)
-                host = (urlparse(base).hostname or "").lower()
-                for prefix in mimo_prefixes:
-                    if prefix and prefix in host:
-                        _claim(prefix, ep)
+                direct_models = _endpoint_visible_model_ids(ep)
+                if not direct_models:
+                    continue
+                for provider, native_models in native_by_provider.items():
+                    if not _direct_endpoint_matches_provider(ep, provider):
+                        continue
+                    direct_keys = {
+                        _logical_model_id(model_id, provider)
+                        for model_id in direct_models
+                    }
+                    for model_id in native_models:
+                        if _logical_model_id(model_id, provider) not in direct_keys:
+                            continue
+                        covered.setdefault(model_id, {
+                            "endpoint_id": getattr(ep, "id", ""),
+                            "endpoint_name": (
+                                getattr(ep, "name", "")
+                                or getattr(ep, "id", "")
+                            ),
+                        })
         finally:
             db.close()
     except Exception as exc:
-        logger.debug("Direct-provider coverage check failed: %s", exc)
+        logger.debug("Direct-model coverage check failed: %s", exc)
         return {}
     return covered
 
 
 def _mimo_provider_breakdown(supervisor, owner: str | None = None) -> list[dict]:
     """Per-provider integration state for Settings: what mimo has configured,
-    what it actually serves, and what a direct endpoint suppressed."""
+    what it actually serves, and exact overlaps served directly."""
     if supervisor is None:
         return []
-    try:
-        try:
-            catalog = supervisor.available_models(owner=owner)
-        except TypeError:
-            catalog = supervisor.available_models()
-        model_ids = [m.get("modelId", "") for m in catalog if m.get("modelId")]
-    except Exception:
-        return []
+    # Full inventory (including models the owner hid via Settings) so the
+    # provider cards can show "K/N models enabled"; visibility filtering
+    # happens per owner below.
+    model_ids = _public_mimo_model_ids(supervisor, owner, include_owner_hidden=True)
+    chat_model_ids = [
+        model_id for model_id in model_ids if _is_chat_model(model_id)
+    ]
+    hidden = {
+        item.strip()
+        for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",")
+        if item.strip()
+    }
+    if hidden:
+        chat_model_ids = [
+            model_id
+            for model_id in chat_model_ids
+            if model_id not in hidden and model_id.rsplit("/", 1)[0] not in hidden
+        ]
+    owner_hidden = _owner_hidden_mimo_model_ids(owner)
+    chat_model_set = set(chat_model_ids)
+    visible_chat_models = [
+        model_id for model_id in chat_model_ids if model_id not in owner_hidden
+    ]
+    visible_chat_set = set(visible_chat_models)
+    covered = _covered_direct_models(visible_chat_models, owner)
     prefixes: dict[str, dict] = {}
     for model_id in model_ids:
         if "/" not in model_id:
             continue
         prefix = model_id.split("/", 1)[0]
-        stats = prefixes.setdefault(prefix, {"models": 0, "chat_models": 0})
+        stats = prefixes.setdefault(
+            prefix,
+            {"models": 0, "chat_models": 0, "active_chat_models": 0, "hidden": 0},
+        )
         stats["models"] += 1
-        if _is_chat_model(model_id):
+        if model_id in chat_model_set:
             stats["chat_models"] += 1
-    covered = _covered_direct_providers(set(prefixes), owner)
+            if model_id in owner_hidden:
+                stats["hidden"] += 1
+            elif model_id not in covered:
+                stats["active_chat_models"] += 1
     families = _mimo_model_families([f"{prefix}/x" for prefix in prefixes])
     breakdown = []
     for prefix in sorted(prefixes):
-        suppressed = covered.get(prefix)
+        provider_models = [
+            model_id
+            for model_id in chat_model_ids
+            if model_id.split("/", 1)[0] == prefix
+        ]
+        hidden_models = [
+            model_id for model_id in provider_models if model_id in owner_hidden
+        ]
+        active_models = [
+            model_id
+            for model_id in provider_models
+            if model_id not in covered and model_id not in owner_hidden
+        ]
+        covered_routes = [
+            covered[model_id]
+            for model_id in provider_models
+            if model_id in covered and model_id in visible_chat_set
+        ]
+        active = prefixes[prefix]["active_chat_models"] > 0
+        served_by = covered_routes[0] if covered_routes and not active else None
         breakdown.append({
             "id": prefix,
             "family": families.get(f"{prefix}/x") or prefix.capitalize(),
             "models": prefixes[prefix]["models"],
             "chat_models": prefixes[prefix]["chat_models"],
-            "active": suppressed is None,
-            "served_by": suppressed,
+            "model_ids": active_models,
+            "hidden_model_ids": hidden_models,
+            "hidden_count": len(hidden_models),
+            "active": active,
+            "served_by": served_by,
         })
     return breakdown
 
@@ -776,32 +1160,59 @@ def _mimo_catalog(supervisor, owner: str | None = None):
     """Return one filtered Mimo catalog for every model-list consumer."""
     if supervisor is None:
         return [], [], [], 0
-    try:
-        try:
-            catalog = supervisor.available_models(owner=owner)
-        except TypeError:
-            catalog = supervisor.available_models()
-        models = [m.get("modelId", "") for m in catalog if m.get("modelId")]
-    except Exception:
-        return [], [], [], 0
+    models = _public_mimo_model_ids(supervisor, owner)
     original_count = len(models)
     models = [model_id for model_id in models if _is_chat_model(model_id)]
     hidden = {item.strip() for item in os.environ.get("MIMO_HIDDEN_MODELS", "").split(",") if item.strip()}
     if hidden:
         models = [m for m in models if m not in hidden and m.rsplit("/", 1)[0] not in hidden]
-    covered = _covered_direct_providers(
-        {m.split("/", 1)[0] for m in models if "/" in m}, owner
-    )
+    covered = _covered_direct_models(models, owner)
     if covered:
-        models = [m for m in models if m.split("/", 1)[0] not in covered]
+        models = [m for m in models if m not in covered]
     model_set = set(models)
     base = [m for m in models if "/" not in m or m.rsplit("/", 1)[0] not in model_set]
     variants = [m for m in models if "/" in m and m.rsplit("/", 1)[0] in model_set]
     return models, base, variants, original_count - len(models)
 
 
+def _mimo_provider_catalogs(supervisor, owner: str | None = None) -> list[dict]:
+    """Partition the native catalog into the real provider connections."""
+    models, _base, _variants, _hidden_count = _mimo_catalog(supervisor, owner)
+    relations = _mimo_model_relations(supervisor, owner, models)
+    grouped: dict[str, list[str]] = {}
+    for model_id in models:
+        provider = model_id.split("/", 1)[0] if "/" in model_id else "auto"
+        grouped.setdefault(_canonical_mimo_provider_id(provider), []).append(model_id)
+    catalogs = []
+    for provider, provider_models in grouped.items():
+        model_set = set(provider_models)
+        base = [
+            model_id
+            for model_id in provider_models
+            if "/" not in model_id or model_id.rsplit("/", 1)[0] not in model_set
+        ]
+        variants = [model_id for model_id in provider_models if model_id not in base]
+        catalogs.append({
+            "id": provider,
+            "name": _MIMO_PROVIDER_NAMES.get(
+                provider,
+                provider.replace("-", " ").title(),
+            ),
+            "models": provider_models,
+            "base": base,
+            "variants": variants,
+            "displays": _mimo_display_names(base, variants),
+            "relations": {
+                model_id: relations[model_id]
+                for model_id in provider_models
+                if model_id in relations
+            },
+        })
+    return sorted(catalogs, key=lambda item: item["name"].casefold())
+
+
 def _mimo_display_names(base: list[str], variants: list[str]) -> dict[str, str]:
-    """Keep MiMo model names intact when ACP encodes reasoning effort in IDs."""
+    """Keep Open Clank agent model names intact when ACP encodes reasoning effort in IDs."""
     displays = {model_id: model_id.split("/", 1)[-1] for model_id in base}
     for model_id in variants:
         model, _, effort = model_id.rpartition("/")
@@ -832,6 +1243,17 @@ def _filter_catalog_for_allowed_models(result: dict, allowed: Optional[frozenset
         return result
     visible_items = []
     for item in result.get("items") or []:
+        allowed_records = [
+            record for record in (item.get("catalog") or [])
+            if record.get("model_id") in allowed
+            or record.get("provider_model_route_id") in allowed
+            or record.get("_provider_model_route_id") in allowed
+        ]
+        allowed_public_ids = {
+            str(record.get("model_id"))
+            for record in allowed_records
+            if record.get("model_id")
+        }
         for ids_key, names_key in (
             ("models", "models_display"),
             ("models_extra", "models_extra_display"),
@@ -839,12 +1261,9 @@ def _filter_catalog_for_allowed_models(result: dict, allowed: Optional[frozenset
             ids = item.get(ids_key) or []
             names = item.get(names_key) or []
             pairs = [(model_id, names[index] if index < len(names) else model_id) for index, model_id in enumerate(ids)]
-            item[ids_key] = [model_id for model_id, _ in pairs if model_id in allowed]
-            item[names_key] = [name for model_id, name in pairs if model_id in allowed]
-        item["catalog"] = [
-            record for record in (item.get("catalog") or [])
-            if record.get("model_id") in allowed
-        ]
+            item[ids_key] = [model_id for model_id, _ in pairs if model_id in allowed_public_ids]
+            item[names_key] = [name for model_id, name in pairs if model_id in allowed_public_ids]
+        item["catalog"] = allowed_records
         if item["catalog"] or item.get("models") or item.get("models_extra"):
             visible_items.append(item)
     result["items"] = visible_items
@@ -913,7 +1332,7 @@ def _resolve_probe_key(ep) -> Optional[str]:
         return None
 
 
-def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False) -> dict:
+def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 10, with_tools: bool = False, *, owner: str, endpoint_id: str = "") -> dict:
     """Send a realistic completion request to a single model. Returns {status, latency_ms, error?}."""
     provider = _safe_detect_provider(base)
     if _is_discovery_only_provider(provider):
@@ -960,7 +1379,10 @@ def _probe_single_model(base: str, api_key: str, model_id: str, timeout: int = 1
 
     try:
         t0 = _time.time()
-        r = httpx.post(target_url, headers=h, json=payload, timeout=timeout, verify=llm_verify())
+        from src.openclank.logging_capture_store import CAPTURE
+        r = CAPTURE.observe_probe(owner=owner, provider_id=provider, endpoint_id=endpoint_id,
+            model_id=model_id, url=target_url, headers=h, body=payload,
+            send=lambda: httpx.post(target_url, headers=h, json=payload, timeout=timeout, verify=llm_verify()))
         latency = round((_time.time() - t0) * 1000)
         if r.is_success:
             if not with_tools:
@@ -1180,6 +1602,99 @@ def _catalog_probe_payload(endpoint: ModelEndpoint) -> Dict[str, Any]:
     }
 
 
+def _is_google_api_base(base_url: str) -> bool:
+    try:
+        return (urlparse(base_url).hostname or "").lower() == "generativelanguage.googleapis.com"
+    except Exception:
+        return False
+
+
+def _normalize_endpoint_refresh_mode(value: Any, endpoint_kind: str = "auto", base_url: str = "") -> str:
+    if not str(value or "").strip() and _is_google_api_base(base_url):
+        return "manual"
+    return _normalize_refresh_mode(value, endpoint_kind)
+
+
+def _google_native_root(base_url: str) -> str:
+    """Return the Gemini native API root for a Google endpoint.
+
+    Chat calls may be configured against Google's OpenAI-compatible
+    `/openai` path, but model catalog reads should use the native Models API
+    so we get Google's current Model resource shape.
+    """
+    try:
+        parsed = urlparse(base_url)
+    except Exception:
+        return "https://generativelanguage.googleapis.com/v1beta"
+    path = (parsed.path or "").rstrip("/")
+    if path.endswith("/openai"):
+        path = path[: -len("/openai")].rstrip("/")
+    if not path:
+        path = "/v1beta"
+    return urlunparse(parsed._replace(path=path, query="", fragment="")).rstrip("/")
+
+
+def _google_native_models_url(base_url: str) -> str:
+    return _google_native_root(base_url) + "/models"
+
+
+def _google_model_id_from_item(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    value = item.get("baseModelId") or item.get("name") or item.get("model") or ""
+    return str(value or "").strip().removeprefix("models/")
+
+
+def _google_model_supports_chat(item: Any) -> bool:
+    """Return whether a native Google Model resource supports chat generation."""
+    if not isinstance(item, dict):
+        return False
+    methods = item.get("supportedGenerationMethods")
+    if not isinstance(methods, list):
+        return False
+    chat_methods = {"generateContent", "generateMessage", "generateText", "generateAnswer"}
+    return any(method in chat_methods for method in methods)
+
+
+def _probe_google_models(base_url: str, api_key: str = None, timeout: int = 5, page_size: int = 1000) -> List[str]:
+    """Read Google's native paginated Models API.
+
+    This intentionally returns only provider-reported model IDs. Capability
+    mapping is handled by the model capability reader and must not infer from
+    names here.
+    """
+    url = _google_native_models_url(base_url)
+    try:
+        page_size = min(max(int(page_size or 1000), 1), 1000)
+    except Exception:
+        page_size = 1000
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["x-goog-api-key"] = api_key
+    params: Dict[str, Any] = {"pageSize": page_size}
+    models: List[str] = []
+    seen = set()
+    page_token = ""
+    for _ in range(20):
+        request_params = dict(params)
+        if page_token:
+            request_params["pageToken"] = page_token
+        r = httpx.get(url, headers=headers, params=request_params, timeout=timeout, verify=llm_verify())
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("models") or []:
+            if not _google_model_supports_chat(item):
+                continue
+            model_id = _google_model_id_from_item(item)
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                models.append(model_id)
+        page_token = str(data.get("nextPageToken") or "").strip()
+        if not page_token:
+            break
+    return models
+
+
 def _probe_endpoint(
     base_url: str,
     api_key: str = None,
@@ -1209,6 +1724,22 @@ def _probe_endpoint(
             _mark_catalog_probe(diagnostics, "unavailable")
             logger.warning("ChatGPT subscription model discovery failed")
             return []
+    if _is_google_api_base(base):
+        try:
+            models = _probe_google_models(base, api_key, timeout=timeout)
+            if models:
+                _mark_catalog_probe(diagnostics, "ok")
+                return models
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            _mark_catalog_probe(diagnostics, _catalog_http_status(status), status)
+            logger.warning(f"Google native models probe failed: HTTP {status or 'unknown'}")
+        except Exception as e:
+            _mark_catalog_probe(diagnostics, "unavailable")
+            logger.warning(f"Google native models probe failed: {e}")
+        else:
+            _mark_catalog_probe(diagnostics, "empty")
+        return []
     if provider == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = _safe_build_models_url(base)
@@ -1370,7 +1901,7 @@ def _ping_endpoint(base_url: str, api_key: str = None, timeout: float = 1.5) -> 
                 return {
                     "reachable": False,
                     "status_code": r.status_code,
-                    "error": "That is Odysseus, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
+                    "error": "That is Open Clank, not a model server. Use the Ollama URL, usually http://host.docker.internal:11434/v1 in Docker.",
                 }
             return {"reachable": False, "status_code": r.status_code, "error": f"HTTP {r.status_code} redirect"}
         if 200 <= r.status_code < 300:
@@ -1554,7 +2085,7 @@ def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids):
     """Hide the broken MLX repo id when a launch-specific shim id is available.
 
     mlx_lm.server may advertise the original HF repo id even though generation
-    only works through Odysseus' sanitized local shim. Keep the shim as the
+    only works through Open Clank' sanitized local shim. Keep the shim as the
     submitted model id and remove the raw repo id from the picker/default list.
     """
     ids = list(model_ids or [])
@@ -1568,6 +2099,57 @@ def _model_display_name(model_id: str) -> str:
     if _is_mlx_deepseek_v4_shim_id(model_id):
         return str(model_id or "").rstrip("/").split("/")[-1] or "DeepSeek-V4-Flash-4bit"
     return str(model_id or "").split("/")[-1]
+
+
+async def revoke_shared_model_workers(
+    request: Request,
+    revocations: list[tuple[str, str, str]],
+) -> None:
+    """Stop only the recipient/share runtime partitions being revoked."""
+    supervisor = getattr(getattr(request, "app", None), "state", None)
+    supervisor = getattr(supervisor, "mimo_supervisor", None)
+    revoke = getattr(supervisor, "revoke_shared_access", None)
+    if not callable(revoke) or not revocations:
+        return
+    results = await asyncio.gather(
+        *(
+            revoke(recipient, share_id)
+            for recipient, share_id, _model_id in set(revocations)
+        ),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.warning("trusted-share worker revoke failed: %s", result)
+
+
+def notify_shared_model_removals(
+    revocations: list[tuple[str, str, str]],
+    *,
+    shared_by: str,
+) -> None:
+    """Queue recipient-scoped UI notices without exposing source credentials."""
+    if not revocations:
+        return
+    from src.event_bus import get_task_scheduler
+
+    scheduler = get_task_scheduler()
+    add_notification = getattr(scheduler, "add_notification", None)
+    if not callable(add_notification):
+        return
+    for recipient, share_id, model_id in set(revocations):
+        model_name = _model_display_name(model_id) or "a model"
+        add_notification(
+            "Shared model removed",
+            "success",
+            task_id=f"model-share:{share_id}",
+            owner=recipient,
+            body=(
+                f"{shared_by} stopped sharing {model_name} with you. "
+                "Choose another model for any open chat that used it."
+            ),
+            kind="model_share",
+        )
 
 
 def _visible_models(cached_models, hidden_models, pinned_models=None):
@@ -1590,6 +2172,91 @@ def _visible_models(cached_models, hidden_models, pinned_models=None):
     return [m for m in merged if m not in hidden]
 
 
+def _picker_requires_pinning(base_url: str, kind: str) -> bool:
+    return _classify_endpoint(base_url, kind) == "api"
+
+
+def _has_explicit_pinned_models(ep) -> bool:
+    """Whether pinned_models was deliberately written for this endpoint.
+
+    API endpoints use pinned_models as an allow-list. An explicit empty JSON
+    list means "show no models"; it must not fall back to the old hidden-list
+    migration behavior.
+    """
+    raw = getattr(ep, "pinned_models", None)
+    return raw is not None and str(raw).strip() != ""
+
+
+def _legacy_visible_api_models(ep) -> List[str]:
+    """Return API models selected under the old hidden-list picker.
+
+    Before API endpoints switched to an explicit allow-list, selected models
+    were represented as cached_models minus hidden_models. Existing OpenRouter
+    rows can therefore have many checked models and an empty pinned_models
+    field. Treat that old state as the initial pinned list so settings and chat
+    agree after upgrade.
+    """
+    return _visible_models(
+        _cached_model_ids(ep),
+        getattr(ep, "hidden_models", None),
+        None,
+    )
+
+
+def _picker_models_for_endpoint(ep, base_url: str, kind: str):
+    """Return model IDs that should appear in the picker for an endpoint.
+
+    API providers expose remote inventory from /v1/models. Treat that cache as
+    inventory, not approval: only manually pinned API models should appear in
+    the picker. Local/self-hosted endpoints keep the older hide-list behavior.
+    """
+    pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+    if _picker_requires_pinning(base_url, kind):
+        if not _has_explicit_pinned_models(ep):
+            pinned = _legacy_visible_api_models(ep) if _hidden_model_ids(ep) else []
+        return pinned, pinned
+    return _visible_models(
+        _cached_model_ids(ep),
+        getattr(ep, "hidden_models", None),
+        pinned,
+    ), pinned
+
+
+def _api_pin_seed(ep, cached_ids=None) -> Optional[List[str]]:
+    """Seed that makes an untouched API row visible in chat by default.
+
+    Vanilla Odysseus semantics are opt-out: every connected model appears in
+    the chat picker until the owner hides it. API-class pickers enforce the
+    allow-list ("cache is inventory, not approval"), so a row whose pins were
+    never written renders nothing. Returns the chat-capable inventory as the
+    seed, or None when the row must not be touched: no inventory, not
+    API-class, pins already written (an explicit empty list means "show
+    nothing"), a legacy hidden list carrying older owner intent, or an
+    ownerless row while auth is configured (legacy/unclaimed data).
+    """
+    if cached_ids is None:
+        cached_ids = _cached_model_ids(ep)
+    if not cached_ids:
+        return None
+    if not (getattr(ep, "owner", None) or "").strip():
+        return None
+    base = _normalize_base(ep.base_url)
+    kind = _effective_endpoint_kind(ep, base)
+    if not _picker_requires_pinning(base, kind):
+        return None
+    if _has_explicit_pinned_models(ep):
+        return None
+    if _hidden_model_ids(ep):
+        return None
+    from src.endpoint_resolver import chat_capable_models
+
+    return chat_capable_models(cached_ids) or None
+
+
+
+
+
+
 def _api_key_fingerprint(api_key: Optional[str]) -> str:
     """Stable, non-secret label for distinguishing same-URL credentials."""
     key = (api_key or "").strip()
@@ -1603,6 +2270,40 @@ def setup_model_routes(model_discovery):
 
     def _model_owner(request: Request) -> str:
         return effective_user(request) or ""
+
+    def _request_is_admin(request: Request, owner: str = "") -> bool:
+        auth_manager = getattr(
+            getattr(getattr(request, "app", None), "state", None),
+            "auth_manager",
+            None,
+        )
+        is_admin = getattr(auth_manager, "is_admin", None)
+        return bool(owner and callable(is_admin) and is_admin(owner))
+
+    def _require_endpoint_owner(request: Request) -> str:
+        owner = _model_owner(request)
+        auth_manager = getattr(
+            getattr(getattr(request, "app", None), "state", None),
+            "auth_manager",
+            None,
+        )
+        if not owner or not getattr(request.state, "authenticated", False):
+            raise HTTPException(401, "Not authenticated")
+        return owner
+
+    def _validate_owner_endpoint_url(
+        request: Request,
+        owner: str,
+        base_url: str,
+    ) -> None:
+        if not owner or _request_is_admin(request, owner):
+            return
+        from src.url_security import validate_public_http_url
+
+        try:
+            validate_public_http_url(base_url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     def _owned_endpoint_query(db, request: Request):
         return owner_filter(
@@ -1621,11 +2322,16 @@ def setup_model_routes(model_discovery):
     _models_cache: dict = {}
     _MODELS_CACHE_TTL = 30  # seconds
 
-    def _invalidate_models_cache() -> None:
-        """Clear the per-user /api/models cache. Call after any change that
-        affects the visible endpoint list (CRUD on ModelEndpoint, prefs
-        flip)."""
-        _models_cache.clear()
+    def _invalidate_models_cache(owner: str | None = None) -> None:
+        """Invalidate all cached catalogues or one owner's catalogue."""
+        if owner is None:
+            _models_cache.clear()
+        else:
+            owner_key = (owner or "").strip().lower()
+            for key in list(_models_cache):
+                if len(key) > 1 and key[1] == owner_key:
+                    _models_cache.pop(key, None)
+        invalidate_model_catalogue_revision(owner)
 
     def _schedule_mimo_reprojection(request: Request) -> None:
         """Endpoint registry mutated: recycle mimo workers so the next turn
@@ -1644,11 +2350,163 @@ def setup_model_routes(model_discovery):
         except RuntimeError:
             logger.debug("no running loop; mimo reprojection deferred to next spawn")
 
+    def _direct_share_source(db, owner: str, endpoint_id: str, model_id: str):
+        endpoint = db.query(ModelEndpoint).filter(
+            ModelEndpoint.id == endpoint_id,
+            ModelEndpoint.owner == owner,
+            ModelEndpoint.is_enabled == True,  # noqa: E712
+        ).first()
+        if endpoint is None or (endpoint.model_type or "llm") != "llm":
+            return None
+        return (
+            endpoint
+            if model_id in _endpoint_visible_model_ids(endpoint)
+            else None
+        )
+
+    def _share_provider_metadata(share: ModelShare, endpoint=None) -> tuple[str | None, str]:
+        """Return explicit provider metadata for legacy share rows.
+
+        Native rows can identify a family from their selected ``mimo:<family>``
+        connection. ``mimo:auto`` intentionally remains unresolved because its
+        historical row has no family column; a model ID is ambiguous and must
+        never be used as a substitute. Direct rows use the endpoint's detected
+        provider, which is connection metadata rather than model naming.
+        """
+        provider_id = None
+        if share.source_kind == "native":
+            connection_id = normalize_mimo_connection_id(share.source_id)
+            if connection_id and connection_id.startswith("mimo:"):
+                provider_id = connection_id.split(":", 1)[1] or None
+        else:
+            detected = _safe_detect_provider(getattr(endpoint, "base_url", "") or "")
+            if detected and detected not in {"custom", "openai-compatible"}:
+                provider_id = _DIRECT_PROVIDER_TO_MIMO.get(detected, detected)
+        return provider_id, provider_family_display_name(provider_id) or "Unknown provider"
+
+    def _share_display_name(share: ModelShare, endpoint=None) -> str:
+        """Return the safe explicit provider label used by legacy projections."""
+        return _share_provider_metadata(share, endpoint)[1]
+
+    def _share_users(request: Request, owner: str) -> list[str]:
+        manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
+        list_users = getattr(manager, "list_users", None)
+        if not callable(list_users):
+            return []
+        return sorted({
+            str(item.get("username") or "").strip().lower()
+            for item in list_users()
+            if isinstance(item, dict)
+            and str(item.get("username") or "").strip().lower()
+            not in {"", owner}
+        })
+
+    def _subscribed_shared_catalog(owner: str) -> list[dict]:
+        if not owner:
+            return []
+        db = SessionLocal()
+        try:
+            from src.model_shares import (
+                source_native_auth,
+                source_tools_enabled,
+            )
+            rows = (
+                db.query(ModelShare, ModelShareSubscription)
+                .join(
+                    ModelShareSubscription,
+                    ModelShareSubscription.share_id == ModelShare.id,
+                )
+                .filter(
+                    ModelShare.active == True,  # noqa: E712
+                    ModelShare.owner != owner,
+                    ModelShareSubscription.subscriber == owner,
+                    ModelShareSubscription.enabled == True,  # noqa: E712
+                )
+                .all()
+            )
+            items = []
+            for share, _subscription in rows:
+                access = SharedModelAccess(
+                    share_id=share.id,
+                    actor_owner=owner,
+                    credential_owner=share.owner,
+                    source_kind=share.source_kind,
+                    source_id=share.source_id,
+                    model_id=share.model_id,
+                    revision=int(share.revision or 1),
+                )
+                source_endpoint = None
+                if share.source_kind == "endpoint":
+                    source_endpoint = _direct_share_source(
+                        db,
+                        share.owner,
+                        share.source_id,
+                        share.model_id,
+                    )
+                    if source_endpoint is None:
+                        continue
+                elif share.source_kind != "native":
+                    continue
+                elif source_native_auth(db, access) is None:
+                    continue
+                tools_enabled = source_tools_enabled(db, access)
+                endpoint_id = shared_endpoint_id(share.id)
+                provider_family_id, provider_name = _share_provider_metadata(
+                    share,
+                    source_endpoint,
+                )
+                catalog = build_model_catalog(
+                    endpoint_id=endpoint_id,
+                    endpoint_url="mimo://acp",
+                    model_ids=[share.model_id],
+                    primary_ids=[share.model_id],
+                    display_names={
+                        share.model_id: _model_display_name(share.model_id),
+                    },
+                    families={
+                        share.model_id: provider_name,
+                    },
+                    discovered=True,
+                    entitled=True,
+                    capabilities={
+                        "chat": True,
+                        "tools": tools_enabled,
+                        "vision": None,
+                    },
+                )
+                items.append({
+                    "host": "shared",
+                    "port": 0,
+                    "url": "mimo://acp",
+                    "models": [share.model_id],
+                    "models_display": [_model_display_name(share.model_id)],
+                    "models_extra": [],
+                    "models_extra_display": [],
+                    "catalog": catalog,
+                    "endpoint_id": endpoint_id,
+                    "endpoint_name": f"{provider_name} · shared by {share.owner}",
+                    "category": "api",
+                    "endpoint_kind": "proxy",
+                    "model_type": "llm",
+                    "virtual": True,
+                    "read_only": True,
+                    "shared": True,
+                    "share_id": share.id,
+                    "shared_by": share.owner,
+                    "provider_family_id": provider_family_id,
+                    "provider_display_name": provider_name,
+                })
+            return items
+        finally:
+            db.close()
+
     # Track model-list refreshes by URL+key. This prevents repeated picker/API
     # opens from starting duplicate /models probes, and gives slow/offline
     # providers a cooldown after failures.
     _refresh_state: Dict[str, Dict[str, Any]] = {}
-    _refresh_inflight = {"v": False}  # coarse single-flight guard
+    import threading as _threading
+    _refresh_inflight: set[str] = set()
+    _refresh_inflight_lock = _threading.Lock()
     _REFRESH_FAILURE_BASE = 300.0
     _REFRESH_FAILURE_MAX = 3600.0
 
@@ -1721,9 +2579,11 @@ def setup_model_routes(model_discovery):
         a non-empty cached model list on timeout/failure, and proxy/manual
         endpoints are skipped unless explicitly forced."""
         import threading
-        if _refresh_inflight["v"]:
-            return  # already running
-        _refresh_inflight["v"] = True
+        owner_key = (owner or "").strip().lower()
+        with _refresh_inflight_lock:
+            if owner_key in _refresh_inflight:
+                return
+            _refresh_inflight.add(owner_key)
 
         def _do():
             try:
@@ -1796,13 +2656,16 @@ def setup_model_routes(model_discovery):
                 finally:
                     db.close()
                 if changed:
-                    _invalidate_models_cache()
+                    _invalidate_models_cache(owner)
             except Exception as e:
                 logger.warning('Background endpoint refresh failed: %s', e)
             finally:
-                for st in _refresh_state.values():
-                    st["inflight"] = False
-                _refresh_inflight["v"] = False
+                prefix = f"{owner_key}\x00"
+                for key, state in _refresh_state.items():
+                    if key.startswith(prefix):
+                        state["inflight"] = False
+                with _refresh_inflight_lock:
+                    _refresh_inflight.discard(owner_key)
         threading.Thread(target=_do, daemon=True).start()
 
     def _fetch_models(owner: str = ""):
@@ -1816,7 +2679,7 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             if _disable_stale_cookbook_local_endpoints(db, owner):
-                _invalidate_models_cache()
+                _invalidate_models_cache(owner)
             q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
             q = owner_filter(q, ModelEndpoint, owner, include_shared=False)
             endpoints = q.all()
@@ -1826,24 +2689,18 @@ def setup_model_routes(model_discovery):
         for ep in endpoints:
             base = _normalize_base(ep.base_url)
             provider = _safe_detect_provider(base)
-            # Merge cached + pinned models, then filter out hidden ones
             ep_model_type = getattr(ep, "model_type", None) or "llm"
-            model_ids = _visible_models(
-                _cached_model_ids(ep),
-                ep.hidden_models,
-                getattr(ep, "pinned_models", None),
-            )
             # Build correct URL based on provider
             chat_url = build_chat_url(base)
             kind = _effective_endpoint_kind(ep, base)
             category = _classify_endpoint(base, kind)
+            model_ids, pinned = _picker_models_for_endpoint(ep, base, kind)
 
             if model_ids:
                 curated_key = _match_provider_curated(base, None)
                 curated, extra = _curate_models(model_ids, curated_key)
                 # Pinned models are admin-selected — they always belong in the
                 # primary curated list, not buried in extras.
-                pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
                 for m in pinned:
                     if m not in curated:
                         curated.append(m)
@@ -1900,9 +2757,14 @@ def setup_model_routes(model_discovery):
 
     @router.get("/models")
     def api_models(request: Request, refresh: bool = False, background: bool = False):
-        """Get the caller's model catalogue, cached per owner for 30 seconds."""
-        # Require auth; "" is unconfigured single-user mode and only sees
-        # legacy ownerless endpoints.
+        """Return a read-only projection of normalized managed chat routes.
+
+        ``refresh`` and ``background`` remain accepted for wire compatibility,
+        but this endpoint never probes providers or wakes a worker. Catalog
+        discovery and credential semantics belong to the managed engine.
+        """
+        # Require auth; "" is unconfigured single-user mode and resolves to
+        # the normalized local-installation principal.
         try:
             if getattr(request.state, "api_token", False):
                 scopes = set(getattr(request.state, "api_token_scopes", []) or [])
@@ -1910,81 +2772,111 @@ def setup_model_routes(model_discovery):
                     raise HTTPException(403, "API token is not scoped for chat")
                 if not getattr(request.state, "api_token_owner", None):
                     raise HTTPException(403, "API token has no owner")
-            owner = effective_user(request) or ""
+            owner = (effective_user(request) or "").strip().lower()
 
             # Reject anonymous in configured deployments — no leaking the model
             # list to unauthenticated callers.
             auth_mgr = getattr(request.app.state, "auth_manager", None)
-            if not owner and not _auth_disabled() and auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
+            if not owner and auth_mgr is not None and getattr(auth_mgr, "is_configured", False):
                 raise HTTPException(401, "Not authenticated")
         except HTTPException:
             raise
         except Exception as e:
             logger.error("Auth gate error in GET /api/models, failing closed: %s", e)
             raise HTTPException(status_code=500, detail="Internal error")
-        _allowed_models = _allowed_model_ids(request, owner)
-        now = _time.time()
-        _cache_key = (
-            owner,
-            None if _allowed_models is None else tuple(sorted(_allowed_models)),
-        )
-        cache_entry = _models_cache.get(_cache_key)
-        if not refresh and cache_entry is not None and (now - cache_entry["time"]) < _MODELS_CACHE_TTL:
-            return cache_entry["data"]
-        result = _fetch_models(owner=owner)
-        # mimo reports up its own provider catalog (model authority lives in
-        # mimo's config, not the endpoint DB) — surface it as its own group.
-        _sup = getattr(request.app.state, "mimo_supervisor", None)
-        _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(_sup, owner)
-        if _mimo_models:
-            # Duplicate suppression happens inside _mimo_catalog: any provider
-            # a direct endpoint already serves is dropped from the mimo
-            # catalog, so direct endpoints always win and mimo only fills
-            # gaps. Nothing to shadow on the direct side anymore.
-            _mimo_displays = _mimo_display_names(_base, _variants)
+        try:
+            own_routes, shared_routes = list_chat_routes(owner)
+        except Exception as exc:
+            logger.error("Normalized provider catalogue failed closed: %s", exc)
+            raise HTTPException(503, "Provider catalogue is unavailable") from exc
 
-            result["items"].append({
-                "host": "custom",
-                "port": 0,
-                "url": "mimo://acp",
-                "models": _base,
-                # strip only the provider prefix: "anthropic/claude-x/low"
-                # must display as "claude-x/low", not "low"
-                "models_display": [_mimo_displays[mid] for mid in _base],
-                "models_extra": _variants,
-                "models_extra_display": [_mimo_displays[mid] for mid in _variants],
-                "catalog": build_model_catalog(
-                    endpoint_id="mimo",
-                    endpoint_url="mimo://acp",
-                    model_ids=_mimo_models,
-                    primary_ids=_base,
-                    extra_ids=_variants,
-                    display_names=_mimo_displays,
-                    families=_mimo_model_families(_mimo_models),
+        def _project_group(endpoint_id: str, routes: list) -> dict:
+            first = routes[0]
+            model_ids = [route.provider_model_id for route in routes]
+            displays = [route.display_name for route in routes]
+            catalog = []
+            for route in routes:
+                capabilities = dict(route.capabilities or {})
+                capabilities["chat"] = True
+                record = build_model_catalog(
+                    endpoint_id=endpoint_id,
+                    endpoint_url=MANAGED_ENGINE_PUBLIC_URL,
+                    model_ids=[route.provider_model_id],
+                    primary_ids=[route.provider_model_id],
+                    display_names={route.provider_model_id: route.display_name},
+                    families={
+                        route.provider_model_id: (
+                            None if route.shared else route.family_id
+                        )
+                    },
                     discovered=True,
                     entitled=True,
-                    capabilities={"chat": True, "tools": True, "vision": None},
+                    capabilities=capabilities,
+                )[0]
+                record.update({
+                    "provider_model_id": route.provider_model_id,
+                    "operations": list(route.operations),
+                })
+                if not route.shared:
+                    record["provider_model_route_id"] = route.model_route_id
+                else:
+                    # Private filtering aid removed before the response leaves
+                    # this function. Shared source route IDs are not public UI
+                    # selectors; the accepted grant is.
+                    record["_provider_model_route_id"] = route.model_route_id
+                catalog.append(record)
+
+            endpoint_name = first.share_label or first.connection_label
+            if first.disclosed_owner:
+                endpoint_name = f"{endpoint_name} · shared by {first.disclosed_owner}"
+            item = {
+                "host": "managed",
+                "port": 0,
+                "url": MANAGED_ENGINE_PUBLIC_URL,
+                "models": model_ids,
+                "models_display": displays,
+                "models_extra": [],
+                "models_extra_display": [],
+                "catalog": catalog,
+                "endpoint_id": endpoint_id,
+                "endpoint_name": endpoint_name,
+                "category": (
+                    "api"
+                    if first.shared
+                    else ("local" if first.connection_kind == "local" else "api")
                 ),
-                "endpoint_id": "mimo",
-                "endpoint_name": "MiMo runtime",
-                # The runtime aggregates cloud provider APIs — classifying it
-                # "local" put it in the Local endpoints section with a LOCAL
-                # badge. "auto" kind renders no badge at all.
-                "category": "api",
-                "endpoint_kind": "auto",
+                "endpoint_kind": "shared" if first.shared else first.connection_kind,
                 "model_type": "llm",
                 "virtual": True,
                 "read_only": True,
                 "actions": ["configure_providers"],
-                "settings_tab": "added-models",
-            })
-        result = _filter_catalog_for_allowed_models(result, _allowed_models)
-        _models_cache[_cache_key] = {"data": result, "time": now}
-        # Kick off background refresh to update caches from live endpoints.
-        # Page boot can opt out with background=false so opening Odysseus does
-        # not start endpoint probes against slow/offline model servers.
-        if background or refresh:
-            _refresh_caches_bg(owner=owner, force=refresh)
+                "settings_tab": "providers",
+            }
+            if first.shared:
+                item.update({
+                    "shared": True,
+                    "share_id": first.provider_grant_id,
+                })
+                if first.disclosed_owner:
+                    item["shared_by"] = first.disclosed_owner
+            else:
+                item["connection_id"] = first.connection_id
+                item["billing_lane"] = first.billing_lane
+                item["family_id"] = first.family_id
+            return item
+
+        result = {"hosts": [], "items": []}
+        for endpoint_id, routes in sorted(group_chat_routes(own_routes).items()):
+            result["items"].append(_project_group(endpoint_id, routes))
+        for endpoint_id, routes in sorted(group_chat_routes(shared_routes).items()):
+            result["items"].append(_project_group(endpoint_id, routes))
+        result = _filter_catalog_for_allowed_models(
+            result,
+            _allowed_model_ids(request, owner),
+        )
+        for item in result["items"]:
+            for record in item.get("catalog") or ():
+                record.pop("_provider_model_route_id", None)
         return result
 
     # Brief cache for local-probe results so picker-open doesn't hammer
@@ -2002,11 +2894,14 @@ def setup_model_routes(model_discovery):
         assumed up. Local endpoints get a 1.5s cheap reachability probe so the UI
         can dim stale entries pointing at dead vLLM servers. Returns
         {ep_id: {alive, latency_ms, error}}."""
-        require_admin(request)
-        owner = effective_user(request) or ""
+        owner = _require_endpoint_owner(request)
         now = _time.time()
         cache_entry = _local_probe_cache.get(owner)
-        if cache_entry is not None and (now - cache_entry["time"]) < _LOCAL_PROBE_TTL:
+        if (
+            cache_entry is not None
+            and cache_entry.get("revision") == model_catalogue_revision(owner)
+            and (now - cache_entry["time"]) < _LOCAL_PROBE_TTL
+        ):
             return cache_entry["data"]
 
         import asyncio as _asyncio
@@ -2018,7 +2913,7 @@ def setup_model_routes(model_discovery):
             db = SessionLocal()
             try:
                 if _disable_stale_cookbook_local_endpoints(db, owner):
-                    _invalidate_models_cache()
+                    _invalidate_models_cache(owner)
                 query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
                 query = owner_filter(query, ModelEndpoint, owner, include_shared=False)
                 endpoints = query.all()
@@ -2066,7 +2961,11 @@ def setup_model_routes(model_discovery):
                 for eid in data["endpoint_ids"]:
                     results[eid] = r
 
-            _local_probe_cache[owner] = {"data": results, "time": _time.time()}
+            _local_probe_cache[owner] = {
+                "data": results,
+                "time": _time.time(),
+                "revision": model_catalogue_revision(owner),
+            }
             return results
 
         task = _asyncio.create_task(_compute_local_probe())
@@ -2157,7 +3056,7 @@ def setup_model_routes(model_discovery):
 
                 base = _normalize_base(ep_data["base_url"])
                 _with_tools = item.get("with_tools", False)
-                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools)
+                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools, owner=_model_owner(request), endpoint_id=ep_id)
                 result["model"] = model_id
                 result["endpoint_id"] = ep_id
                 results.append(result)
@@ -2231,7 +3130,7 @@ def setup_model_routes(model_discovery):
 
                 for model_id in models:
                     total += 1
-                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8)
+                    result = _probe_single_model(base, ep.get("api_key"), model_id, timeout=8, owner=_model_owner(request), endpoint_id=ep["id"])
                     result["type"] = "probe_result"
                     result["endpoint"] = ep["name"]
                     result["model"] = model_id
@@ -2267,16 +3166,324 @@ def setup_model_routes(model_discovery):
         require_admin(request)
         return model_discovery.discover_models()
 
-    # ---- Admin: model endpoints CRUD ----
+    @router.get("/model-shares")
+    def list_model_shares(request: Request):
+        """List exact named-user grants owned by or addressed to the caller."""
+        owner = _require_endpoint_owner(request)
+        if not owner:
+            raise HTTPException(401, "Model sharing requires an account")
+        allowed = _allowed_model_ids(request, owner)
+        db = SessionLocal()
+        try:
+            owned_rows = db.query(ModelShare).filter(
+                ModelShare.owner == owner,
+                ModelShare.active == True,  # noqa: E712
+            ).all()
+            owned_ids = [share.id for share in owned_rows]
+            recipients: dict[str, list[dict]] = {
+                share_id: [] for share_id in owned_ids
+            }
+            if owned_ids:
+                for grant in db.query(ModelShareSubscription).filter(
+                    ModelShareSubscription.share_id.in_(owned_ids)
+                ).all():
+                    recipients.setdefault(grant.share_id, []).append({
+                        "username": grant.subscriber,
+                        "enabled": bool(grant.enabled),
+                    })
+            received = []
+            addressed = (
+                db.query(ModelShare, ModelShareSubscription)
+                .join(
+                    ModelShareSubscription,
+                    ModelShareSubscription.share_id == ModelShare.id,
+                )
+                .filter(
+                    ModelShare.owner != owner,
+                    ModelShare.active == True,  # noqa: E712
+                    ModelShareSubscription.subscriber == owner,
+                )
+                .all()
+            )
+            from src.model_shares import (
+                source_native_auth,
+                source_tools_enabled,
+            )
+
+            for share, grant in addressed:
+                if allowed is not None and share.model_id not in allowed:
+                    continue
+                access = SharedModelAccess(
+                    share_id=share.id,
+                    actor_owner=owner,
+                    credential_owner=share.owner,
+                    source_kind=share.source_kind,
+                    source_id=share.source_id,
+                    model_id=share.model_id,
+                    revision=int(share.revision or 1),
+                )
+                source_endpoint = None
+                if share.source_kind == "endpoint":
+                    source_endpoint = _direct_share_source(
+                        db,
+                        share.owner,
+                        share.source_id,
+                        share.model_id,
+                    )
+                    if source_endpoint is None:
+                        continue
+                elif share.source_kind != "native":
+                    continue
+                elif source_native_auth(db, access) is None:
+                    continue
+                provider_family_id, provider_name = _share_provider_metadata(
+                    share,
+                    source_endpoint,
+                )
+                received.append({
+                    "share_id": share.id,
+                    "endpoint_id": shared_endpoint_id(share.id),
+                    "model_id": share.model_id,
+                    "model_name": _model_display_name(share.model_id),
+                    "provider": provider_name,
+                    "provider_family_id": provider_family_id,
+                    "provider_display_name": provider_name,
+                    "shared_by": share.owner,
+                    "enabled": bool(grant.enabled),
+                    "tools": source_tools_enabled(db, access),
+                })
+            return {
+                "share_users": [
+                    {"username": username}
+                    for username in _share_users(request, owner)
+                ],
+                "owned": [
+                    {
+                        "share_id": share.id,
+                        "endpoint_id": share.source_id,
+                        "model_id": share.model_id,
+                        "source_kind": share.source_kind,
+                        "recipients": sorted(
+                            recipients.get(share.id, []),
+                            key=lambda item: item["username"].casefold(),
+                        ),
+                    }
+                    for share in owned_rows
+                ],
+                "received": sorted(
+                    received,
+                    key=lambda item: (
+                        item["provider"].casefold(),
+                        item["model_name"].casefold(),
+                        item["shared_by"].casefold(),
+                    ),
+                ),
+            }
+        finally:
+            db.close()
+
+    @router.put("/model-shares")
+    async def update_model_share(
+        payload: ModelShareUpdate,
+        request: Request,
+    ):
+        """Publish or revoke one exact owner-controlled model route."""
+        owner = _require_endpoint_owner(request)
+        if not owner:
+            raise HTTPException(401, "Model sharing requires an account")
+        endpoint_id = payload.endpoint_id.strip()
+        model_id = public_native_model_id(payload.model_id)
+        if not endpoint_id or not model_id:
+            raise HTTPException(400, "endpoint_id and model_id are required")
+
+        connection_id = normalize_mimo_connection_id(endpoint_id)
+        source_kind = "native" if connection_id else "endpoint"
+        source_id = connection_id or endpoint_id
+        recipients = {
+            str(recipient or "").strip().lower()
+            for recipient in payload.recipients
+            if str(recipient or "").strip()
+        }
+        known_recipients = set(_share_users(request, owner))
+        unknown = sorted(recipients - known_recipients)
+        if owner in recipients:
+            unknown.append(owner)
+        if unknown:
+            raise HTTPException(
+                400,
+                f"Unknown share recipient: {unknown[0]}",
+            )
+        db = SessionLocal()
+        try:
+            if source_kind == "endpoint":
+                if _direct_share_source(db, owner, source_id, model_id) is None:
+                    raise HTTPException(404, "Owned model route not found")
+            else:
+                if model_id == "xiaomi/mimo-auto":
+                    raise HTTPException(
+                        400,
+                        "MiMo Auto is already included for every Open Clank user",
+                    )
+                supervisor = getattr(request.app.state, "mimo_supervisor", None)
+                if supervisor is None:
+                    raise HTTPException(503, "Open Clank agent runtime is unavailable")
+                worker = supervisor
+                starter = getattr(supervisor, "for_owner", None)
+                if callable(starter):
+                    try:
+                        worker = await starter(owner)
+                    except RuntimeError as exc:
+                        raise HTTPException(503, str(exc)) from exc
+                if model_id not in mimo_connection_model_ids(
+                    worker,
+                    owner,
+                    source_id,
+                ):
+                    raise HTTPException(404, "Owned model route not found")
+
+            existing = db.query(ModelShare).filter(
+                ModelShare.owner == owner,
+                ModelShare.source_kind == source_kind,
+                ModelShare.source_id == source_id,
+                ModelShare.model_id == model_id,
+            ).first()
+            if not payload.shared:
+                if existing is not None:
+                    revocations = [
+                        (grant.subscriber, existing.id, existing.model_id)
+                        for grant in db.query(ModelShareSubscription).filter(
+                            ModelShareSubscription.share_id == existing.id,
+                            ModelShareSubscription.enabled == True,  # noqa: E712
+                        ).all()
+                    ]
+                    db.query(ModelShareSubscription).filter(
+                        ModelShareSubscription.share_id == existing.id
+                    ).delete(synchronize_session=False)
+                    db.delete(existing)
+                    db.commit()
+                    _invalidate_models_cache()
+                    _schedule_mimo_reprojection(request)
+                    await revoke_shared_model_workers(request, revocations)
+                    notify_shared_model_removals(revocations, shared_by=owner)
+                return {"shared": False}
+            created = existing is None
+            if created:
+                existing = ModelShare(
+                    id=uuid.uuid4().hex,
+                    owner=owner,
+                    source_kind=source_kind,
+                    source_id=source_id,
+                    model_id=model_id,
+                    active=True,
+                    revision=1,
+                )
+                db.add(existing)
+                db.flush()
+            current = {
+                grant.subscriber: grant
+                for grant in db.query(ModelShareSubscription).filter(
+                    ModelShareSubscription.share_id == existing.id
+                ).all()
+            }
+            changed_recipients = set(current) != recipients
+            revocations = [
+                (username, existing.id, existing.model_id)
+                for username, grant in current.items()
+                if username not in recipients and grant.enabled
+            ]
+            for username, grant in current.items():
+                if username not in recipients:
+                    db.delete(grant)
+            for username in recipients - set(current):
+                db.add(ModelShareSubscription(
+                    share_id=existing.id,
+                    subscriber=username,
+                    enabled=False,
+                ))
+            if changed_recipients:
+                existing.revision = int(existing.revision or 1) + 1
+            if created or changed_recipients:
+                db.commit()
+                _invalidate_models_cache()
+                _schedule_mimo_reprojection(request)
+                await revoke_shared_model_workers(request, revocations)
+                notify_shared_model_removals(revocations, shared_by=owner)
+            return {
+                "shared": True,
+                "share_id": existing.id,
+                "endpoint_id": source_id,
+                "model_id": model_id,
+                "recipients": sorted(recipients),
+            }
+        finally:
+            db.close()
+
+    @router.put("/model-shares/{share_id}/subscription")
+    async def update_model_share_subscription(
+        share_id: str,
+        payload: ModelShareSubscriptionUpdate,
+        request: Request,
+    ):
+        """Opt the caller into or out of one active published route."""
+        owner = _require_endpoint_owner(request)
+        if not owner:
+            raise HTTPException(401, "Model sharing requires an account")
+        db = SessionLocal()
+        try:
+            share = db.query(ModelShare).filter(
+                ModelShare.id == share_id,
+                ModelShare.active == True,  # noqa: E712
+            ).first()
+            if share is None or share.owner == owner:
+                raise HTTPException(404, "Shared model not found")
+            allowed = _allowed_model_ids(request, owner)
+            if allowed is not None and share.model_id not in allowed:
+                raise HTTPException(403, "This account is not allowed to use that model")
+            subscription = db.query(ModelShareSubscription).filter(
+                ModelShareSubscription.share_id == share.id,
+                ModelShareSubscription.subscriber == owner,
+            ).first()
+            if subscription is None:
+                raise HTTPException(404, "This model was not shared with your account")
+            if not payload.enabled:
+                subscription.enabled = False
+                db.commit()
+                _invalidate_models_cache(owner)
+                _schedule_mimo_reprojection(request)
+                await revoke_shared_model_workers(
+                    request,
+                    [(owner, share.id, share.model_id)],
+                )
+                return {"enabled": False}
+            subscription.enabled = True
+            db.commit()
+            _invalidate_models_cache(owner)
+            _schedule_mimo_reprojection(request)
+            return {
+                "enabled": True,
+                "endpoint_id": shared_endpoint_id(share.id),
+                "model_id": share.model_id,
+            }
+        finally:
+            db.close()
+
+    # ---- Owner-scoped model endpoints CRUD ----
 
     @router.get("/model-endpoints")
     def list_model_endpoints(request: Request) -> List[Dict[str, Any]]:
-        require_admin(request)
+        owner = _require_endpoint_owner(request)
         db = SessionLocal()
         try:
-            if _disable_stale_cookbook_local_endpoints(db, _model_owner(request)):
-                _invalidate_models_cache()
+            if _disable_stale_cookbook_local_endpoints(db, owner):
+                _invalidate_models_cache(owner)
             rows = _owned_endpoint_query(db, request).order_by(ModelEndpoint.created_at).all()
+            shared_routes = {
+                (share.source_kind, share.source_id, share.model_id)
+                for share in db.query(ModelShare).filter(
+                    ModelShare.owner == owner,
+                    ModelShare.active == True,  # noqa: E712
+                ).all()
+            }
             results = []
             from src.model_capabilities import endpoint_capability_states
             for r in rows:
@@ -2295,7 +3502,6 @@ def setup_model_routes(model_discovery):
                 # Keep the list route cache-only. It feeds Settings →
                 # Added Models and must render immediately; explicit
                 # Refresh/Probe endpoints do the network work.
-                status = "online" if (all_models or pinned) else ("empty" if r.is_enabled else "offline")
                 ping = None
                 # When cached_models is empty, do a quick reachability probe.
                 # Bumped 1.0s → 3.5s because the user reported endpoints they
@@ -2327,6 +3533,11 @@ def setup_model_routes(model_discovery):
                                 "api_key_fingerprint": _api_key_fingerprint(r.api_key),
                                 "is_enabled": r.is_enabled,
                                 "models": visible,
+                                "shared_models": [
+                                    model_id
+                                    for model_id in visible
+                                    if ("endpoint", r.id, model_id) in shared_routes
+                                ],
                                 "pinned_models": pinned,
                                 "hidden_count": len(hidden),
                                 "online": True,
@@ -2382,6 +3593,24 @@ def setup_model_routes(model_discovery):
                             logger.debug(f"opportunistic cached_models refill failed for {r.id}: {_refill_err!r}")
                 base = _normalize_base(r.base_url)
                 kind = _effective_endpoint_kind(r, base)
+                visible, pinned = _picker_models_for_endpoint(r, base, kind)
+                model_inventory_count = len(_merge_model_ids(all_models, pinned))
+                picker_requires_pinning = _picker_requires_pinning(base, kind)
+                status = "online" if (all_models or visible or pinned) else ("empty" if r.is_enabled else "offline")
+                model_capabilities = endpoint_capability_states(db, r)
+                _cap_by_model = {
+                    item["model_id"]: item for item in model_capabilities
+                }
+                _visible_caps = [
+                    _cap_by_model[m] for m in visible if m in _cap_by_model
+                ]
+                tools_summary = (
+                    True
+                    if _visible_caps and all(item["eligible"] for item in _visible_caps)
+                    else False
+                    if any(item["status"] == "blocked" for item in _visible_caps)
+                    else None
+                )
                 catalog_primary, catalog_extra = _curate_models(
                     visible, _match_provider_curated(base, _safe_detect_provider(base))
                 )
@@ -2393,6 +3622,13 @@ def setup_model_routes(model_discovery):
                     "api_key_fingerprint": _api_key_fingerprint(r.api_key),
                     "is_enabled": r.is_enabled,
                     "models": visible,
+                    "shared_models": [
+                        model_id
+                        for model_id in visible
+                        if ("endpoint", r.id, model_id) in shared_routes
+                    ],
+                    "model_count": model_inventory_count,
+                    "picker_requires_pinning": picker_requires_pinning,
                     "pinned_models": pinned,
                     "hidden_count": len(hidden),
                     "online": status != "offline",
@@ -2423,62 +3659,62 @@ def setup_model_routes(model_discovery):
                     "model_refresh_interval": getattr(r, "model_refresh_interval", None),
                     "model_refresh_timeout": getattr(r, "model_refresh_timeout", None),
                 })
-
-            # Keep the settings catalog aligned with /api/models. MiMo is a
-            # virtual ACP endpoint, so it has no ModelEndpoint row to appear
-            # in the original admin list. Expose the same handshake catalog
-            # here so Default/Utility/Research settings can select it.
+            # Keep the legacy automatic route available to defaults and other
+            # selectors. Added Models hides selector-only rows and renders the
+            # actual provider accounts instead.
             _sup = getattr(getattr(getattr(request, "app", None), "state", None), "mimo_supervisor", None)
+            ensure_owner_mimo_worker(_sup, owner)
             _mimo_models, _base, _variants, _hidden_count = _mimo_catalog(
-                _sup, effective_user(request)
+                _sup, owner
             )
-            _providers_breakdown = _mimo_provider_breakdown(_sup, effective_user(request))
-            # One ordinary-looking endpoint row PER ACTIVE provider — the
-            # runtime itself is plumbing and never appears as a thing. A user
-            # must not be able to tell these rows from direct endpoints.
-            # Suppressed providers are visible in the Connect-a-provider
-            # section (served_by state), never as rows: their models already
-            # have a real endpoint row above.
-            _provider_apis = {}
-            try:
-                _provider_apis = _sup.provider_apis(owner=effective_user(request)) if _sup else {}
-            except Exception:
-                _provider_apis = {}
-            _mimo_displays = _mimo_display_names(_base, _variants)
-            _families = _mimo_model_families(_mimo_models)
-            for _entry in _providers_breakdown:
-                if not _entry.get("active"):
-                    continue
-                _pid = _entry["id"]
-                _p_models = [m for m in _mimo_models if m.split("/", 1)[0] == _pid]
-                if not _p_models:
-                    continue
-                _p_base = [m for m in _base if m.split("/", 1)[0] == _pid]
-                _p_variants = [m for m in _variants if m.split("/", 1)[0] == _pid]
+            # The aggregate drops owner-hidden models with the rest; report
+            # how many were hidden so selector totals stay truthful.
+            _owner_hidden_ids = _owner_hidden_mimo_model_ids(owner)
+            _mimo_owner_hidden_count = 0
+            if _owner_hidden_ids:
+                _mimo_inventory = set(
+                    _public_mimo_model_ids(_sup, owner, include_owner_hidden=True)
+                )
+                _mimo_owner_hidden_count = len([
+                    model_id
+                    for model_id in _owner_hidden_ids
+                    if model_id in _mimo_inventory and _is_chat_model(model_id)
+                ])
+            if _mimo_models:
+                _mimo_displays = _mimo_display_names(_base, _variants)
+                _mimo_relations = _mimo_model_relations(
+                    _sup, owner, _mimo_models
+                )
                 results.append({
-                    "id": f"mimo:{_pid}",
-                    "name": _entry.get("family") or _pid.capitalize(),
-                    "base_url": _provider_apis.get(_pid, ""),
+                    "id": "mimo:auto",
+                    "name": "Automatic",
+                    "base_url": "mimo://acp",
                     "has_key": False,
                     "api_key_fingerprint": None,
                     "is_enabled": True,
-                    "models": _p_models,
-                    "models_primary": _p_base,
-                    "models_extra": _p_variants,
+                    "models": _mimo_models,
+                    "shared_models": [
+                        model_id
+                        for model_id in _mimo_models
+                        if ("native", "mimo:auto", model_id) in shared_routes
+                    ],
+                    "models_primary": _base,
+                    "models_extra": _variants,
                     "catalog": build_model_catalog(
-                        endpoint_id=f"mimo:{_pid}",
+                        endpoint_id="mimo:auto",
                         endpoint_url="mimo://acp",
-                        model_ids=_p_models,
-                        primary_ids=_p_base,
-                        extra_ids=_p_variants,
+                        model_ids=_mimo_models,
+                        primary_ids=_base,
+                        extra_ids=_variants,
                         display_names=_mimo_displays,
-                        families=_families,
+                        families=_mimo_model_families(_mimo_models),
+                        relations=_mimo_relations,
                         discovered=True,
                         entitled=True,
                         capabilities={"chat": True, "tools": True, "vision": None},
                     ),
                     "pinned_models": [],
-                    "hidden_count": 0,
+                    "hidden_count": _mimo_owner_hidden_count,
                     "online": True,
                     "status": "online",
                     "ping_error": None,
@@ -2490,7 +3726,41 @@ def setup_model_routes(model_discovery):
                     "model_refresh_interval": None,
                     "model_refresh_timeout": None,
                     "read_only": True,
-                    "provider_row": _pid,
+                    "selector_only": True,
+                })
+            for shared in _subscribed_shared_catalog(owner):
+                results.append({
+                    "id": shared["endpoint_id"],
+                    "name": shared["endpoint_name"],
+                    "base_url": "mimo://acp",
+                    "has_key": False,
+                    "api_key_fingerprint": None,
+                    "is_enabled": True,
+                    "models": list(shared["models"]),
+                    "shared_models": [],
+                    "models_primary": list(shared["models"]),
+                    "models_extra": [],
+                    "catalog": shared["catalog"],
+                    "pinned_models": [],
+                    "hidden_count": 0,
+                    "online": True,
+                    "status": "online",
+                    "ping_error": None,
+                    "model_type": "llm",
+                    "supports_tools": (
+                        shared["catalog"][0].get("capabilities", {}).get("tools")
+                        if shared["catalog"]
+                        else None
+                    ),
+                    "endpoint_kind": "proxy",
+                    "category": "api",
+                    "model_refresh_mode": "auto",
+                    "model_refresh_interval": None,
+                    "model_refresh_timeout": None,
+                    "read_only": True,
+                    "selector_only": False,
+                    "shared": True,
+                    "shared_by": shared["shared_by"],
                 })
             return results
         finally:
@@ -2513,25 +3783,27 @@ def setup_model_routes(model_discovery):
         pinned_models: str = Form(""),  # admin-pinned IDs: list/JSON/comma/newline
         container_local: str = Form("false"),
     ):
-        require_admin(request)
-        _caller = _model_owner(request) or None
-        base_url = _normalize_base(base_url)
+        _owner = _require_endpoint_owner(request)
+        _caller = _owner or None
+        base_url = canonical_endpoint_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
+        _validate_owner_endpoint_url(request, _owner, base_url)
         # Resolve hostname via Tailscale if DNS fails
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
         # In Docker, manually added loopback URLs usually point at a host-local
-        # server. Cookbook local serves are launched inside Odysseus itself, so
+        # server. Cookbook local serves are launched inside Open Clank itself, so
         # keep those container-local when the frontend marks them as such.
         base_url = _rewrite_loopback_for_docker(base_url, container_local=_truthy(container_local))
+        base_url = canonical_endpoint_base(base_url)
 
         # Auto-generate name from URL if not provided
         if not name.strip():
             name = base_url.replace("http://", "").replace("https://", "").split("/")[0]
 
         requested_kind = _normalize_endpoint_kind(endpoint_kind)
-        refresh_mode = _normalize_refresh_mode(model_refresh_mode, requested_kind)
+        refresh_mode = _normalize_endpoint_refresh_mode(model_refresh_mode, requested_kind, base_url)
         refresh_interval = _parse_positive_int(model_refresh_interval, minimum=30, maximum=86400)
         refresh_timeout = _parse_positive_int(model_refresh_timeout, minimum=1, maximum=60)
         require_model_list = _truthy(require_models)
@@ -2545,27 +3817,24 @@ def setup_model_routes(model_discovery):
         _incoming_api_key = api_key.strip()
         _db_dedup = SessionLocal()
         try:
-            _same_url_query = _db_dedup.query(ModelEndpoint).filter(
-                ModelEndpoint.base_url == base_url
-            )
+            _same_url_query = _db_dedup.query(ModelEndpoint)
             if _caller:
                 _same_url_query = _same_url_query.filter(ModelEndpoint.owner == _caller)
             else:
                 _same_url_query = _same_url_query.filter(ModelEndpoint.owner.is_(None))
             _same_url_rows = _same_url_query.all()
-            existing = None
-            _empty_key_existing = None
-            for _candidate in _same_url_rows:
-                _candidate_key = (getattr(_candidate, "api_key", None) or "").strip()
-                if _candidate_key == _incoming_api_key:
-                    existing = _candidate
-                    break
-                if _incoming_api_key and not _candidate_key and _empty_key_existing is None:
-                    _empty_key_existing = _candidate
-            if existing is None and _incoming_api_key and _empty_key_existing is not None:
-                existing = _empty_key_existing
+            existing = matching_endpoint(_same_url_rows, base_url, _incoming_api_key)
             if existing:
                 changed = False
+                if existing.base_url != base_url:
+                    existing.base_url = base_url
+                    changed = True
+                if not existing.is_enabled:
+                    existing.is_enabled = True
+                    changed = True
+                if _endpoint_refresh_mode(existing) == "disabled":
+                    existing.model_refresh_mode = refresh_mode
+                    changed = True
                 # Persist any incoming pinned IDs onto the existing row. An
                 # empty/omitted form field must not wipe previously pinned IDs.
                 _incoming_pinned = _normalize_model_ids(pinned_models)
@@ -2589,6 +3858,10 @@ def setup_model_routes(model_discovery):
                 if refresh_timeout is not None:
                     existing.model_refresh_timeout = refresh_timeout
                     changed = True
+                incoming_model_type = (model_type or "").strip() or "llm"
+                if incoming_model_type and (getattr(existing, "model_type", None) or "llm") != incoming_model_type:
+                    existing.model_type = incoming_model_type
+                    changed = True
                 if api_key.strip() and not existing.api_key:
                     existing.api_key = api_key.strip()
                     changed = True
@@ -2610,9 +3883,25 @@ def setup_model_routes(model_discovery):
                     if probed_models:
                         existing.cached_models = json.dumps(probed_models)
                         changed = True
+                # Repair API rows created before pin seeding existed: with no
+                # explicit pins they are invisible in the chat picker even
+                # though enabled. Rows with a legacy hidden list already render
+                # via the legacy fallback, so only heal rows with neither.
+                if (
+                    not _incoming_pinned
+                    and not _has_explicit_pinned_models(existing)
+                    and not _hidden_model_ids(existing)
+                    and _picker_requires_pinning(base_url, existing_kind_for_probe)
+                ):
+                    from src.endpoint_resolver import chat_capable_models
+                    _seed = chat_capable_models(_cached_model_ids(existing))
+                    if _seed:
+                        existing.pinned_models = json.dumps(_seed)
+                        changed = True
                 if changed:
                     _db_dedup.commit()
-                    _invalidate_models_cache()
+                    _invalidate_models_cache(_owner)
+                    _schedule_mimo_reprojection(request)
                     _local_probe_cache.clear()
                 existing_models = _cached_model_ids(existing)
                 _existing_pinned = _normalize_model_ids(getattr(existing, "pinned_models", None))
@@ -2632,6 +3921,7 @@ def setup_model_routes(model_discovery):
                     "online": True,
                     "status": "online",
                     "existing": True,
+                    "is_enabled": bool(existing.is_enabled),
                     "endpoint_kind": existing_kind,
                     "category": _classify_endpoint(existing.base_url, existing_kind),
                     "catalog_probe": _catalog_probe_payload(existing),
@@ -2658,6 +3948,17 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             _pinned = _normalize_model_ids(pinned_models)
+            # API-class pickers treat pinned_models as an allow-list; a row
+            # stored without pins is invisible in chat even though it probes
+            # fine. Seed every probed chat model so a freshly added connection
+            # works immediately (pre-sync behavior: what you add shows up).
+            if (
+                not _pinned
+                and model_ids
+                and _picker_requires_pinning(base_url, requested_kind)
+            ):
+                from src.endpoint_resolver import chat_capable_models
+                _pinned = chat_capable_models(model_ids) or []
             ep = ModelEndpoint(
                 id=ep_id,
                 name=name.strip(),
@@ -2715,7 +4016,7 @@ def setup_model_routes(model_discovery):
                     _save_for_user(_caller, settings)
                 else:
                     _save_settings(settings)
-            _invalidate_models_cache()
+            _invalidate_models_cache(_owner)
             _local_probe_cache.clear()
         finally:
             db.close()
@@ -2731,6 +4032,7 @@ def setup_model_routes(model_discovery):
             "pinned_models": _pinned,
             "online": bool(model_ids) or bool(_pinned) or bool(ping.get("reachable")),
             "status": "online" if (model_ids or _pinned) else ("loading" if ping.get("loading") else ("empty" if ping.get("reachable") else "offline")),
+            "is_enabled": True,
             "ping_error": ping.get("error") if ping else None,
             "endpoint_kind": requested_kind,
             "category": _classify_endpoint(base_url, requested_kind),
@@ -2745,10 +4047,11 @@ def setup_model_routes(model_discovery):
         endpoint_kind: str = Form("auto"),
         model_refresh_timeout: str = Form(""),
     ):
-        require_admin(request)
+        owner = _require_endpoint_owner(request)
         base_url = _normalize_base(base_url)
         if not base_url:
             raise HTTPException(400, "Base URL is required")
+        _validate_owner_endpoint_url(request, owner, base_url)
         from src.endpoint_resolver import resolve_url
         base_url = resolve_url(base_url)
         base_url = _rewrite_loopback_for_docker(base_url)
@@ -2776,7 +4079,7 @@ def setup_model_routes(model_discovery):
     @router.get("/model-endpoints/{ep_id}/probe")
     def probe_endpoint_models(ep_id: str, request: Request):
         """Re-probe all models on an endpoint. Updates hidden_models and streams SSE results."""
-        require_admin(request)
+        owner = _require_endpoint_owner(request)
         if _mimo_endpoint_provider(ep_id)[0]:
             raise HTTPException(409, "These models refresh automatically with the provider connection")
         db = SessionLocal()
@@ -2798,7 +4101,7 @@ def setup_model_routes(model_discovery):
             failed = []
             ok_count = 0
             for mid in chat_models:
-                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
+                result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8, owner=_model_owner(request), endpoint_id=ep_data.get("id", ""))
                 result["model"] = mid
                 result["type"] = "probe_result"
                 result["endpoint"] = ep_data["name"]
@@ -2822,7 +4125,7 @@ def setup_model_routes(model_discovery):
                     db2.commit()
             finally:
                 db2.close()
-            _invalidate_models_cache()
+            _invalidate_models_cache(owner)
 
             yield f"data: {json.dumps({'type': 'probe_done', 'total': len(all_models), 'ok': ok_count, 'hidden': len(failed)})}\n\n"
 
@@ -2837,20 +4140,26 @@ def setup_model_routes(model_discovery):
         refresh_timeout: Optional[int] = Query(None, ge=1, le=60),
     ):
         """List all discovered models for an endpoint with hidden/visible state."""
-        require_admin(request)
+        owner = _require_endpoint_owner(request)
         _is_mimo, _mimo_pid = _mimo_endpoint_provider(ep_id)
         if _is_mimo:
             supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            models, _, _, _ = _mimo_catalog(supervisor, effective_user(request))
-            if _mimo_pid:
-                models = [m for m in models if m.split("/", 1)[0] == _mimo_pid]
+            ensure_owner_mimo_worker(supervisor, owner)
+            # Full inventory with per-model visibility: hiding a model must
+            # not erase it from the panel, or it could never be re-enabled.
+            models = mimo_connection_model_ids(
+                supervisor, owner, ep_id, include_owner_hidden=True
+            )
+            _hidden = (
+                _owner_hidden_mimo_model_ids(owner, _mimo_pid) if _mimo_pid else set()
+            )
             return [
                 {
                     "id": model_id,
                     "display": model_id.split("/", 1)[-1],
-                    "is_hidden": False,
+                    "is_hidden": model_id in _hidden,
                     "is_pinned": False,
-                    "read_only": True,
+                    "read_only": not _mimo_pid,
                 }
                 for model_id in models
             ]
@@ -2861,9 +4170,10 @@ def setup_model_routes(model_discovery):
                 raise HTTPException(404, "Endpoint not found")
             hidden = _hidden_model_ids(ep)
             all_models = _cached_model_ids(ep)
+            base = _normalize_base(ep.base_url)
+            kind = _effective_endpoint_kind(ep, base)
+            picker_requires_pinning = _picker_requires_pinning(base, kind)
             if refresh:
-                base = _normalize_base(ep.base_url)
-                kind = _effective_endpoint_kind(ep, base)
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
@@ -2880,7 +4190,7 @@ def setup_model_routes(model_discovery):
                 if probed:
                     all_models = probed
                     ep.cached_models = json.dumps(all_models)
-                    _invalidate_models_cache()
+                    _invalidate_models_cache(owner)
                     response.headers["X-Model-Refresh-Status"] = "refreshed"
                     response.headers["X-Model-Refresh-Count"] = str(len(probed))
                 else:
@@ -2888,6 +4198,8 @@ def setup_model_routes(model_discovery):
                     response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
                 db.commit()
             pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+            if picker_requires_pinning and not _has_explicit_pinned_models(ep):
+                pinned = _legacy_visible_api_models(ep)
             pinned_set = set(pinned)
             return [
                 {
@@ -2895,6 +4207,7 @@ def setup_model_routes(model_discovery):
                     "display": m.split("/")[-1],
                     "is_hidden": m in hidden,
                     "is_pinned": m in pinned_set,
+                    "picker_requires_pinning": picker_requires_pinning,
                 }
                 for m in _merge_model_ids(all_models, pinned)
             ]
@@ -2910,9 +4223,25 @@ def setup_model_routes(model_discovery):
         Each key is updated only when present, so callers can patch one list
         without clobbering the other.
         """
-        require_admin(request)
-        if _mimo_endpoint_provider(ep_id)[0]:
-            raise HTTPException(409, "Model visibility for this provider is managed by its connection")
+        owner = _require_endpoint_owner(request)
+        _is_mimo_ep, _mimo_provider_id = _mimo_endpoint_provider(ep_id)
+        if _is_mimo_ep:
+            if not _mimo_provider_id:
+                raise HTTPException(
+                    409,
+                    "Automatic routing has no per-model visibility; "
+                    "manage the provider accounts instead",
+                )
+            body = await request.json()
+            if not isinstance(body, dict) or not isinstance(body.get("hidden"), list):
+                raise HTTPException(
+                    400, "Body must be a JSON object with a hidden list of model IDs"
+                )
+            hidden_count = _set_owner_hidden_mimo_models(
+                owner, _mimo_provider_id, body["hidden"]
+            )
+            _invalidate_models_cache(owner)
+            return {"id": ep_id, "hidden_count": hidden_count}
         db = SessionLocal()
         try:
             ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
@@ -2925,13 +4254,30 @@ def setup_model_routes(model_discovery):
                 hidden = body.get("hidden")
                 if not isinstance(hidden, list):
                     raise HTTPException(400, "hidden must be a list of model IDs")
-                ep.hidden_models = json.dumps(hidden) if hidden else None
+                base = _normalize_base(ep.base_url)
+                kind = _effective_endpoint_kind(ep, base)
+                if _picker_requires_pinning(base, kind):
+                    # Compatibility for older/admin UI paths that still submit
+                    # the previous hide-list shape. API pickers are allow-lists:
+                    # convert "unchecked models" into an explicit pinned list so
+                    # Settings summary, /api/models, and chat agree.
+                    selected = _visible_models(_cached_model_ids(ep), hidden, None)
+                    ep.pinned_models = json.dumps(selected)
+                    ep.hidden_models = None
+                else:
+                    ep.hidden_models = json.dumps(hidden) if hidden else None
             # Accept either "pinned" or "pinned_models" for the manual IDs list.
             if "pinned_models" in body or "pinned" in body:
                 pinned = _normalize_model_ids(body.get("pinned_models", body.get("pinned")))
-                ep.pinned_models = json.dumps(pinned) if pinned else None
+                base = _normalize_base(ep.base_url)
+                kind = _effective_endpoint_kind(ep, base)
+                if _picker_requires_pinning(base, kind):
+                    ep.pinned_models = json.dumps(pinned)
+                    ep.hidden_models = None
+                else:
+                    ep.pinned_models = json.dumps(pinned) if pinned else None
             db.commit()
-            _invalidate_models_cache()
+            _invalidate_models_cache(owner)
             _schedule_mimo_reprojection(request)
             hidden_count = len(json.loads(ep.hidden_models)) if ep.hidden_models else 0
             pinned_count = len(json.loads(ep.pinned_models)) if ep.pinned_models else 0
@@ -2941,136 +4287,51 @@ def setup_model_routes(model_discovery):
 
     @router.get("/default-chat")
     def get_default_chat(request: Request):
-        # SECURITY: resolve the default endpoint + model from the CALLER's
-        # per-user prefs ONLY. We deliberately do NOT fall back to the
-        # global `default_model` / `default_endpoint_id` in settings.json
-        # for authenticated users — that's what was leaking the previous
-        # admin's pick into every new account's composer. If the user has
-        # no per-user default yet, we resolve via the owner-scoped endpoint
-        # lookup below (last-resort: first enabled endpoint THIS user owns).
-        # Unauthenticated single-user mode keeps the old behavior.
+        user = _model_owner(request)
+        owner = normalized_provider_owner(user)
+        allowed = _allowed_model_ids(request, user)
         try:
-            _user = _model_owner(request)
-        except Exception:
-            _user = ""
-        settings = _load_settings()
-        if _user:
-            from routes.prefs_routes import _load_for_user
-            _user_prefs = _load_for_user(_user) or {}
-            ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
-            model = (_user_prefs.get("default_model") or "").strip()
-            _fallbacks = _user_prefs.get("default_model_fallbacks") or []
-            # MiMo is a virtual per-owner runtime, not a shared database
-            # endpoint. Reusing the operator's virtual default is safe because
-            # the catalogue below is still fetched for this caller and an
-            # unconnected account resolves to nothing. This also preserves the
-            # pre-isolation default for the existing admin without exposing any
-            # other user's credentials or models.
-            _global_ep = str(settings.get("default_endpoint_id") or "").strip()
-            if not ep_id and _mimo_endpoint_provider(_global_ep)[0]:
-                ep_id = _global_ep
-                model = str(settings.get("default_model") or "").strip()
-            # If user has no personal default, fall back to global default
-            # But only based on the "share_defaults_with_users" flag
-            # (only if share_defaults_with_users is enabled)
-            if settings.get("share_defaults_with_users", False):
-                if not ep_id:
-                    ep_id = settings.get("default_endpoint_id", "")
-                if not model:
-                    model = settings.get("default_model", "")
-                if not _fallbacks:
-                    _fallbacks = settings.get("default_model_fallbacks") or []
-        else:
-            ep_id = settings.get("default_endpoint_id", "")
-            model = settings.get("default_model", "")
-            _fallbacks = settings.get("default_model_fallbacks") or []
+            own_routes, shared_routes = list_chat_routes(user)
+            routes = [*own_routes, *shared_routes]
+            by_route_id = {route.model_route_id: route for route in routes}
+            bindings = [
+                binding
+                for binding in ProviderStore().list_route_bindings(owner=owner)
+                if binding.purpose == "chat"
+            ]
+        except (ProviderStoreError, ChatRouteUnavailable) as exc:
+            logger.error("Normalized default chat lookup failed: %s", exc)
+            raise HTTPException(503, "Default provider route is unavailable") from exc
 
-        _is_mimo, _mimo_pid = _mimo_endpoint_provider(ep_id)
-        if _is_mimo:
-            _sup = getattr(request.app.state, "mimo_supervisor", None)
-            # Chat-filtered catalog (same filter as the picker): a stale
-            # configured default must never fall back to a TTS model or to
-            # whatever provider happens to sort first in the raw handshake.
-            _catalog, _catalog_base, _, _ = _mimo_catalog(_sup, _user)
-            if _mimo_pid:
-                _catalog = [m for m in _catalog if m.split("/", 1)[0] == _mimo_pid]
-                _catalog_base = [m for m in _catalog_base if m.split("/", 1)[0] == _mimo_pid]
-            _allowed = _allowed_model_ids(request, _user)
-            if _allowed is not None:
-                _catalog = [item for item in _catalog if item in _allowed]
-                _catalog_base = [item for item in _catalog_base if item in _allowed]
-            if not _catalog:
-                return {"endpoint_id": "", "endpoint_url": "", "model": ""}
-            if not model or model not in _catalog:
-                # Nothing (valid) configured: prefer the router's auto mode —
-                # it picks a model per request — before any specific model.
-                pool = _catalog_base or _catalog
-                model = next(
-                    (m for m in pool if m.rsplit("/", 1)[-1] in ("mimo-auto", "auto")),
-                    pool[0],
-                )
-            return {"endpoint_id": ep_id, "endpoint_url": "mimo://acp", "model": model}
-
-        db = SessionLocal()
-        try:
-            ep = None
-            if ep_id:
-                ep_q = _owned_endpoint_query(db, request).filter(
-                    ModelEndpoint.id == ep_id, ModelEndpoint.is_enabled == True
-                )
-                ep = ep_q.first()
-                if ep is None:
-                    model = ""
-            # Configured fallback chain — when the chosen default endpoint is
-            # gone/disabled, honor the user's configured `default_model_fallbacks`
-            # in order BEFORE arbitrarily grabbing the first enabled endpoint.
-            # (Previously this jumped straight to "first enabled", which is why
-            # deleting/changing the main endpoint silently reassigned the default
-            # chat to some unrelated endpoint instead of the fallback.)
-            if not ep:
-                for entry in _fallbacks:
-                    if not isinstance(entry, dict):
-                        continue
-                    fid = (entry.get("endpoint_id") or "").strip()
-                    if not fid:
-                        continue
-                    cand_q = _owned_endpoint_query(db, request).filter(
-                        ModelEndpoint.id == fid, ModelEndpoint.is_enabled == True
-                    )
-                    cand = cand_q.first()
-                    if cand:
-                        ep = cand
-                        # Use the fallback entry's model. Reset even when empty
-                        # so we don't carry the prior endpoint's stale model onto
-                        # this fallback — the cached-models lookup below then
-                        # fills it from the fallback endpoint.
-                        model = (entry.get("model") or "").strip()
-                        break
-            # Last resort: first enabled endpoint owned by this user.
-            if not ep:
-                model = ""
-                _last_q = _owned_endpoint_query(db, request).filter(
-                    ModelEndpoint.is_enabled == True
-                )
-                ep = _last_q.first()
-            if not ep:
-                return {"endpoint_id": "", "endpoint_url": "", "model": ""}
-            base = _normalize_base(ep.base_url)
-            chat_url = build_chat_url(base)
-            if not model and (getattr(ep, "cached_models", None) or getattr(ep, "pinned_models", None)):
-                try:
-                    visible = _visible_models(ep.cached_models, getattr(ep, "hidden_models", None), getattr(ep, "pinned_models", None))
-                    if visible:
-                        model = visible[0]
-                except Exception:
-                    pass
-            return {"endpoint_id": ep.id, "endpoint_url": chat_url, "model": model}
-        finally:
-            db.close()
+        ordered = []
+        seen = set()
+        for binding in bindings:
+            if not binding.enabled:
+                continue
+            route = by_route_id.get(binding.model_route_id)
+            if route is None or route.model_route_id in seen:
+                continue
+            ordered.append(route)
+            seen.add(route.model_route_id)
+        ordered.extend(
+            route for route in routes if route.model_route_id not in seen
+        )
+        for route in ordered:
+            if allowed is not None and (
+                route.provider_model_id not in allowed
+                and route.model_route_id not in allowed
+            ):
+                continue
+            return {
+                "endpoint_id": route.public_endpoint_id,
+                "endpoint_url": MANAGED_ENGINE_PUBLIC_URL,
+                "model": route.provider_model_id,
+            }
+        return {"endpoint_id": "", "endpoint_url": "", "model": ""}
 
     @router.get("/model-endpoints/{ep_id}/capabilities")
     def get_model_capabilities(ep_id: str, request: Request):
-        require_admin(request)
+        _require_endpoint_owner(request)
         db = SessionLocal()
         try:
             ep = _owned_endpoint_query(db, request).filter(ModelEndpoint.id == ep_id).first()
@@ -3083,7 +4344,7 @@ def setup_model_routes(model_discovery):
 
     @router.patch("/model-endpoints/{ep_id}/capabilities")
     async def declare_model_capability(ep_id: str, request: Request):
-        require_admin(request)
+        _require_endpoint_owner(request)
         body = await request.json()
         model_id = str(body.get("model_id") or "").strip()
         if not model_id:
@@ -3109,7 +4370,7 @@ def setup_model_routes(model_discovery):
 
     @router.post("/model-endpoints/{ep_id}/capabilities/probe")
     async def probe_model_capability(ep_id: str, request: Request):
-        require_admin(request)
+        _require_endpoint_owner(request)
         body = await request.json()
         model_id = str(body.get("model_id") or "").strip()
         if not model_id:
@@ -3123,7 +4384,7 @@ def setup_model_routes(model_discovery):
                 raise HTTPException(404, "Model is not enabled on this endpoint")
             from src.endpoint_resolver import resolve_endpoint_runtime
             base, api_key = resolve_endpoint_runtime(ep, owner=getattr(ep, "owner", None))
-            result = _probe_single_model(base, api_key, model_id, timeout=10, with_tools=True)
+            result = _probe_single_model(base, api_key, model_id, timeout=10, with_tools=True, owner=_model_owner(request), endpoint_id=ep_id)
             from src.model_capabilities import capability_state, set_verified
             row = set_verified(db, ep, model_id, result.get("tool_support"))
             db.commit()
@@ -3133,7 +4394,7 @@ def setup_model_routes(model_discovery):
 
     @router.patch("/model-endpoints/{ep_id}")
     async def toggle_model_endpoint(ep_id: str, request: Request):
-        require_admin(request)
+        owner = _require_endpoint_owner(request)
         if _mimo_endpoint_provider(ep_id)[0]:
             raise HTTPException(409, "This provider is managed through its connection in Added Models")
         # Optional JSON body for field-targeted updates. No body → toggle is_enabled (legacy behaviour).
@@ -3160,11 +4421,21 @@ def setup_model_routes(model_discovery):
                     ep.model_type = body["model_type"].strip() or ep.model_type
                 if "pinned_models" in body:
                     _pinned = _normalize_model_ids(body["pinned_models"])
-                    ep.pinned_models = json.dumps(_pinned) if _pinned else None
+                    _base_for_pins = _normalize_base(ep.base_url)
+                    _kind_for_pins = _effective_endpoint_kind(ep, _base_for_pins)
+                    if _picker_requires_pinning(_base_for_pins, _kind_for_pins):
+                        ep.pinned_models = json.dumps(_pinned)
+                        ep.hidden_models = None
+                    else:
+                        ep.pinned_models = json.dumps(_pinned) if _pinned else None
                 if "endpoint_kind" in body:
                     ep.endpoint_kind = _normalize_endpoint_kind(body.get("endpoint_kind"))
                 if "model_refresh_mode" in body:
-                    ep.model_refresh_mode = _normalize_refresh_mode(body.get("model_refresh_mode"), _endpoint_kind(ep))
+                    ep.model_refresh_mode = _normalize_endpoint_refresh_mode(
+                        body.get("model_refresh_mode"),
+                        _endpoint_kind(ep),
+                        ep.base_url,
+                    )
                 if "model_refresh_interval" in body:
                     interval = _parse_positive_int(body.get("model_refresh_interval"), minimum=30, maximum=86400)
                     ep.model_refresh_interval = interval
@@ -3186,11 +4457,12 @@ def setup_model_routes(model_discovery):
                             _new_base = _new_base[: -len(_suffix)].rstrip("/")
                     _new_base = _normalize_base(_new_base)
                     if _new_base:
+                        _validate_owner_endpoint_url(request, owner, _new_base)
                         ep.base_url = _new_base
             else:
                 ep.is_enabled = not ep.is_enabled
             db.commit()
-            _invalidate_models_cache()
+            _invalidate_models_cache(owner)
             _schedule_mimo_reprojection(request)
             _local_probe_cache.clear()
             from src.model_capabilities import endpoint_capability_states
@@ -3212,30 +4484,62 @@ def setup_model_routes(model_discovery):
         finally:
             db.close()
 
-    def _settings_using_endpoint(ep_id: str) -> list:
-        """Return human-readable labels for settings that reference this endpoint."""
-        return _endpoint_settings_using_endpoint(_load_settings(), ep_id, include_speech=True)
+    def _settings_using_endpoint(ep_id: str, request: Request) -> list:
+        """Return only the caller's endpoint dependents plus admin globals."""
+        owner = _model_owner(request)
+        affected = []
+        if owner:
+            from routes.prefs_routes import _load_for_user
 
-    def _clear_settings_for_endpoint(ep_id: str) -> list:
-        """Clear all settings that reference this endpoint. Returns list of cleared labels."""
-        settings = _load_settings()
-        cleared = _clear_endpoint_settings_for_endpoint(settings, ep_id, include_speech=True)
-        if cleared:
-            _save_settings(settings)
-        return cleared
+            affected.extend(
+                _endpoint_settings_using_endpoint(
+                    _load_for_user(owner) or {},
+                    ep_id,
+                    include_speech=True,
+                )
+            )
+        if not owner or _request_is_admin(request, owner):
+            affected.extend(
+                _endpoint_settings_using_endpoint(
+                    _load_settings(),
+                    ep_id,
+                    include_speech=True,
+                )
+            )
+        return list(dict.fromkeys(affected))
 
-    def _clear_user_prefs_for_endpoint(ep_id: str) -> int:
-        """Clear per-user endpoint selections and fallback chains."""
-        try:
-            from routes.prefs_routes import _load as _load_prefs, _save as _save_prefs
-            all_prefs = _load_prefs()
-            cleared_users = _clear_user_pref_endpoint_refs(all_prefs, ep_id)
-            if cleared_users:
-                _save_prefs(all_prefs)
-            return cleared_users
-        except Exception as e:
-            logger.warning("Failed to clear user prefs for endpoint %s: %s", ep_id, e)
-            return 0
+    def _clear_settings_for_endpoint(
+        ep_id: str,
+        request: Request,
+    ) -> tuple[list, int]:
+        """Clear the caller's references and admin-owned global references."""
+        owner = _model_owner(request)
+        cleared = []
+        cleared_user_preferences = 0
+        if owner:
+            from routes.prefs_routes import _load_for_user, _save_for_user
+
+            prefs = _load_for_user(owner) or {}
+            owner_cleared = _clear_endpoint_settings_for_endpoint(
+                prefs,
+                ep_id,
+                include_speech=True,
+            )
+            if owner_cleared:
+                _save_for_user(owner, prefs)
+                cleared_user_preferences = 1
+                cleared.extend(owner_cleared)
+        if not owner or _request_is_admin(request, owner):
+            settings = _load_settings()
+            global_cleared = _clear_endpoint_settings_for_endpoint(
+                settings,
+                ep_id,
+                include_speech=True,
+            )
+            if global_cleared:
+                _save_settings(settings)
+                cleared.extend(global_cleared)
+        return list(dict.fromkeys(cleared)), cleared_user_preferences
 
     def _session_uses_endpoint_url(session_url: str, base_url: str) -> bool:
         if not session_url or not base_url:
@@ -3293,12 +4597,21 @@ def setup_model_routes(model_discovery):
     @router.get("/model-endpoints/{ep_id}/dependents")
     def get_endpoint_dependents(ep_id: str, request: Request):
         """Check which settings depend on this endpoint."""
-        require_admin(request)
-        return {"dependents": _settings_using_endpoint(ep_id)}
+        _require_endpoint_owner(request)
+        db = SessionLocal()
+        try:
+            ep = _owned_endpoint_query(db, request).filter(
+                ModelEndpoint.id == ep_id
+            ).first()
+            if not ep:
+                raise HTTPException(404, "Endpoint not found")
+        finally:
+            db.close()
+        return {"dependents": _settings_using_endpoint(ep_id, request)}
 
     @router.delete("/model-endpoints/{ep_id}")
-    def delete_model_endpoint(ep_id: str, request: Request):
-        require_admin(request)
+    async def delete_model_endpoint(ep_id: str, request: Request):
+        owner = _require_endpoint_owner(request)
         if _mimo_endpoint_provider(ep_id)[0]:
             raise HTTPException(409, "Disconnect this provider instead of deleting it")
         db = SessionLocal()
@@ -3307,16 +4620,42 @@ def setup_model_routes(model_discovery):
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             # Clean up any settings that reference this endpoint
-            cleared = _clear_settings_for_endpoint(ep_id)
-            cleared_user_preferences = _clear_user_prefs_for_endpoint(ep_id)
+            cleared, cleared_user_preferences = _clear_settings_for_endpoint(
+                ep_id,
+                request,
+            )
             cleared_sessions = _clear_sessions_for_endpoint(db, ep.base_url, ep.owner)
             cleared_loaded_sessions = _clear_loaded_sessions_for_endpoint(ep.base_url, ep.owner)
             auth_id = getattr(ep, "provider_auth_id", None)
+            shares = db.query(ModelShare).filter(
+                ModelShare.owner == owner,
+                ModelShare.source_kind == "endpoint",
+                ModelShare.source_id == ep_id,
+            ).all()
+            share_ids = [row.id for row in shares]
+            share_models = {row.id: row.model_id for row in shares}
+            revocations = []
+            if share_ids:
+                revocations = [
+                    (grant.subscriber, grant.share_id, share_models[grant.share_id])
+                    for grant in db.query(ModelShareSubscription).filter(
+                        ModelShareSubscription.share_id.in_(share_ids),
+                        ModelShareSubscription.enabled == True,  # noqa: E712
+                    ).all()
+                ]
+                db.query(ModelShareSubscription).filter(
+                    ModelShareSubscription.share_id.in_(share_ids)
+                ).delete(synchronize_session=False)
+                db.query(ModelShare).filter(
+                    ModelShare.id.in_(share_ids)
+                ).delete(synchronize_session=False)
             db.delete(ep)
             cleared_provider_auth = _delete_orphaned_provider_auth(db, auth_id, exclude_ep_id=ep_id)
             db.commit()
-            _invalidate_models_cache()
+            _invalidate_models_cache(None if share_ids else owner)
             _schedule_mimo_reprojection(request)
+            await revoke_shared_model_workers(request, revocations)
+            notify_shared_model_removals(revocations, shared_by=owner)
             _local_probe_cache.clear()
             return {
                 "deleted": True,
@@ -3325,6 +4664,7 @@ def setup_model_routes(model_discovery):
                 "cleared_sessions": cleared_sessions,
                 "cleared_loaded_sessions": cleared_loaded_sessions,
                 "cleared_provider_auth": cleared_provider_auth,
+                "revoked_model_shares": len(share_ids),
             }
         finally:
             db.close()
@@ -3332,15 +4672,78 @@ def setup_model_routes(model_discovery):
     # ── Tool management ──
 
     @router.get("/tools")
-    def list_tools():
+    async def list_tools(request: Request):
         """List all available tools with their enabled/disabled status."""
         from src.agent_tools import TOOL_TAGS
         settings = _load_settings()
         disabled = set(settings.get("disabled_tools", []))
         tools = []
         for tag in sorted(TOOL_TAGS):
-            tools.append({"id": tag, "enabled": tag not in disabled})
-        return {"tools": tools}
+            requested = tag not in disabled
+            tools.append({
+                "id": tag,
+                "source": "first-party-adapter",
+                "enabled": requested,
+                "requested_enabled": requested,
+                "effective_enabled": requested,
+                "availability": "disabled" if not requested else "available",
+                "reason": "Disabled by administrator" if not requested else "Registered first-party adapter",
+            })
+        native_ids = []
+        native_metadata = {}
+        native_status = "engine-stopped"
+        supervisor = getattr(getattr(request, "app", None), "state", None)
+        supervisor = getattr(supervisor, "mimo_supervisor", None)
+        try:
+            owner = str(effective_user(request) or "").strip().lower()
+            worker = supervisor.worker_for_owner(owner) if supervisor is not None else None
+            if worker is not None and worker.is_alive():
+                async with worker.internal_http_client(timeout=2.0) as client:
+                    response = await client.get("/experimental/tool/metadata")
+                    if response.is_success:
+                        payload = response.json()
+                        rows = payload if isinstance(payload, list) else payload.get("tools", [])
+                        native_metadata = {str(item.get("id")): item for item in rows if isinstance(item, dict) and str(item.get("id", "")).strip()}
+                        native_ids = sorted(native_metadata)
+                        native_status = "fresh"
+                    else:
+                        # Older managed workers expose IDs only; keep their
+                        # projection truthful while marking metadata unavailable.
+                        response = await client.get("/experimental/tool/ids")
+                        if response.is_success:
+                            payload = response.json()
+                            native_ids = sorted({str(item) for item in (payload if isinstance(payload, list) else payload.get("ids", [])) if str(item).strip()})
+                            native_status = "ids-only"
+                        else:
+                            native_status = "engine-query-failed"
+        except Exception:
+            native_status = "engine-query-unavailable"
+        known = {item["id"] for item in tools}
+        for tag in native_ids:
+            if tag in known:
+                continue
+            requested = tag not in disabled
+            metadata = native_metadata.get(tag, {})
+            registered = metadata.get("registered", True)
+            effective = bool(requested and registered)
+            tools.append({
+                "id": tag,
+                "source": metadata.get("source", "native-registry"),
+                "enabled": requested,
+                "requested_enabled": requested,
+                "effective_enabled": effective,
+                "availability": "disabled" if not requested else "available" if registered else "unavailable",
+                "reason": "Disabled by administrator" if not requested else metadata.get("reason", "Registered by the running native engine") if registered else "Not registered by the running native engine",
+            })
+        tools.sort(key=lambda item: item["id"])
+        return {
+            "tools": tools,
+            "catalog": {
+                "source": "native-registry+first-party-adapter",
+                "freshness": native_status,
+                "native_registry": "engine-owned; IDs are queried from the running managed engine",
+            },
+        }
 
     class ToolsUpdate(BaseModel):
         disabled: list = []

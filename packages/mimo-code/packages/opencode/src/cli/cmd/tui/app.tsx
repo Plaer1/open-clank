@@ -10,6 +10,7 @@ import {
   createMemo,
   ErrorBoundary,
   createSignal,
+  onCleanup,
   onMount,
   batch,
   Show,
@@ -69,11 +70,20 @@ import { TuiConfigProvider, useTuiConfig } from "./context/tui-config"
 import { TuiConfig } from "@/cli/cmd/tui/config/tui"
 import { createTuiApi, TuiPluginRuntime, type RouteMap } from "./plugin"
 import { FormatError, FormatUnknownError } from "@/cli/error"
-import { isPlainTerminal } from "./util/terminal"
+import { isPlainTerminal, isWindowsTerminal } from "./util/terminal"
+import {
+  detectionFromPart,
+  formatHarnessReminder,
+  handoffTargets,
+  type HandoffDetection,
+  type HandoffTarget,
+} from "./util/handoff"
 
 import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { DialogModalities } from "./component/dialog-modalities"
+import { DialogContextLimit } from "./component/dialog-context-limit"
+import { resolveShellInvocation } from "@/tool/shell-containment"
 
 function rendererConfig(_config: TuiConfig.Info, plainTerminal: boolean): CliRendererConfig {
   const mouseEnabled = !plainTerminal && !Flag.MIMOCODE_DISABLE_MOUSE && (_config.mouse ?? true)
@@ -377,10 +387,55 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
   })
 
+  // Resolve the orchestrator workspace path once so the -c resume effect below
+  // can tell whether we were launched inside it (only relevant when the feature
+  // is enabled).
+  const [orchestratorDirPath, setOrchestratorDirPath] = createSignal<string | undefined>(undefined)
+  // `undefined` means "not resolved yet" (the async resolve below hasn't run) —
+  // indistinguishable from "resolved to nothing", which is why the -c effect
+  // must not treat undefined as an answer. This flag flips true once the resolve
+  // settles (success OR failure) so the -c effect knows the orchestrator-mode
+  // question has actually been answered.
+  const [orchestratorDirResolved, setOrchestratorDirResolved] = createSignal(false)
+  onMount(() => {
+    if (!Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR) return
+    void orchestratorDir()
+      .then(setOrchestratorDirPath)
+      .catch(() => {})
+      .finally(() => setOrchestratorDirResolved(true))
+  })
+
   let continued = false
   createEffect(() => {
     // When using -c, session list is loaded in blocking phase, so we can navigate at "partial"
     if (continued || sync.status === "loading" || !args.continue) return
+    // RACE GUARD: orchestratorDirPath() resolves asynchronously (onMount above).
+    // If sync reaches "partial" first, orchestratorDirPath() is still undefined
+    // and we'd wrongly skip the orchestrator branch, resume the persistent
+    // orchestrator session as a PLAIN build session, and latch continued=true —
+    // permanently, so the later resolve can never correct it. So when the
+    // feature is on, WAIT for the resolve to settle before deciding. Reading the
+    // signal keeps this effect subscribed, so it re-runs (and re-decides) the
+    // moment the path resolves.
+    if (Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR && !orchestratorDirResolved()) return
+    // Resuming via -c inside the orchestrator workspace means the most-recent
+    // root session IS the persistent orchestrator session. Enter Orchestrator
+    // mode directly (mirrors -s landing in it) instead of resuming it as a
+    // plain build session: switching the agent lets the orchestrator-entry
+    // effect resolve+stash the root, and the composer submits into it. Without
+    // this, -c resumes the orchestrator session in build mode and a later Tab
+    // switch would blackscreen (route left on a session from the launch dir).
+    if (
+      Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR &&
+      orchestratorDirPath() !== undefined &&
+      sdk.directory === orchestratorDirPath()
+    ) {
+      continued = true
+      // No-op if --agent orchestrator already selected it; the entry effect
+      // resolves+stashes the root either way and the composer submits into it.
+      if (local.agent.current()?.name !== "orchestrator") local.agent.set("orchestrator")
+      return
+    }
     const match = sync.data.session
       .toSorted((a, b) => b.time.updated - a.time.updated)
       .find((x) => x.parentID === undefined && !isSystemSession(x))?.id
@@ -418,12 +473,25 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
 
   // Orchestrator mode is GLOBALLY UNIQUE: switching INTO it (from any launch
   // directory) switches the working dir to a fixed global orchestrator workspace
-  // and lands on the single root session there (find-or-create). This guarantees
+  // and resolves the single root session there (find-or-create). This guarantees
   // there is exactly one orchestrator session regardless of where the user
   // launched, so previously-created child sessions are always reachable. Mirrors
   // dialog-worktree's switch sequence (dispose → switchDirectory → bootstrap).
+  //
+  // Crucially we do NOT route.navigate on mode entry: switching modes must not
+  // swap the view for a fresh session (that's the reported bug). Instead we
+  // stash the resolved root id in local.orchestrator so the composer submits the
+  // first message INTO it (dedupe preserved) and the view only switches after
+  // that message is sent — matching every other mode's behavior.
   let enteringOrchestrator = false
   let lastAgentName: string | undefined = undefined
+  // While an orchestrator dir-switch is in flight we can neither keep rendering
+  // the stale launch-dir session (blackscreen: it no longer exists after
+  // switchDirectory) NOR flash Home as an intermediate (the T50 regression). So
+  // we SUPPRESS the view for the switch window and navigate exactly ONCE at the
+  // end — directly to the resolved orchestrator session. StartupLoading already
+  // shows a spinner overlay, so the window reads as "loading", not "home".
+  const [switchingOrchestrator, setSwitchingOrchestrator] = createSignal(false)
   createEffect(() => {
     const name = local.agent.current()?.name
     const prev = lastAgentName
@@ -431,12 +499,42 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     // Only act on the transition INTO orchestrator, and never re-enter while a
     // switch is already in flight. No-op entirely when the feature is off.
     if (!Flag.MIMOCODE_EXPERIMENTAL_ORCHESTRATOR) return
-    if (name !== "orchestrator" || prev === "orchestrator" || enteringOrchestrator) return
+    // Leaving orchestrator: drop the stashed id so a later non-orchestrator
+    // submit can never accidentally target the orchestrator root.
+    if (name !== "orchestrator") {
+      if (prev === "orchestrator") local.orchestrator.setSessionID(undefined)
+      return
+    }
+    if (prev === "orchestrator" || enteringOrchestrator) return
     enteringOrchestrator = true
+    // If we're currently viewing a session that belongs to a DIFFERENT (launch)
+    // directory, that session will not exist once we switch the SDK to
+    // orchestratorDir(). Leaving the route pointed at it makes the session
+    // route's session.get fail against the new directory and blank the view
+    // (blackscreen — the T20 -c case). We therefore SUPPRESS the view during the
+    // switch (StartupLoading overlay stands in) instead of navigating to Home —
+    // navigating to Home was the T50 fix but it flashes the Orchestrator home
+    // page before the session appears. When we launched INSIDE the orchestrator
+    // dir (sdk.directory is already orchestratorDir(), the -s
+    // <orchestratorSessionID> direct-entry case), no dir switch happens: the
+    // route already points at the orchestrator root session and MUST be kept —
+    // so suppression is gated by the SAME `sdk.directory !== dir` check that
+    // gates the actual switch (race-free: uses the freshly-resolved dir, not the
+    // async-populated signal).
+    // A `-s <orchestratorSessionID>` launch from OUTSIDE orchestratorDir (the
+    // common case: user runs `mimo -s <id>` from a project dir) navigates the
+    // route to that session (app.tsx onMount) and auto-restores agent=orchestrator
+    // from the session's last message. That drives us here with sdk.directory !==
+    // dir. We suppress the view, switch+bootstrap, then navigate ONCE directly to
+    // the resolved orchestrator root — a single transition, no Home flash, no
+    // blackscreen (the root exists in the switched dir after bootstrap).
+    const resumeIntoSession = args.sessionID != null && route.data.type === "session"
     void (async () => {
       try {
         const dir = await orchestratorDir()
-        if (sdk.directory !== dir) {
+        const switching = sdk.directory !== dir
+        if (switching) {
+          setSwitchingOrchestrator(true)
           await sdk.client.instance.dispose().catch(() => {})
           sdk.switchDirectory(dir)
           await sync.bootstrap()
@@ -445,14 +543,23 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           .toSorted((a, b) => b.time.updated - a.time.updated)
           .find((x) => x.parentID === undefined)?.id
         if (existing) {
-          route.navigate({ type: "session", sessionID: existing })
+          local.orchestrator.setSessionID(existing)
+          // A `-s` launch wanted to land IN the orchestrator session; a plain
+          // Tab-into-orchestrator from a stale launch-dir session wanted Home
+          // (the fresh-entry state). Either way navigate exactly once, AFTER
+          // bootstrap, so the switched view resolves directly to its target with
+          // no intermediate frame — the root now exists in orchestratorDir.
+          if (resumeIntoSession) route.navigate({ type: "session", sessionID: existing })
+          else if (switching) route.navigate({ type: "home" })
         } else {
           const res = await sdk.client.session.create({})
-          if (res.data?.id) route.navigate({ type: "session", sessionID: res.data.id })
+          if (res.data?.id) local.orchestrator.setSessionID(res.data.id)
+          if (switching) route.navigate({ type: "home" })
         }
       } catch (e) {
         toast.show({ message: `Failed to enter Orchestrator: ${e}`, variant: "error" })
       } finally {
+        setSwitchingOrchestrator(false)
         enteringOrchestrator = false
       }
     })()
@@ -581,6 +688,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
     },
     {
+      title: t("tui.command.agent.force.title"),
+      value: "agent.force",
+      keybind: "agent_force",
+      category: "agent",
+      slash: {
+        name: "force-agent",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogAgent force />)
+      },
+    },
+    {
       title: t("tui.command.modalities.title"),
       value: "model.modalities",
       category: "agent",
@@ -589,6 +708,17 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
       onSelect: () => {
         DialogModalities.show(dialog)
+      },
+    },
+    {
+      title: t("tui.command.context_limit.title"),
+      value: "model.context_limit",
+      category: "agent",
+      slash: {
+        name: "context-limit",
+      },
+      onSelect: () => {
+        DialogContextLimit.show(dialog)
       },
     },
     {
@@ -1032,6 +1162,125 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
   })
 
+  let lastTryBestDialog: { key: string; time: number } | undefined
+  const showTryBest = (detection: HandoffDetection) => {
+    const key = JSON.stringify([
+      detection.sessionID,
+      detection.reason,
+      detection.evidence.tool,
+      detection.evidence.path,
+      detection.evidence.command,
+      detection.evidence.count,
+    ])
+    if (lastTryBestDialog?.key === key && Date.now() - lastTryBestDialog.time < 2000) return
+    lastTryBestDialog = { key, time: Date.now() }
+    if (route.data.type !== "session" || route.data.sessionID !== detection.sessionID) {
+      toast.show({
+        variant: "warning",
+        message: t("tui.toast.try_best.paused_other", { session: detection.sessionID.slice(0, 8) }),
+        duration: 5000,
+      })
+      return
+    }
+    const detail =
+      detection.reason === "edit_repeat"
+        ? detection.evidence.path
+          ? t("tui.dialog.try_best.reason.edit_repeat_path", {
+              count: detection.evidence.count,
+              path: detection.evidence.path,
+            })
+          : t("tui.dialog.try_best.reason.edit_repeat", { count: detection.evidence.count })
+        : detection.reason === "bash_retry"
+          ? t("tui.dialog.try_best.reason.bash_retry", { count: detection.evidence.count })
+          : t("tui.dialog.try_best.reason.action_streak", {
+              count: detection.evidence.count,
+              action: t(`tui.dialog.try_best.action.${detection.evidence.action ?? "same_kind"}`),
+            })
+    const modelDetail =
+      detection.reason === "edit_repeat"
+        ? `Near-identical edits repeated ${detection.evidence.count} times${detection.evidence.path ? ` in ${detection.evidence.path}` : ""}.`
+        : detection.reason === "bash_retry"
+          ? `The same failing command was retried ${detection.evidence.count} times without a successful edit.`
+          : `${detection.evidence.count} consecutive ${detection.evidence.action ?? "same-kind"} actions made no observable progress.`
+    const handoff = (target: HandoffTarget, current: { clear(): void }) => {
+      current.clear()
+      void sdk.client.session
+        .promptAsync({
+          sessionID: detection.sessionID,
+          model: { providerID: detection.providerID, modelID: detection.modelID },
+          parts: [
+            {
+              type: "text",
+              synthetic: true,
+              text: formatHarnessReminder({ target, detail: modelDetail }),
+            },
+          ],
+        })
+        .catch((error) =>
+          toast.show({
+            variant: "error",
+            message: error instanceof Error ? error.message : t("tui.toast.try_best.handoff_failed"),
+          }),
+        )
+    }
+    const options = handoffTargets(detection.providerID, detection.modelID)
+      .filter((target) =>
+        sync.data.command.some((command) => command.name === (target === "codex" ? "codex" : "claude-code")),
+      )
+      .map((target) => ({
+        title: t("tui.dialog.try_best.handoff.title", {
+          target: target === "codex" ? "Codex CLI" : "Claude Code CLI",
+        }),
+        value: target,
+        description: t("tui.dialog.try_best.handoff.description"),
+        onSelect: (current: { clear(): void }) => handoff(target, current),
+      }))
+    dialog.replace(() => (
+      <DialogSelect<HandoffTarget | "continue">
+        title={t("tui.dialog.try_best.title")}
+        hint={detail}
+        skipFilter
+        options={[
+          ...options,
+          {
+            title: t("tui.dialog.try_best.continue.title", { model: detection.modelID }),
+            value: "continue",
+            description: t("tui.dialog.try_best.continue.description"),
+            onSelect: (current) => {
+              void sdk.client.session
+                .promptAsync({
+                  sessionID: detection.sessionID,
+                  model: { providerID: detection.providerID, modelID: detection.modelID },
+                  parts: [
+                    {
+                      type: "text",
+                      text: `The previous turn was paused by try-best loop detection: ${modelDetail} Abandon that approach. Inspect the current workspace state, explain why the attempt stalled, and continue with a materially different strategy. Do not repeat the same edit or command unchanged.`,
+                    },
+                  ],
+                })
+                .catch((error) =>
+                  toast.show({
+                    variant: "error",
+                    message: error instanceof Error ? error.message : t("tui.toast.try_best.continue_failed"),
+                  }),
+                )
+              current.clear()
+            },
+          },
+        ]}
+      />
+    ))
+  }
+
+  event.on("session.try_best.detected", (evt) => {
+    showTryBest(evt.properties)
+  })
+
+  event.on("message.part.updated", (evt) => {
+    const detection = detectionFromPart(evt.properties.part)
+    if (detection) showTryBest(detection)
+  })
+
   event.on("installation.update-available", async (evt) => {
     const version = evt.properties.version
     const method = evt.properties.method
@@ -1098,18 +1347,41 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
   })
 
+  const interactiveProcesses = new Map<string, AbortController>()
+  onCleanup(() => {
+    for (const controller of interactiveProcesses.values()) controller.abort()
+    interactiveProcesses.clear()
+  })
+
   // Handle interactive bash commands: suspend TUI, let user interact directly in terminal
   event.subscribe((evt) => {
-    if ((evt.type as string) !== "bash.interactive.asked") return
+    const type = evt.type as string
     const props = evt.properties as Record<string, unknown>
+    if (type === "bash.interactive.cancelled") {
+      const id = typeof props.id === "string" ? props.id : undefined
+      if (id) interactiveProcesses.get(id)?.abort()
+      return
+    }
+    if (type !== "bash.interactive.asked") return
     const id = typeof props.id === "string" ? props.id : undefined
+    const sessionID = typeof props.sessionID === "string" ? props.sessionID : undefined
+    const callID = typeof props.callID === "string" ? props.callID : undefined
     const command = typeof props.command === "string" ? props.command : undefined
     const cwd = typeof props.cwd === "string" ? props.cwd : undefined
+    const workspace = typeof props.workspace === "string" ? props.workspace : cwd
+    const writableRoots = Array.isArray(props.writableRoots)
+      ? props.writableRoots.filter((root): root is string => typeof root === "string")
+      : workspace
+        ? [workspace]
+        : []
+    const shell = typeof props.shell === "string" ? props.shell : process.platform === "win32" ? "cmd" : "sh"
+    const network = props.network === "disabled" ? "disabled" : "enabled"
     const description = typeof props.description === "string" ? props.description : "(interactive)"
     const env = props.env && typeof props.env === "object" ? (props.env as Record<string, string>) : undefined
-    if (!id || !command || !cwd) return
+    if (!id || !sessionID || !callID || !command || !cwd || !workspace) return
 
     const abort = new AbortController()
+    interactiveProcesses.set(id, abort)
     void (async () => {
       renderer.suspend()
       renderer.currentRenderBuffer.clear()
@@ -1119,12 +1391,18 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       let exitCode = 1
       let output = ""
       try {
-        const shell = process.platform === "win32" ? "cmd" : "sh"
-        const args = process.platform === "win32" ? ["/c", command] : ["-c", command]
+        const invocation = resolveShellInvocation({
+          shell,
+          command,
+          cwd,
+          workspace,
+          writableRoots,
+          network,
+        })
         process.stdout.write(`\x1b[2J\x1b[H`) // clear screen
         process.stdout.write(`\x1b[1m[Interactive] ${description}\x1b[0m\n`)
         process.stdout.write(`\x1b[2m$ ${command}\x1b[0m\n\n`)
-        const proc = Process.spawn([shell, ...args], {
+        const proc = Process.spawn([invocation.executable, ...invocation.args], {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
@@ -1137,6 +1415,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       } catch (err: any) {
         output = `(interactive command failed: ${err?.message ?? "unknown error"})`
       } finally {
+        interactiveProcesses.delete(id)
         renderer.currentRenderBuffer.clear()
         renderer.resume()
         renderer.currentRenderBuffer.clear()
@@ -1145,7 +1424,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
 
       // Send result back to the server — if this fails, agent hangs forever, so retry once
       const url = `${sdk.url}/bash-interactive/${id}/reply`
-      const body = JSON.stringify({ output, exitCode })
+      const body = JSON.stringify({ sessionID, callID, output, exitCode })
       const doReply = () =>
         (sdk.fetch ?? fetch)(url, {
           method: "POST",
@@ -1197,7 +1476,11 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
           return
         }
 
-        promptRef.current?.paste()
+        // Windows Terminal (and WSL launched from it) already pastes on
+        // right-click, so calling paste() here double-inserts (notably images).
+        // Skip it there; other terminals don't self-paste, so this stays the
+        // right-click paste path.
+        if (!isWindowsTerminal()) promptRef.current?.paste()
         evt.preventDefault()
         evt.stopPropagation()
       }}
@@ -1210,7 +1493,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       <Show when={Flag.MIMOCODE_SHOW_TTFD}>
         <TimeToFirstDraw />
       </Show>
-      <Show when={ready()}>
+      <Show when={ready() && !switchingOrchestrator()}>
         <Switch>
           <Match when={route.data.type === "home"}>
             <Home />

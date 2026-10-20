@@ -1,0 +1,1 @@
+Mutation changes corpus inputs; generation follows a format model. Stateful tests also vary action sequences. Sanitizers detect selected runtime errors, not all weaknesses. Crash deduplication groups evidence for triage; the same-looking crash may still have different causes. This is a concept exercise, not an executed fuzzer lab.

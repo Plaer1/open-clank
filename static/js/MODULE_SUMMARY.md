@@ -131,11 +131,11 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 
 ---
 
-## 9. Gallery, Email, Calendar, Tasks, and Notes
+## 9. Files, Imps, Email, Calendar, Tasks, and Notes
 
 | Module | Responsibility |
 |---|---|
-| **`gallery.js`** / **`galleryEditor.js`** | Gallery/image library and canvas editor entry points. |
+| **`files.js`** / **`imps.js`** | Files-owned image browsing and the Imps canvas editor entry point. |
 | **`emailInbox.js`** / **`emailLibrary.js`** | Email inbox reader and library modal. Sub-modules handle signatures, reply recipients, state, and signature folding. |
 | **`calendar.js`** / **`calendar/utils.js`** / **`calendar/reminders.js`** | Calendar views, event forms, reminders. |
 | **`tasks.js`** | Scheduled task/recurring LLM job UI. |

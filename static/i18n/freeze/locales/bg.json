@@ -1,0 +1,19 @@
+{
+  "id": "bg",
+  "name": "Български",
+  "dir": "ltr",
+  "catalog": "bg",
+  "html_lang": "bg",
+  "kind": "dedicated",
+  "alias_of": null,
+  "advertised": true,
+  "english_fallback": false,
+  "counts": {
+    "keys": 9622,
+    "translated": 4950,
+    "english_fallback": 4672
+  },
+  "missing_keys": 0,
+  "extra_keys": 0,
+  "complete_translation": false
+}

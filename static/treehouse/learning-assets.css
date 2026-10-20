@@ -1,0 +1,15 @@
+.treehouse-learning-asset { --treehouse-asset-fill: color-mix(in srgb, currentColor 8%, transparent); border: 1px solid var(--border-color, currentColor); border-radius: 8px; padding: 16px; margin: 16px 0; color: inherit; background: transparent; max-width: 100%; overflow-wrap: anywhere; }
+.treehouse-learning-asset svg { max-width: 680px; max-height: 160px; display: block; color: inherit; }
+.treehouse-learning-asset-controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin: 12px 0; }
+.treehouse-learning-asset label { display: flex; flex-direction: column; gap: 4px; max-width: 100%; }
+.treehouse-learning-asset input, .treehouse-learning-asset select, .treehouse-learning-asset button { min-height: 40px; padding: 8px; color: inherit; background: var(--treehouse-asset-fill); border: 1px solid currentColor; border-radius: 4px; max-width: 100%; }
+.treehouse-learning-asset input { width: 160px; }
+.treehouse-learning-asset button { cursor: pointer; }
+.treehouse-learning-asset :focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
+.treehouse-learning-asset table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.treehouse-learning-asset th, .treehouse-learning-asset td { text-align: left; padding: 8px; border-bottom: 1px solid currentColor; overflow-wrap: anywhere; }
+.treehouse-learning-asset caption { text-align: left; margin: 8px 0; }
+.treehouse-learning-asset-swatch { width: 120px; height: 80px; display: grid; place-items: center; border: 1px solid currentColor; }
+.treehouse-learning-asset-swatch span { display: block; width: 36px; height: 36px; }
+@media (max-width: 480px) { .treehouse-learning-asset { padding: 10px; } .treehouse-learning-asset svg { display: none; } .treehouse-learning-asset th, .treehouse-learning-asset td { padding: 5px; } }
+@media (prefers-reduced-motion: reduce) { .treehouse-learning-asset * { transition: none !important; animation: none !important; } }

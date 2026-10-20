@@ -1,0 +1,1 @@
+Distinguish bytes, code points, and user-perceived characters using the accented example.

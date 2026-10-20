@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package lore.repository.v1;
+
+import "lore/model/v1/model.proto";
+
+// Baseline repository-management service. Carries the lifecycle and
+// metadata-pointer primitives — repository create / delete, lookup, list,
+// and CAS update of the repository metadata pointer. The repository
+// metadata blob itself is read/written through CAS storage like any other
+// content; this service only mediates the pointer to its current head.
+service RepositoryService {
+  // Create a new repository together with its default branch. The caller
+  // pre-generates `id` and `default_branch_id` for retry idempotency.
+  // Re-issuing the same `id` (or `name`) returns ALREADY_EXISTS unless the
+  // call is byte-for-byte the same as the prior one, in which case it
+  // returns the existing record (idempotent retry).
+  rpc RepositoryCreate     (RepositoryCreateRequest)     returns (RepositoryCreateResponse);
+  // Hard-delete a repository: clears the name → id mapping, zeroes the
+  // metadata pointer, and tears down all branches.
+  rpc RepositoryDelete     (RepositoryDeleteRequest)     returns (RepositoryDeleteResponse);
+  // Look up a repository by id or by name.
+  rpc RepositoryGet        (RepositoryGetRequest)        returns (RepositoryGetResponse);
+  // Stream all repositories the caller is authorised to see.
+  rpc RepositoryList       (RepositoryListRequest)       returns (stream RepositoryListResponse);
+  // Cheap hash-only read of a repository's current metadata pointer.
+  rpc RepositoryMetadataGet(RepositoryMetadataGetRequest) returns (RepositoryMetadataGetResponse);
+  // Compare-and-swap update of a repository's metadata pointer. CAS miss is
+  // signalled in-band via the response, never as a non-OK gRPC status.
+  rpc RepositoryMetadataSet(RepositoryMetadataSetRequest) returns (RepositoryMetadataSetResponse);
+}
+
+// A service to receive requests forwarded on from another Lore Server,
+// to perform an RPC on behalf of a client
+service ForwardedRepositoryService {
+
+  rpc RepositoryCreate  (RepositoryCreateRequest)  returns (RepositoryCreateResponse);
+  rpc RepositoryGet     (RepositoryGetRequest)     returns (RepositoryGetResponse);
+}
+
+// Request to create a new repository. The caller pre-generates `id` and
+// `default_branch_id` so retries are idempotent — a duplicate `id` yields
+// ALREADY_EXISTS unless the call is byte-for-byte the same as the prior
+// success, in which case the server returns the existing record.
+message RepositoryCreateRequest {
+  // Caller-pre-generated repository id (typically a UUIDv7).
+  bytes id = 1;
+  // Human-readable repository name. Must satisfy the validation rules in
+  // `lore-revision::repository::is_valid_name` and must not collide with
+  // any existing repository: `/`-separated segments of ASCII alphanumerics,
+  // `-`, `_` and `.`, where no segment is empty or starts with `.`.
+  string name = 2;
+  // Free-form description, stored verbatim in the repository metadata.
+  string description = 3;
+  // Caller-pre-generated default branch id (typically a UUIDv7).
+  bytes default_branch_id = 4;
+  // Default branch name, e.g. "main". Subject to the same name-validation
+  // limits as a regular branch name.
+  string default_branch_name = 5;
+  // Identity to attribute as the repository creator. If unset, the server
+  // uses the authenticated JWT identity. If set, the caller must have
+  // permission to attribute repositories to other identities.
+  optional string creator = 6;
+}
+
+// Response containing the freshly-created repository record.
+message RepositoryCreateResponse {
+  // Full Repository record including server-assigned `created` timestamp
+  // and the server-assigned metadata pointer.
+  lore.model.v1.Repository repository = 1;
+}
+
+// Request to hard-delete a repository by id. Names are not used here
+// because they may have been recycled after a prior delete.
+message RepositoryDeleteRequest {
+  // Repository id obtained from a prior RepositoryGet / RepositoryList.
+  bytes id = 1;
+}
+
+// Response carrying the last-known repository record. Repositories are
+// hard-deleted, so this is the caller's only chance to see the deleted
+// record's id, name and creator.
+message RepositoryDeleteResponse {
+  // Repository record as it was immediately before deletion.
+  lore.model.v1.Repository repository = 1;
+}
+
+// Request to look up a repository by id or by name.
+message RepositoryGetRequest {
+  // Lookup mode.
+  oneof query {
+    // Lookup by repository id.
+    bytes id = 1;
+    // Lookup by repository name.
+    string name = 2;
+  }
+}
+
+// Response containing the resolved repository record.
+message RepositoryGetResponse {
+  // Repository record matching the lookup.
+  lore.model.v1.Repository repository = 1;
+}
+
+// Request to stream repositories the caller is authorised to see, with
+// optional filters. When auth is configured the server first consults
+// the auth service for the caller's permitted resource set; when auth is
+// off the server returns all locally-known repositories.
+message RepositoryListRequest {
+  // If set, only repositories whose `creator` field is an exact
+  // byte-for-byte case-sensitive match are emitted.
+  optional string creator = 1;
+}
+
+// One-per-stream-message response carrying a single repository record.
+message RepositoryListResponse {
+  // A repository matching the request's filters and the caller's
+  // authorisation.
+  lore.model.v1.Repository repository = 1;
+}
+
+// Request for a cheap hash-only read of a repository's metadata pointer.
+message RepositoryMetadataGetRequest {
+  // Repository id.
+  bytes id = 1;
+}
+
+// Response carrying the current metadata hash.
+message RepositoryMetadataGetResponse {
+  // Current metadata pointer.
+  bytes metadata = 1;
+}
+
+// Request for a compare-and-swap update of a repository's metadata
+// pointer. The proposed metadata blob must already be addressable in CAS
+// before issuing this call; the server validates that any Address-typed
+// values inside the blob reference live blobs and refuses to install a
+// blob that mutates read-only fields (name, creator, created).
+message RepositoryMetadataSetRequest {
+  // Repository id.
+  bytes id = 1;
+  // The metadata hash the caller expects to be currently set. The server
+  // compares this to the actual current value and only swaps on match.
+  bytes expected = 2;
+  // The metadata hash to install if the CAS succeeds.
+  bytes updated = 3;
+}
+
+// Response always returned with gRPC OK regardless of CAS hit or miss. On
+// a successful CAS, response.metadata == request.updated. On a CAS miss,
+// response.metadata reflects the unchanged prior value; the caller compares
+// response.metadata vs request.updated to detect the miss and retry.
+message RepositoryMetadataSetResponse {
+  // The repository's current metadata pointer after the call.
+  bytes metadata = 1;
+}

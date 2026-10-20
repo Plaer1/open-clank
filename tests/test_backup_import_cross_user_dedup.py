@@ -76,3 +76,17 @@ def test_users_own_duplicate_is_still_skipped(monkeypatch):
     asyncio.run(endpoint(_Req({"memories": [{"text": "Buy Milk"}]})))
 
     assert provider.remember_calls == []
+
+
+def test_import_preserves_curated_memory_provenance(monkeypatch):
+    provider = _Provider()
+    endpoint = _setup(monkeypatch, provider)
+    asyncio.run(endpoint(_Req({
+        "memories": [{
+            "text": "Agent-discovered reference",
+            "source": "ai_agent",
+            "source_type": "ai",
+        }],
+    })))
+
+    assert provider.remember_calls[0][1]["source_type"] == "ai"

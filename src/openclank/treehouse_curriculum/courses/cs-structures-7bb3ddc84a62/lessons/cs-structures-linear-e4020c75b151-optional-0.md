@@ -1,0 +1,1 @@
+Give A versus C; propose a ring buffer/deque or head/tail linked queue with the relevant operation.

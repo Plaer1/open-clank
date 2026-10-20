@@ -1,0 +1,1 @@
+First removal A, second B; each item transfers at most once; four stack operations per fully removed item.

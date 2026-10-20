@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 # const name -> (env var, default bytes)
 _LIMITS = {
-    "GALLERY_UPLOAD_MAX_BYTES": ("ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024),
+    "GALLERY_TRANSFORM_UPLOAD_MAX_BYTES": ("ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES", 100 * 1024 * 1024),
     "GALLERY_TRANSFORM_UPLOAD_MAX_BYTES": ("ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),
     "MEMORY_IMPORT_MAX_BYTES": ("ODYSSEUS_MEMORY_IMPORT_MAX_BYTES", 10 * 1024 * 1024),
     "PERSONAL_UPLOAD_MAX_BYTES": ("ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES", 25 * 1024 * 1024),
@@ -80,7 +80,7 @@ def test_non_positive_env_rejected(monkeypatch, env):
 def test_routes_import_from_upload_limits_not_local_defs():
     """Routes must import the constant, not redefine it via raw getenv / literal."""
     forbidden = {
-        "routes/gallery/gallery_routes.py": [
+        "routes/imps_routes.py": [
             'int(os.getenv("ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES"',
             'int(os.getenv("ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES"',
         ],
@@ -97,7 +97,7 @@ def test_routes_import_from_upload_limits_not_local_defs():
 
     # And each imports from upload_limits.
     imports = {
-        "routes/gallery/gallery_routes.py": "GALLERY_UPLOAD_MAX_BYTES",
+        "routes/imps_routes.py": "GALLERY_TRANSFORM_UPLOAD_MAX_BYTES",
         "routes/memory/memory_routes.py": "MEMORY_IMPORT_MAX_BYTES",
         "routes/personal_routes.py": "PERSONAL_UPLOAD_MAX_BYTES",
         "routes/email_routes.py": "EMAIL_COMPOSE_UPLOAD_MAX_BYTES",

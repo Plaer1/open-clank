@@ -1,0 +1,1 @@
+Checking 4+6 proves one case. Keep a and b arbitrary.

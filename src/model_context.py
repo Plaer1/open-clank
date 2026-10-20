@@ -1,13 +1,15 @@
 """
 model_context.py
 
-Query and cache model context window sizes from OpenAI-compatible APIs.
-Provides token estimation for context usage tracking.
+Query and cache model context-window catalogue metadata.
+
+The bounded network calls in this module are GET-only discovery probes.  They
+never submit prompts or invoke model inference; execution belongs to the
+managed operation router.
 """
 
 import ipaddress
 import logging
-import sys
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -25,8 +27,7 @@ _PRIVATE_NETWORKS = (
 
 # Tailscale uses the CGNAT range 100.64.0.0/10, NOT all of 100.0.0.0/8.
 # A bare "100." prefix would classify public addresses (e.g. AWS ranges
-# under 100.x outside the CGNAT block) as local; routes/model_routes.py
-# already narrows this the same way for endpoint classification.
+# under 100.x outside the CGNAT block) as local.
 _TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
 
@@ -43,14 +44,6 @@ def _is_private_ip_literal(host: str) -> bool:
     except ValueError:
         return False
     return any(ip in network for network in _PRIVATE_NETWORKS)
-
-
-def _normalize_base_for_compare(url: str) -> str:
-    url = (url or "").strip().rstrip("/")
-    for suffix in ("/chat/completions", "/models", "/completions", "/v1/messages"):
-        if url.endswith(suffix):
-            url = url[: -len(suffix)].rstrip("/")
-    return url
 
 
 # Single-vendor first-party APIs. A keyed /v1 URL on these hosts is the
@@ -71,45 +64,25 @@ def is_first_party_api_host(url: str) -> bool:
 
 
 def _configured_endpoint_kind(url: str) -> Optional[str]:
-    """Return configured endpoint kind for a chat/base URL when available."""
-    target = _normalize_base_for_compare(url)
-    if not target:
-        return None
-    if "core.database" not in sys.modules:
-        return None
-    try:
-        from core.database import SessionLocal, ModelEndpoint
-        db = SessionLocal()
-        try:
-            rows = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
-            for ep in rows:
-                base = _normalize_base_for_compare(getattr(ep, "base_url", "") or "")
-                if not base:
-                    continue
-                if target != base and not target.startswith(base + "/"):
-                    continue
-                kind = (getattr(ep, "endpoint_kind", None) or "auto").strip().lower()
-                if kind in ("local", "api", "proxy"):
-                    return kind
-                if getattr(ep, "api_key", None) and is_first_party_api_host(base):
-                    return "api"
-                if getattr(ep, "api_key", None) and not is_first_party_api_host(base):
-                    parsed = urlparse(base)
-                    host = (parsed.hostname or "").lower()
-                    path = (parsed.path or "").rstrip("/")
-                    if parsed.port != 11434 and "ollama" not in host and (path.endswith("/v1") or "/openai" in path):
-                        return "proxy"
-                return "auto"
-        finally:
-            db.close()
-    except Exception:
-        return None
+    """Classify non-authoritative discovery URLs without legacy provider rows.
+
+    Active model sessions carry ``openclank://engine`` and never reach the URL
+    heuristics below.  The HTTP cases remain only for bounded GET-only catalogue
+    helpers used by local-server diagnostics and migration tooling.
+    """
+    value = str(url or "").strip()
+    scheme = urlparse(value).scheme.lower()
+    if scheme in {"openclank", "mimo"}:
+        return "managed"
+    if is_first_party_api_host(value):
+        return "api"
+    return None
 
 
 def is_local_endpoint(url: str) -> bool:
     """Check if URL points to a local/private/tailscale address."""
     kind = _configured_endpoint_kind(url)
-    if kind in ("api", "proxy"):
+    if kind in ("api", "proxy", "managed"):
         return False
     if kind == "local":
         return True
@@ -419,7 +392,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     api_ctx = None
 
     # ACP is an in-process virtual transport, not an HTTP model endpoint.
-    if endpoint_url == "mimo://acp":
+    if _configured_endpoint_kind(endpoint_url) == "managed":
         return (known, True) if known else (DEFAULT_CONTEXT, False)
 
     configured_kind = _configured_endpoint_kind(endpoint_url)

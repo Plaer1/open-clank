@@ -1,12 +1,12 @@
 .archive/
 .references/
 references/
-# Plans + clanker sidecar notes stay local (e's ruling 2026-07-08).
-# NOTE: .futures/ files from commit 9ee395a are still tracked — run
-# `git rm -r --cached .futures robonotes` at the saga-end commit.
-.futures/
-robonotes/
-.robonotes/
+# All singular Clanker workspaces are private, including Hexes and local tools.
+**/.clanker/
+# History credentials and their authority/root sidecars are runtime state.
+**/history-credentials*.json
+**/.history-credentials*.tmp
+**/.clankers/robonotes/
 apps/mimo/node_modules/
 apps/mimo/packages/opencode/node_modules/
 apps/mimo/packages/opencode/dist/
@@ -27,6 +27,9 @@ venv/
 # Environment
 .env
 .env.bak.*
+# Root-only local environment variants created by tunnel/platform workflows.
+/.env.bak-*
+/.env.*-source
 !.env.example
 # Local uv lockfile (optional, per-platform — see "Faster installs with uv" in README)
 requirements.lock
@@ -40,6 +43,9 @@ secrets.env.*
 
 # Data — all user data stays local
 data/
+/data.before-restore-*/
+/data.failed-restore-*/
+/backups/
 !services/hwfit/data/
 !services/hwfit/data/hf_models.json
 logs/
@@ -47,6 +53,15 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-journal
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Node
 node_modules/
@@ -71,6 +86,7 @@ Thumbs.db
 
 # Build artifacts
 /bin/
+/libexec/openclank/engine/
 *.cache
 cache/
 output.txt.txt
@@ -90,6 +106,12 @@ output.txt.txt
 !static/themes/
 !static/themes/clanker/
 !static/themes/clanker/*.png
+
+# Verified handbook captures and delivery images (D02).
+!static/docs/
+!static/docs/media/
+!static/docs/media/**/*.png
+!static/docs/media/**/*.webp
 
 # …except shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
@@ -123,10 +145,29 @@ _scratch/
 /odysseus/
 
 # Local source mirrors and generated workspace snapshots
-/packages/henxels/
 /packages/Copal/treehouse/
+/packages/Copal/db/
 /packages/Copal/.codebase-memory/
 /packages/Copal/.mimocode/
 /packages/Copal/*.tsbuildinfo
+/packages/odysseus-files/target/
 /integrations.zip
 /packages/mimo-code/packages/opencode/src.zip
+
+# Local capture harness and personal workstation launcher; never release inputs.
+/.s26-visual/
+/packages/Copal/move-timeline.desktop
+/packages/Copal/worklog.md
+/packages/Copal/public/data/
+
+# Offline artwork is delivered as verified release payloads, never a Git blob.
+/static/vendor/google-emoji/emoji-assets.pack
+**/emoji-assets.pack.part-*
+**/emoji-assets.parts.json
+
+# Local Mimo scheduler coordination, never a publication artifact.
+.mimocode/.cron-lock
+
+# Local scheduler plans and native engine coordination locks.
+.mimocode/
+libexec/openclank/.engine.build.lock

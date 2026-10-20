@@ -55,6 +55,22 @@ def _write_skill_md(skills_root: Path, name: str, *, requires: str = "",
     ]
     path = skill_dir / "SKILL.md"
     path.write_text("\n".join(fm), encoding="utf-8")
+    # Runtime eligibility now requires a local lifecycle pointer. Use an
+    # explicit admin test-fixture waiver because this suite intentionally
+    # declares arbitrary tool names and tests index gating, not tool support.
+    sm = SkillsManager(str(skills_root.parent))
+    row = next(item for item in sm.load() if item["name"] == name)
+    sm.set_necessity(row["skill_id"], True)
+    sm.set_audit(row["skill_id"], "pass", worker_model="test")
+    ready = sm.publish_readiness(row["skill_id"])
+    assert sm.publish_skill(
+        row["skill_id"],
+        expected_revision=ready["revision"],
+        expected_hash=ready["content_hash"],
+        publisher="admin:test",
+        waiver_reason="toolset-gating fixture",
+        allow_waiver=True,
+    )
     return path
 
 

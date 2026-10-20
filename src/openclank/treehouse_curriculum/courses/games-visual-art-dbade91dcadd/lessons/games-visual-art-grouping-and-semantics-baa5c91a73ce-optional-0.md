@@ -1,0 +1,1 @@
+The states remain distinguishable without hue, and the explanation separates a visual cue from its intended meaning.

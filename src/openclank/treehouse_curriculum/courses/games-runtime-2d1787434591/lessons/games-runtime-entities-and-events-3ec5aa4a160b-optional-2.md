@@ -1,0 +1,1 @@
+Declared save {version:1,score:2,roundState:"running"}; transient sparkle/sound are not stored. Loading restores score2 without another collection award or sound transaction. A pointer is not portable saved state. Paper trace is sufficient here; it does not claim an implemented save system.

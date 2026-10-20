@@ -1,3 +1,4 @@
+import { uiIcon } from './uiIcons.js';
 // static/js/document.js
 /**
  * Document editor module — multi-document tabbed panel alongside chat.
@@ -13,10 +14,61 @@ import markdownModule from './markdown.js';
 import codeRunnerModule from './codeRunner.js';
 import { langIcon } from './langIcons.js';
 import spinnerModule from './spinner.js';
-import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
+import { openLibrary, openLibraryResource, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
 import signatureModule from './signature.js';
 import * as Modals from './modalManager.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { openFilesImageBrowser } from './filesImageBrowser.js';
+import { showResourceInFiles } from './showInFiles.js';
+
+let _sharedDocumentEditorPromise = null;
+async function _loadSharedDocumentEditor() {
+  if (!_sharedDocumentEditorPromise) _sharedDocumentEditorPromise = import('./copal/codemirror.js');
+  return _sharedDocumentEditorPromise;
+}
+
+function _wireExpandedDocumentEditor(textarea) {
+  if (!textarea || textarea.dataset.multiEditReady === 'true') return;
+  textarea.dataset.multiEditReady = 'true';
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'doc-expanded-editor-btn'; button.textContent = 'Open multi-edit';
+  button.title = 'Open the shared editor with multiple cursors';
+  button.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const returnFocus = document.activeElement;
+    const dialog = document.createElement('dialog'); dialog.className = 'copal-dialog doc-expanded-editor';
+    const heading = document.createElement('h2'); heading.textContent = 'Expanded source editor';
+    const help = document.createElement('p'); help.className = 'copal-dialog-help'; help.textContent = 'Use Mod-d for the next match, Mod-Shift-L for all matches, and Mod-Alt-arrow for vertical cursors.';
+    const host = document.createElement('div'); host.className = 'copal-codemirror-host doc-expanded-editor-host';
+    const feedback = document.createElement('p'); feedback.className = 'doc-expanded-editor-feedback'; feedback.setAttribute('role', 'status');
+    const actions = document.createElement('div'); actions.className = 'copal-dialog-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'copal-btn'; cancel.textContent = 'Cancel';
+    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'copal-btn primary'; apply.textContent = 'Apply'; apply.disabled = true;
+    actions.append(cancel, apply); dialog.append(heading, help, host, feedback, actions); document.body.append(dialog);
+    let editor = null;
+    cancel.addEventListener('click', () => dialog.close());
+    apply.addEventListener('click', () => {
+      if (!editor) return;
+      textarea.value = editor.getValue();
+      textarea.dispatchEvent(new Event('input', { bubbles:true }));
+      dialog.close();
+    });
+    dialog.addEventListener('close', () => { editor?.destroy?.(); dialog.remove(); returnFocus?.focus?.(); });
+    dialog.showModal();
+    try {
+      const module = await _loadSharedDocumentEditor();
+      const factory = module.createSourceEditor || module.createMarkdownEditor;
+      const language = String(docs.get(activeDocId)?.language || 'Plain text');
+      editor = factory({ parent:host, doc:String(textarea.value || ''), mode:'source', language });
+      await editor.languageReady;
+      apply.disabled = false; editor.focus();
+    } catch (error) {
+      feedback.textContent = `Expanded editor unavailable: ${error.message}`;
+      feedback.classList.add('error');
+    }
+  });
+  textarea.parentElement?.append(button);
+}
 
   let API_BASE = '';
   let isOpen = false;
@@ -51,7 +103,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // Language auto-detection config
   const AUTO_DETECT_DELAY = 500;
   const AUTO_DETECT_MIN_CHARS = 30;
-  const AUTO_DETECT_MIN_RELEVANCE = 8;
   const AUTO_DETECT_SAMPLE_SIZE = 2000;
   const HLJS_TO_DROPDOWN = {
     python: 'python', javascript: 'javascript', typescript: 'typescript',
@@ -123,6 +174,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   let activeDocId = null;           // currently visible doc
   let _lastSessionId = '';          // session context for "+" button
   const docs = new Map();           // docId -> { id, title, language, content, version, sessionId }
+  const _isResourceDocument = (doc = docs.get(activeDocId)) => !!(doc?.readOnly && doc?.resourceRef);
+  let _emailSendInFlight = false;
 
   const _docOpenKey = (sessionId) => 'odysseus-doc-open-' + sessionId;
   const _docMinimizedKey = (sessionId) => 'odysseus-doc-minimized-' + sessionId;
@@ -149,6 +202,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       getDocs: () => docs,
       isOpen: () => isOpen,
       createDocument,
+      newDocument,
       loadDocument,
       switchToDoc,
       openPanel,
@@ -162,10 +216,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         e.preventDefault();
         e.stopPropagation();
         try {
-          await newDocument();
+          const files = await import('./files.js');
+          await files.newFile();
         } catch (err) {
-          console.error('Failed to create document from sidebar button:', err);
-          if (uiModule) uiModule.showError('Failed to create document');
+          console.error('Failed to open Files creation from sidebar button:', err);
+          if (uiModule) uiModule.showError('Files could not be opened');
         }
       });
     }
@@ -290,9 +345,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const isActive = id === activeDocId;
       const title = doc.title || 'Untitled';
       const shortTitle = title.length > 24 ? title.slice(0, 22) + '...' : title;
-      const menuBtn = `<button class="doc-tab-menu-btn" data-doc-id="${id}" title="Document actions"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2.5"/><circle cx="12" cy="12" r="2.5"/><circle cx="12" cy="19" r="2.5"/></svg></button>`;
+      const menuBtn = `<button class="doc-tab-menu-btn" data-doc-id="${id}" title="Document actions">${uiIcon("more", 14)}</button>`;
       const ver = doc.version || doc.version_count || 1;
-      const verChip = `<span class="doc-tab-version" data-doc-id="${id}" title="Version history">v${ver}</span>`;
+      const verChip = _isResourceDocument(doc)
+        ? '<span class="doc-tab-version" title="Opened read-only through Files">read only</span>'
+        : `<span class="doc-tab-version" data-doc-id="${id}" title="Version history">v${ver}</span>`;
       // Language icon before the title — same family as the meta-line / picker
       // icons. Hidden via :empty CSS when the doc has no useful language.
       const lic = (doc.language && doc.language !== 'text')
@@ -309,7 +366,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (!_anyTab && isOpen && !activeDocId) {
       html += `<div class="doc-tab active doc-tab-ghost" title="New document — start typing"><span class="doc-tab-title">Untitled</span></div>`;
     }
-    html += `<button class="doc-tab-new" id="doc-tab-new-btn" title="New document"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`;
+    html += `<button class="doc-tab-new" id="doc-tab-new-btn" title="New document">${uiIcon("add", 12)}</button>`;
     html += '</div>';
     html += '<button class="doc-tab-arrow doc-tab-arrow-right" id="doc-tab-right" title="Scroll right">&#x203A;</button>';
     tabBar.innerHTML = html;
@@ -369,7 +426,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         e.stopPropagation();
         const docId = tab.dataset.docId;
         const doc = docs.get(docId);
-        if (!doc) return;
+        if (!doc || doc.readOnly) return;
         startTitleEdit(titleSpan, docId, doc);
       });
     });
@@ -382,7 +439,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (verBtn) {
         e.stopPropagation();
         const docId = verBtn.dataset.docId;
-        if (docId) { if (docId !== activeDocId) switchToDoc(docId); toggleVersionHistory(); }
+        if (docId && !_isResourceDocument(docs.get(docId))) { if (docId !== activeDocId) switchToDoc(docId); toggleVersionHistory(); }
         return;
       }
       const playBtn = e.target.closest('.doc-tab-play');
@@ -604,6 +661,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   async function _downloadFilledPdf() {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     _dismissDocKb();   // export shouldn't leave the keyboard up
     await _saveActiveDocBeforeExport();
     try {
@@ -637,6 +695,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     //    user typed but the existing 2s autosave hasn't fired.
     //  - PDF view: there may be a pending debounced _pdfPaneSaveTimer that
     //    hasn't flushed the user's input changes yet.
+    if (_isResourceDocument()) return;
     if (_pdfPaneSaveTimer) {
       clearTimeout(_pdfPaneSaveTimer);
       await _savePdfPaneToMarkdown();
@@ -669,7 +728,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <div class="modal-content" style="width:min(780px,94vw);">
         <div class="modal-header">
           <h4>Export filled PDF</h4>
-          <button id="pdf-export-close" class="modal-close" title="Close">×</button>
+          <button id="pdf-export-close" class="modal-close" title="Close">${uiIcon("close", 12)}</button>
         </div>
         <div id="pdf-export-summary" style="font-size:0.78rem;opacity:0.7;margin:0 0 6px;">Loading field values…</div>
         <div id="pdf-export-body" class="modal-body" style="font-size:0.85rem;">
@@ -777,7 +836,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             const thumb = document.createElement('img');
             thumb.style.cssText = 'max-height:32px;max-width:140px;object-fit:contain;border:1px solid var(--border);border-radius:3px;background:#fff;display:none;';
             const clearBtn = document.createElement('button');
-            clearBtn.textContent = '×';
+            clearBtn.innerHTML = uiIcon('close', 16); clearBtn.setAttribute('aria-label', clearBtn.getAttribute('aria-label') || clearBtn.title || 'Clear');
             clearBtn.title = 'Remove signature from this field';
             clearBtn.className = 'confirm-btn confirm-btn-secondary';
             clearBtn.style.cssText = 'padding:0 8px;font-size:0.85rem;line-height:1;display:none;';
@@ -1027,6 +1086,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   async function _undoPdfPaneAction() {
     const docId = activeDocId;
+    if (_isResourceDocument(docs.get(docId))) return false;
     const stack = _pdfUndoStackByDoc.get(docId) || [];
     const prev = stack.pop();
     if (!prev) return false;
@@ -2048,7 +2108,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const live = document.getElementById('doc-editor-textarea')?.value
       || docs.get(activeDocId)?.content
       || '';
-    const isForm = _isFormBackedDoc(live);
+    const isForm = !_isResourceDocument() && _isFormBackedDoc(live);
     // Footer main button: for a doc opened from an email attachment, morph the
     // Save button into "Attach" (send the filled file back to the sender via
     // the signed-reply flow). Otherwise it forces a new saved version.
@@ -2059,11 +2119,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (_replyable && _copyBtn.dataset.mode !== 'reply') {
         _copyBtn.dataset.mode = 'reply';
         _copyBtn.title = 'Reply to the sender with this filled file attached';
-        _copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>Attach';
+        _copyBtn.innerHTML = uiIcon("attachment", 13) + "Attach";
       } else if (!_replyable && _copyBtn.dataset.mode !== 'save') {
         _copyBtn.dataset.mode = 'save';
         _copyBtn.title = 'Save new version';
-        _copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+        _copyBtn.innerHTML = uiIcon("save", 13) + "Save";
       }
     }
     // Standalone Export PDF / PDF-toggle icon buttons are retired — for a
@@ -2101,10 +2161,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const canPreview = ['markdown', 'csv'].includes(lang) || _isRenderLang(lang);
     const canRun = ['javascript', 'js', 'python', 'py', 'bash', 'sh', 'shell', 'zsh'].includes(lang);
 
-    const _eyeIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-    const _penIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
-    const _playIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
-    const _codeIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+    const _eyeIco = uiIcon("eye", 14);
+    const _penIco = uiIcon("edit", 14);
+    const _playIco = uiIcon("play", 14);
+    const _codeIco = uiIcon("code", 14);
 
     // Check active states
     const _mdPreview = document.getElementById('doc-md-preview');
@@ -2134,13 +2194,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (runBtn) {
         let icon, title;
         if (lang === 'csv') {
-          icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
+          icon = uiIcon("grid", 13);
           title = 'Table view';
         } else if (_isRenderLang(lang)) {
-          icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+          icon = uiIcon("eye", 13);
           title = 'Preview';
         } else {
-          icon = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+          icon = uiIcon("play", 13);
           title = 'Run';
         }
         if (runBtn.dataset.lastIcon !== lang) {
@@ -2155,8 +2215,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const codeBtn = renderToggle.querySelector('[data-renderview="code"]');
       if (codeBtn) {
         const codeIco = (lang === 'csv')
-          ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>'
-          : '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+          ? uiIcon("edit", 13)
+          : uiIcon("code", 13);
         const codeTitle = (lang === 'csv') ? 'Edit' : 'Edit code';
         if (codeBtn.dataset.lastIcon !== lang) {
           codeBtn.innerHTML = codeIco;
@@ -2235,6 +2295,18 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
   // ── Email document type helpers ──
 
+  function _unfoldEmailHeaderLines(header) {
+    const lines = [];
+    for (const rawLine of String(header || '').replace(/\r\n/g, '\n').split('\n')) {
+      if (/^[ \t]/.test(rawLine) && lines.length) {
+        lines[lines.length - 1] += ' ' + rawLine.trim();
+      } else {
+        lines.push(rawLine);
+      }
+    }
+    return lines;
+  }
+
   function _parseEmailHeader(content) {
     const empty = { to: '', cc: '', bcc: '', subject: '', inReplyTo: '', references: '', sourceUid: '', sourceFolder: '', forwardAttachments: false, attachments: [], body: content || '' };
     if (!content) return empty;
@@ -2243,7 +2315,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const header = parts[0];
     const body = parts.slice(1).join('\n---\n');
     const fields = { to: '', cc: '', bcc: '', subject: '', inReplyTo: '', references: '', sourceUid: '', sourceFolder: '', forwardAttachments: false, attachments: [], body: body };
-    for (const line of header.split('\n')) {
+    for (const line of _unfoldEmailHeaderLines(header)) {
       const m = line.match(/^(To|Cc|Bcc|Subject|In-Reply-To|References|X-Source-UID|X-Source-Folder|X-Forward-Attachments|X-Attachments):\s*(.*)$/i);
       if (m) {
         let key = m[1].toLowerCase();
@@ -2364,16 +2436,20 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function _emailFieldsWithLocalDraft(fields) {
     const draft = _loadEmailLocalDraft(fields);
     if (!draft) return fields;
+    const keepRealField = (draftValue, fieldValue) => {
+      const d = draftValue == null ? '' : String(draftValue);
+      return d.trim() ? d : (fieldValue || '');
+    };
     return {
       ...fields,
-      to: draft.to ?? fields.to,
-      cc: draft.cc ?? fields.cc,
-      bcc: draft.bcc ?? fields.bcc,
-      subject: draft.subject ?? fields.subject,
-      inReplyTo: draft.inReplyTo ?? fields.inReplyTo,
-      references: draft.references ?? fields.references,
-      sourceUid: draft.sourceUid ?? fields.sourceUid,
-      sourceFolder: draft.sourceFolder ?? fields.sourceFolder,
+      to: keepRealField(draft.to, fields.to),
+      cc: keepRealField(draft.cc, fields.cc),
+      bcc: keepRealField(draft.bcc, fields.bcc),
+      subject: keepRealField(draft.subject, fields.subject),
+      inReplyTo: keepRealField(draft.inReplyTo, fields.inReplyTo),
+      references: keepRealField(draft.references, fields.references),
+      sourceUid: keepRealField(draft.sourceUid, fields.sourceUid),
+      sourceFolder: keepRealField(draft.sourceFolder, fields.sourceFolder),
       body: _sanitizeOutgoingEmailBody(draft.body ?? fields.body),
     };
   }
@@ -2430,7 +2506,20 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return d.innerHTML.replace(/\n/g, '<br>');
   }
 
-  function _emailBodyToHtml(text) {
+  function _emailHtmlToPlainText(html) {
+    if (typeof document === 'undefined') return String(html || '');
+    const d = document.createElement('div');
+    d.innerHTML = String(html || '');
+    return d.innerText || d.textContent || '';
+  }
+
+  function _emailQuoteMarkerMatch(text) {
+    const raw = String(text || '');
+    return raw.match(/(?:<p[^>]*>\s*)?-{5,}\s*Previous message\s*-{5,}(?:\s*<\/p>)?/i)
+      || raw.match(/-{5,}\s*Previous message\s*-{5,}/i);
+  }
+
+  function _emailBodyFragmentToHtml(text) {
     const t = (text || '').trim();
     if (!t) return '';
     // If it already contains a formatting/structural HTML tag, it's a saved
@@ -2445,6 +2534,36 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // (shortcode → emoji) is scoped to chat; do not rewrite colons in mail.
     try { return markdownModule.mdToHtml(text, { shortcodes: false }); }
     catch (_) { return _emailPlainTextToHtml(text); }
+  }
+
+  function _emailBodyToHtml(text) {
+    const raw = String(text || '');
+    const marker = _emailQuoteMarkerMatch(raw);
+    if (!marker) {
+      const t = raw.trim();
+      if (/<\/?(b|i|u|s|strong|em|del|strike|a|p|div|br|ul|ol|li|h[1-3]|blockquote|span|code|pre)\b[^>]*>/i.test(t)) {
+        return markdownModule.sanitizeAllowedHtml
+          ? markdownModule.sanitizeAllowedHtml(t)
+          : _emailPlainTextToHtml(t);
+      }
+      return _emailBodyFragmentToHtml(raw);
+    }
+    const replyPart = raw.slice(0, marker.index);
+    const quotedPart = raw.slice(marker.index);
+    const quotedText = _emailHtmlToPlainText(quotedPart)
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    const replyHtml = _emailBodyFragmentToHtml(replyPart);
+    if (!quotedText) return replyHtml;
+    const firstQuoted = quotedText
+      .split(/\n\s*-{5,}\s*Previous message\s*-{5,}\s*\n/i)[0]
+      .trim();
+    const truncatedQuote = firstQuoted.length > 1800
+      ? `${firstQuoted.slice(0, 1800).replace(/\s+\S*$/, '').trim()}\n\n[Quoted thread truncated]`
+      : firstQuoted;
+    return `${replyHtml}<div class="email-quoted-history" contenteditable="false">${_emailPlainTextToHtml(truncatedQuote)}</div>`;
   }
   // Mirror the rich body's plain text into the hidden textarea so the existing
   // send / draft / change-detection plumbing (which reads the textarea) stays
@@ -2747,8 +2866,21 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     target.focus();
     if (target.isContentEditable) {
       const range = document.createRange();
-      range.selectNodeContents(target);
-      range.collapse(false);
+      const quote = target.querySelector('.email-quoted-history');
+      if (quote) {
+        let slot = quote.previousElementSibling;
+        if (!slot || slot.classList.contains('email-quoted-history')) {
+          slot = document.createElement('div');
+          slot.className = 'email-reply-edit-slot';
+          slot.innerHTML = '<br>';
+          target.insertBefore(slot, quote);
+        }
+        range.selectNodeContents(slot);
+        range.collapse(false);
+      } else {
+        range.selectNodeContents(target);
+        range.collapse(false);
+      }
       const sel = window.getSelection();
       if (sel) {
         sel.removeAllRanges();
@@ -2811,7 +2943,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (_shouldAutoCollapseEmailHeader()) _setEmailHeaderCollapsed(true, { manual: false });
   }
 
-  function _showEmailFields(doc, { applyLocalDraft = true } = {}) {
+  function _showEmailFields(doc, { applyLocalDraft = true, forceHeaderFields = false } = {}) {
     const emailHeader = document.getElementById('doc-email-header');
     const emailActions = document.getElementById('doc-email-actions');
     // Show MD toolbar for email too (B, I, etc.)
@@ -2843,13 +2975,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     document.getElementById('doc-editor-textarea')?.classList.add('email-mode');
     document.getElementById('doc-editor-code')?.classList.add('email-mode');
     document.getElementById('doc-editor-highlight')?.classList.add('email-mode');
+    document.querySelector('.doc-expanded-editor-btn')?.style.setProperty('display', 'none');
     let fields = _parseEmailHeader(doc.content || '');
     if (applyLocalDraft) fields = _emailFieldsWithLocalDraft(fields);
     const preserveEmailHeader = !!(fields.sourceUid || fields.inReplyTo || fields.references);
     const subjectInput = document.getElementById('doc-email-subject');
     const textarea = document.getElementById('doc-editor-textarea');
-    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-to', fields.to, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-subject', fields.subject, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     _setEmailHeaderCollapsed(!!(doc && doc._emailHeaderCollapsed), { manual: false });
     if (subjectInput && !subjectInput._emailTabBodyBound) {
       subjectInput._emailTabBodyBound = true;
@@ -2860,10 +2993,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         }
       });
     }
-    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-in-reply-to', fields.inReplyTo, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-references', fields.references, { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-source-uid', fields.sourceUid || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-source-folder', fields.sourceFolder || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     // Show/hide unread button only if we have a source UID (came from inbox)
     const unreadBtn = document.getElementById('doc-email-unread-btn');
     if (unreadBtn) unreadBtn.style.display = fields.sourceUid ? '' : 'none';
@@ -2876,7 +3009,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         for (const att of fields.attachments) {
           const isPdf = (att.filename || '').toLowerCase().endsWith('.pdf');
           const sizeKb = att.size > 0 ? `${Math.round(att.size / 1024)} KB` : '';
-          const chipHtml = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg><span>${_escHtml(att.filename)}</span><span class="att-size">${sizeKb}</span>`;
+          const chipHtml = `${uiIcon("attachment", 12)}<span>${_escHtml(att.filename)}</span><span class="att-size">${sizeKb}</span>`;
           // Helper: swap chip content for a whirlpool spinner while busy.
           const _withSpinner = async (chip, fn) => {
             if (chip.dataset.loading === '1') return;
@@ -2975,7 +3108,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       setTimeout(() => {
         try {
           const _isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0;
-          if (!_isTouch) _rich.focus();
+          if (!_isTouch) _focusEmailBodyEnd();
           _rich.scrollTop = 0;
         } catch (_) {}
       }, 50);
@@ -2986,8 +3119,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const ccRow = document.getElementById('doc-email-cc-row');
     const bccRow = document.getElementById('doc-email-bcc-row');
     const ccToggle = document.getElementById('doc-email-show-cc');
-    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveNonEmpty: preserveEmailHeader });
-    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveNonEmpty: preserveEmailHeader });
+    _setEmailHeaderInputValue('doc-email-cc', fields.cc || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
+    _setEmailHeaderInputValue('doc-email-bcc', fields.bcc || '', { preserveFocused: !forceHeaderFields, preserveNonEmpty: preserveEmailHeader && !forceHeaderFields });
     const hasCcBcc = !!(
       fields.cc ||
       fields.bcc ||
@@ -3152,7 +3285,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   function _odysseusAttachLabel(item, kind) {
-    if (kind === 'gallery') {
+    if (kind === 'files') {
       return item.caption || item.prompt || item.filename || 'Gallery image';
     }
     return item.title || 'Untitled document';
@@ -3215,7 +3348,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (!opts.keepOpen) _closeOdysseusAttachMenu();
     } catch (err) {
       console.error('Failed to attach Odysseus item:', err);
-      if (uiModule) uiModule.showError('Failed to attach from Odysseus');
+      if (uiModule) uiModule.showError('Failed to attach from Open Clank');
     }
   }
 
@@ -3260,11 +3393,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           added += 1;
         }
       }
-      _afterOdysseusAttachmentsAdded(added, zip ? 'odysseus-attachments.zip' : undefined);
+      _afterOdysseusAttachmentsAdded(added, zip ? 'open-clank-attachments.zip' : undefined);
       _closeOdysseusAttachMenu();
     } catch (err) {
-      console.error('Failed to attach selected Odysseus items:', err);
-      if (uiModule) uiModule.showError(added ? `Attached ${added}, then failed` : 'Failed to attach from Odysseus');
+      console.error('Failed to attach selected Open Clank items:', err);
+      if (uiModule) uiModule.showError(added ? `Attached ${added}, then failed` : 'Failed to attach from Open Clank');
       _renderComposeAttachments();
     } finally {
       if (btn) {
@@ -3286,17 +3419,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     try {
       const params = new URLSearchParams({ sort: 'recent', limit: '20' });
       if (q) params.set('search', q);
-      const endpoint = kind === 'gallery'
-        ? `${API_BASE}/api/gallery/library?${params}`
-        : `${API_BASE}/api/documents/library?${params}`;
-      const res = await fetch(endpoint, { credentials: 'same-origin' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
-      const items = kind === 'gallery'
-        ? (Array.isArray(data?.items) ? data.items : Array.isArray(data?.images) ? data.images : [])
-        : (Array.isArray(data?.documents) ? data.documents : Array.isArray(data?.items) ? data.items : []);
+      let items;
+      if (kind === 'files') {
+        await openFilesImageBrowser({
+          title: 'Attach from Files',
+          onPick(item) { _attachOdysseusItem('files', item.ref, item.name || 'image'); },
+        });
+        _closeOdysseusAttachMenu();
+        return;
+      } else {
+        const res = await fetch(`${API_BASE}/api/documents/library?${params}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+        items = Array.isArray(data?.documents) ? data.documents : Array.isArray(data?.items) ? data.items : [];
+      }
       if (!items.length) {
-        list.innerHTML = `<div class="email-odysseus-attach-empty">${q ? 'No matches' : `No ${kind === 'gallery' ? 'images' : 'documents'}`}</div>`;
+        list.innerHTML = `<div class="email-odysseus-attach-empty">${q ? 'No matches' : `No ${kind === 'files' ? 'images' : 'documents'}`}</div>`;
         _syncOdysseusAttachSelection(menu);
         return;
       }
@@ -3305,10 +3443,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         const label = _odysseusAttachLabel(item, kind);
         const row = document.createElement('button');
         row.type = 'button';
-        row.className = `email-odysseus-attach-row ${kind === 'gallery' ? 'is-gallery' : ''}`;
+        row.className = `email-odysseus-attach-row ${kind === 'files' ? 'is-gallery' : ''}`;
         row.dataset.id = item.id || '';
         row.dataset.kind = kind;
-        if (kind === 'gallery') {
+        if (kind === 'files') {
           const src = item.url ? `${API_BASE}${item.url}` : '';
           row.innerHTML = `
             <span class="email-odysseus-attach-dot" aria-hidden="true"></span>
@@ -3338,7 +3476,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       }
       _syncOdysseusAttachSelection(menu);
     } catch (err) {
-      console.error('Failed to load Odysseus attach items:', err);
+      console.error('Failed to load Open Clank attach items:', err);
       list.innerHTML = '<div class="email-odysseus-attach-empty">Could not load</div>';
     }
   }
@@ -3353,28 +3491,28 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     menu.className = 'email-odysseus-attach-menu';
     menu.innerHTML = `
       <button type="button" class="email-odysseus-attach-local">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        ${uiIcon("upload", 13)}
         Upload file
       </button>
       <div class="email-odysseus-attach-tabs">
         <button type="button" data-ody-attach-kind="document" class="active">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h6"/></svg>
+          ${uiIcon("file", 13)}
           <span>Documents</span>
         </button>
-        <button type="button" data-ody-attach-kind="gallery">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+        <button type="button" data-ody-attach-kind="files">
+          ${uiIcon("image", 13)}
           <span>Gallery</span>
         </button>
       </div>
       <label class="email-odysseus-attach-search-wrap">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        ${uiIcon("search", 13)}
         <input type="search" class="email-odysseus-attach-search" placeholder="Search attachments">
       </label>
       <div class="email-odysseus-attach-list"></div>
       <div class="email-odysseus-attach-actions">
         <span class="email-odysseus-attach-count"></span>
         <button type="button" class="email-odysseus-attach-selected" disabled>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+          ${uiIcon("attachment", 13)}
           <span>Attach</span>
         </button>
       </div>
@@ -3519,10 +3657,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       chip.className = 'email-compose-chip';
       const sizeKb = att.size > 0 ? `${Math.round(att.size / 1024)} KB` : '';
       chip.innerHTML = `
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        ${uiIcon("attachment", 11)}
         <span class="compose-chip-name">${_escHtml(att.filename)}</span>
         <span class="att-size">${sizeKb}</span>
-        <button class="compose-chip-remove" title="Remove">×</button>
+        <button class="compose-chip-remove" title="Remove">${uiIcon("close", 12)}</button>
       `;
       chip.querySelector('.compose-chip-remove').addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -3726,6 +3864,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (_rich) _rich.style.display = 'none';
     const _srcWrap = document.getElementById('doc-editor-wrap');
     if (_srcWrap) _srcWrap.style.display = '';
+    document.querySelector('.doc-expanded-editor-btn')?.style.removeProperty('display');
     // Drop the email-mode class so editors return to monospace monochrome
     document.getElementById('doc-editor-textarea')?.classList.remove('email-mode');
     document.getElementById('doc-editor-code')?.classList.remove('email-mode');
@@ -3768,6 +3907,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   async function _sendEmail() {
+    if (_emailSendInFlight) {
+      if (uiModule) uiModule.showToast('Already sending');
+      return;
+    }
+    if (uiModule) uiModule.showToast('Preparing send', { duration: 1200 });
     const sendDocId = activeDocId;
     const to = document.getElementById('doc-email-to')?.value?.trim();
     const cc = document.getElementById('doc-email-cc')?.value?.trim() || '';
@@ -3801,11 +3945,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       const proceed = await _confirmMissingAttachment();
       if (!proceed) return;
     }
-    const btn = document.getElementById('doc-email-send-btn');
-    const _sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    const btn = Array.from(document.querySelectorAll('#doc-email-send-btn')).find((candidate) => candidate.offsetParent !== null) || document.getElementById('doc-email-send-btn');
     let sendSpinner = null;
     let origBtnHtml = '';
-    let detachedEmailDoc = null;
+    _emailSendInFlight = true;
     if (btn) {
       btn.disabled = true;
       origBtnHtml = btn.innerHTML;
@@ -3816,24 +3959,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       btn.appendChild(document.createTextNode('Sending'));
     }
     try {
-      let canceled = false;
-      if (uiModule) {
-        uiModule.showToast('Sending', {
-          duration: 3200,
-          leadingIcon: 'spinner',
-          action: 'Cancel',
-          onAction: () => { canceled = true; },
-        });
-      }
-      await _sleep(3000);
-      if (!canceled) detachedEmailDoc = _detachActiveEmailForBackground(sendDocId);
-      await _sleep(200);
-      if (canceled) {
-        _restoreDetachedEmailDoc(detachedEmailDoc);
-        detachedEmailDoc = null;
-        if (uiModule) uiModule.showToast('Send canceled');
-        return;
-      }
+      if (uiModule) uiModule.showToast('Sending', { duration: 2200, leadingIcon: 'spinner' });
 
       const activeAccountId = await _resolveComposeSendAccountId();
       const res = await fetch(`${API_BASE}/api/email/send`, {
@@ -3864,7 +3990,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             leadingIcon: 'check',
             action: 'View Message',
             onAction: () => {
-              import('./emailLibrary.js').then(mod => {
+              import('./emailLibrary.js?v=20260722emailfastindex1').then(mod => {
                 const open = mod.openEmailLibrary || (mod.default && mod.default.openEmailLibrary);
                 if (open) open({
                   account_id: data.account_id || activeAccountId || null,
@@ -3903,9 +4029,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           // Tell the inbox to refresh so the answered state shows
           window.dispatchEvent(new CustomEvent('email-answered', { detail: { uid: sourceUid, folder: sourceFolder, account_id: data.account_id || activeAccountId || null } }));
         }
-        // Delete the compose document after successful send. It was usually
-        // already detached from the visible tabs so sending can finish in the
-        // background while the user continues in the next tab.
+        // Delete the compose document after successful send.
         if (sendDocId) {
           fetch(`${API_BASE}/api/document/${sendDocId}`, { method: 'DELETE' }).catch(() => {});
           const wasActiveSentDoc = activeDocId === sendDocId;
@@ -3921,15 +4045,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           _syncDocIndicator();
         }
       } else {
-        _restoreDetachedEmailDoc(detachedEmailDoc);
-        detachedEmailDoc = null;
         if (uiModule) uiModule.showError(data.error || 'Failed to send');
       }
     } catch (e) {
-      _restoreDetachedEmailDoc(detachedEmailDoc);
-      detachedEmailDoc = null;
       if (uiModule) uiModule.showError(e?.message ? `Failed to send email: ${e.message}` : 'Failed to send email');
     } finally {
+      _emailSendInFlight = false;
       if (sendSpinner) sendSpinner.destroy();
       if (btn) {
         btn.disabled = false;
@@ -4004,43 +4125,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return ids;
   }
 
-  function _detachActiveEmailForBackground(docId) {
-    if (!docId || !docs.has(docId)) return null;
-    saveCurrentToMap();
-    const doc = docs.get(docId);
-    const snapshot = { id: docId, doc: { ...doc } };
-    const wasActive = activeDocId === docId;
-    if (wasActive) saveDocument({ silent: true }).catch(() => {});
-
-    const visibleBefore = _visibleDocIdsForCurrentSession();
-    const idx = visibleBefore.indexOf(docId);
-    docs.delete(docId);
-    if (wasActive) activeDocId = null;
-
-    if (wasActive) {
-      const remaining = visibleBefore.filter(id => id !== docId && docs.has(id));
-      const nextId = remaining[idx] || remaining[idx - 1] || remaining[0] || null;
-      if (nextId) {
-        switchToDoc(nextId);
-      } else {
-        closePanel();
-      }
-    }
-    renderTabs();
-    _syncDocIndicator();
-    return snapshot;
-  }
-
-  function _restoreDetachedEmailDoc(snapshot) {
-    if (!snapshot || !snapshot.id || !snapshot.doc) return;
-    if (!docs.has(snapshot.id)) docs.set(snapshot.id, snapshot.doc);
-    _ensureDocPaneMounted();
-    switchToDoc(snapshot.id);
-    _syncDocIndicator();
-  }
-
   function _closeWithoutDeleting(deleteDoc = false) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) {
+      closeTab(activeDocId);
+      return;
+    }
     if (deleteDoc) {
       fetch(`${API_BASE}/api/document/${activeDocId}`, { method: 'DELETE' }).catch(() => {});
     }
@@ -4059,10 +4149,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     renderTabs();
   }
 
-  // Fast/Full + optional context popover for the doc-editor email Reply button.
-  // Mirrors the email reader's AI reply choice popover so the UX is identical:
-  // textarea for an optional steering note, then Fast (lightning) or Full
-  // (concentric dot) buttons; both feed into _aiReply with the chosen mode.
+  // Fast AI reply + optional context popover for the doc-editor email Reply button.
+  // Mirrors the email reader's AI reply choice popover: textarea for an
+  // optional steering note, then one Submit button.
   let _docAiReplyChoiceMenu = null;
   const _AI_REPLY_CONTEXT_STORE_PREFIX = 'odysseus:email-ai-reply-context:v1:';
   function _docAiReplyContextKey() {
@@ -4140,15 +4229,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     ].join(';');
     menu.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:6px;min-width:200px;">
-        <textarea data-note-input rows="2" placeholder="Add context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
+        <textarea data-note-input rows="2" placeholder="Context (optional)" style="width:100%;box-sizing:border-box;resize:vertical;min-height:42px;font-family:inherit;font-size:11px;padding:5px 6px;border-radius:5px;border:1px solid var(--border,#333);background:var(--bg-elev,#1a1a1a);color:var(--fg);"></textarea>
         <div style="display:flex;align-items:center;gap:4px;">
-          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Shorter, faster draft" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--accent, var(--red))" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-            Fast
-          </button>
-          <button class="memory-toolbar-btn" data-mode="ai-reply-full" title="Fuller reply with more context" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="color:var(--accent, var(--red));"><circle cx="12" cy="12" r="6"/></svg>
-            Full
+          <button class="memory-toolbar-btn" data-mode="ai-reply-fast" title="Draft reply" style="display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:1;">
+            ${uiIcon("sparkles", 11, {"style":"color:var(--accent, var(--red));"})}
+            Submit
           </button>
         </div>
       </div>
@@ -4194,6 +4279,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const inReplyTo = document.getElementById('doc-email-in-reply-to')?.value?.trim() || '';
     const sourceUid = document.getElementById('doc-email-source-uid')?.value?.trim() || '';
     const sourceFolder = document.getElementById('doc-email-source-folder')?.value?.trim() || 'INBOX';
+    const sourceAccountId = docs.get(activeDocId)?.sourceEmailAccountId || window.__odysseusActiveEmailAccount || '';
     const cleanAiReplyText = (text) => {
       if (!text) return '';
       let t = String(text);
@@ -4208,15 +4294,16 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       return t
         .replace(/<<<\s*(?:REPLY|SUMMARY|OUTPUT)\s*>>+/gi, '')
         .replace(/<<<\s*END\s*>>+/gi, '')
+        .replace(/<\/?\|(?:assistant|assistan|user|system|tool)\|>?|<\/\|end\|>?/gi, '')
         .trim();
     };
-    const shouldUseFastAiReply = () => {
-      const text = `${subject}\n${currentBody}`.toLowerCase();
-      if (/\b(attach(?:ed|ment)?|pdf|document|contract|invoice|receipt|quote|estimate|proposal|question|questions|details|schedule|booking|reservation|meeting|calendar|availability|confirm|confirmation|review|sign|signature)\b/.test(text)) {
-        return false;
-      }
-      return currentBody.length < 2500;
-    };
+    const splitCurrent = _splitEmailReplyQuote(currentBody);
+    const ownText = String(splitCurrent.body || '').trim();
+    const isReplaceableDraft = !ownText || /^(\[AI reply draft will appear here\]|Drafting AI reply)/i.test(ownText);
+    if (!isReplaceableDraft) {
+      if (uiModule) uiModule.showToast('Reply already has text');
+      return;
+    }
 
     // Use the current chat model
     let currentModel = '';
@@ -4227,16 +4314,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     } catch (_) {}
 
     const btn = document.getElementById('doc-email-ai-reply-btn');
-    if (btn) { btn.disabled = true; btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:-1px;margin-right:3px"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>Drafting...'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = uiIcon("sparkles", 11, {"style":"vertical-align:-1px;margin-right:3px"}) + "Drafting..."; }
 
     try {
       // Empty-compose path: if there's no original body, send a placeholder
       // so the backend's "no body" guard doesn't fail. The user_hint carries
       // the user's compose intent; the model uses To/Subject + that hint.
       const bodyForApi = currentBody || (noteHint ? '(no prior email — compose a new message based on the To, Subject, and user instructions)' : currentBody);
-      const fastFlag = mode === 'ai-reply-fast' ? true
-                     : mode === 'ai-reply-full' ? false
-                     : shouldUseFastAiReply();
       const res = await fetch(`${API_BASE}/api/email/ai-reply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4249,7 +4333,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
           message_id: inReplyTo,
           uid: sourceUid,
           folder: sourceFolder,
-          fast: fastFlag,
+          account_id: sourceAccountId,
+          fast: true,
           user_hint: noteHint || '',
         }),
       });
@@ -4262,11 +4347,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         // currentBody. Without this, AI's invented quote stacked on top
         // of the real one and looked like the history had been "edited".
         cleanReply = cleanReply.replace(/\n*On\b[\s\S]*?\bwrote:[\s\S]*$/m, '').trim();
-        // Never overwrite the existing draft (user's typed text + the
-        // quoted history below it). Always prepend the AI suggestion so
-        // the user can read it, copy parts, or delete it — but their
-        // own work and the original quote are untouched.
-        const newBody = currentBody ? cleanReply + '\n\n' + currentBody : cleanReply;
+        const quote = splitCurrent.quote || '';
+        const newBody = cleanReply + (quote ? `\n\n${quote}` : '');
         await _streamEmailBodyText(textarea, newBody);
         _clearDocAiReplyContext(contextKey || _docAiReplyContextKey());
         if (uiModule) uiModule.showToast(`AI draft inserted (${data.model_used || 'AI'})`);
@@ -4280,7 +4362,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     } catch (e) {
       if (uiModule) uiModule.showError('Failed to generate AI reply');
     } finally {
-      if (btn) { btn.disabled = false; btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg><span style="font-size:11px;margin-left:4px;">Reply</span>'; }
+      if (btn) { btn.disabled = false; btn.innerHTML = uiIcon("sparkles", 12, {"style":"color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"}) + "<span style=\"font-size:11px;margin-left:4px;\">Reply</span>"; }
     }
   }
 
@@ -4322,7 +4404,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <div class="modal-content schedule-send-modal" style="width:400px;max-width:92vw;">
         <div class="modal-header">
           <h4>Schedule Send</h4>
-          <button class="close-btn" id="sched-close" title="Close"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button class="close-btn" id="sched-close" title="Close">${uiIcon("close", 12)}</button>
         </div>
         <div class="modal-body schedule-send-body">
           <label class="schedule-send-label">Quick presets</label>
@@ -4337,7 +4419,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         </div>
         <div class="modal-footer schedule-send-footer">
           <button class="memory-toolbar-btn" id="sched-cancel">Cancel</button>
-          <button class="memory-toolbar-btn schedule-send-confirm" id="sched-confirm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>Schedule</button>
+          <button class="memory-toolbar-btn schedule-send-confirm" id="sched-confirm">${uiIcon("clock", 12)}Schedule</button>
         </div>
       </div>
     `;
@@ -4452,7 +4534,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     const prevId = activeDocId;
     if (prevId && prevId !== docId && docs.has(prevId)) {
       const prev = docs.get(prevId);
-      if (prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
+      if (!_isResourceDocument(prev) && prev.language !== 'email' && !(prev.content || '').trim() && !(prev.title || '').trim()) {
         fetch(`${API_BASE}/api/document/${prevId}`, { method: 'DELETE' }).catch(() => {});
         docs.delete(prevId);
         _syncDocIndicator();
@@ -4471,7 +4553,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     if (titleInput) titleInput.value = doc.title || '';
     // For email docs, _showEmailFields will set textarea to body only (not raw header)
-    if (textarea && doc.language !== 'email') textarea.value = doc.content || '';
+    if (textarea && (doc.language !== 'email' || _isResourceDocument(doc))) textarea.value = doc.content || '';
     if (langSelect) langSelect.value = doc.language || 'markdown';
     if (badge) { const _v = doc.version || 1; badge.textContent = `v${_v}`; badge.style.display = _v > 1 ? '' : 'none'; }
     { const _v = doc.version || 1; const _dbtn = document.getElementById('doc-diff-toggle-btn'); if (_dbtn) _dbtn.style.display = _v > 1 ? '' : 'none'; }
@@ -4496,7 +4578,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // markdown under the hood, so the toolbar shows up for them too — and
     // gets the PDF-specific buttons (Text/Check/Sign/AI) revealed below.
     const isMd = (doc.language || 'markdown') === 'markdown';
-    const isPdf = _isFormBackedDoc(doc.content || '');
+    const isPdf = !_isResourceDocument(doc) && _isFormBackedDoc(doc.content || '');
 
     // For PDF-backed docs, re-run text extraction on the backend so the AI
     // can see the contents on the very next message. Idempotent + skipped
@@ -4556,10 +4638,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Show/hide email fields. Markdown preview uses the same editor wrapper
     // as email source mode, so clear it before showing the rich email body;
     // otherwise the source wrapper can reappear over the composer.
-    const isEmail = doc.language === 'email';
+    const isEmail = doc.language === 'email' && !_isResourceDocument(doc);
     if (isEmail) {
       _setMarkdownPreviewActive(false, { remember: false });
-      _showEmailFields(doc);
+      const forceHeaderFields = !!doc._skipLocalDraftOnce;
+      const applyLocalDraft = forceHeaderFields ? false : true;
+      doc._skipLocalDraftOnce = false;
+      _showEmailFields(doc, { applyLocalDraft, forceHeaderFields });
     } else {
       _hideEmailFields();
       const wantsMarkdownPreview = (doc.language || 'markdown') === 'markdown' && doc._markdownPreviewActive === true;
@@ -4572,6 +4657,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
     renderTabs();
     _syncHeaderActions();
+    _syncResourceReadOnly(doc);
 
     // Restore any persisted suggestions for this doc
     if (_activeSuggestions.length === 0) {
@@ -4585,6 +4671,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   // session makes it look like the document vanished from that chat.
   function _detachDocFromSession(docId, { toast = false } = {}) {
     const doc = docs.get(docId);
+    if (doc?.readOnly && doc?.resourceRef) {
+      docs.delete(docId);
+      _syncDocIndicator();
+      if (toast && uiModule) uiModule.showToast('Resource closed');
+      return;
+    }
     const hasContent = doc && doc.content && doc.content.trim().length > 0;
     if (hasContent) {
       saveDocument({ silent: true }).catch(() => {});
@@ -4675,6 +4767,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   function saveCurrentToMap() {
     if (!activeDocId || !docs.has(activeDocId)) return;
     const doc = docs.get(activeDocId);
+    if (doc.readOnly && doc.resourceRef) return;
     const textarea = document.getElementById('doc-editor-textarea');
     const titleInput = document.getElementById('doc-title-input');
     const langSelect = document.getElementById('doc-language-select');
@@ -4775,7 +4868,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // hides the pane outright (so fullscreen has an escape that isn't just
     // "exit fullscreen").
     divider.innerHTML = '<button type="button" class="doc-divider-collapse" title="Collapse panel" data-mode="collapse"><span>›</span></button>' +
-      '<button type="button" class="doc-divider-hide" title="Hide panel" aria-label="Hide panel"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+      "<button type=\"button\" class=\"doc-divider-hide\" title=\"Hide panel\" aria-label=\"Hide panel\">" + uiIcon("close", 11) + "</button>";
     const _divHide = divider.querySelector('.doc-divider-hide');
     if (_divHide) {
       _divHide.addEventListener('mousedown', (e) => e.stopPropagation());
@@ -4820,13 +4913,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <input type="hidden" id="doc-title-input" value="" />
       <div class="doc-mobile-grabber" id="doc-mobile-grabber" aria-hidden="true"></div>
       <div class="doc-editor-header" id="doc-editor-actions">
-        <button id="doc-undo-btn" class="doc-action-icon-btn" title="Undo (Ctrl+Z)" style="gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg><span style="font-size:11px;">Undo</span></button>
+        <button id="doc-undo-btn" class="doc-action-icon-btn" title="Undo (Ctrl+Z)" style="gap:4px;">${uiIcon("restore", 14)}<span style="font-size:11px;">Undo</span></button>
         <button id="doc-header-preview-btn" class="doc-action-icon-btn" title="Run / Preview" style="display:none;opacity:0.85;gap:4px;"></button>
         <span id="doc-stream-indicator" class="doc-stream-indicator" style="display:none"><span class="doc-stream-dot"></span> editing</span>
         <span id="doc-version-badge" class="doc-version-badge" title="Version history" style="display:none">v1</span>
         <span style="flex:1"></span>
-        <button id="doc-export-pdf-btn" class="doc-action-icon-btn" title="Export PDF" style="display:none;opacity:0.7;gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 18 15 15"/></svg> <span style="font-size:11px;">Export PDF</span></button>
-        <button id="doc-pdf-view-btn" class="doc-action-icon-btn" title="Toggle PDF view" style="display:none;opacity:0.7;gap:4px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span style="font-size:11px;">PDF</span></button>
+        <button id="doc-export-pdf-btn" class="doc-action-icon-btn" title="Export PDF" style="display:none;opacity:0.7;gap:4px;">${uiIcon("file", 14)} <span style="font-size:11px;">Export PDF</span></button>
+        <button id="doc-pdf-view-btn" class="doc-action-icon-btn" title="Toggle PDF view" style="display:none;opacity:0.7;gap:4px;">${uiIcon("file", 14)} <span style="font-size:11px;">PDF</span></button>
         <select id="doc-language-select" class="doc-language-select">
           <option value="python">python</option>
           <option value="javascript">javascript</option>
@@ -4860,7 +4953,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <div class="doc-tab-bar" id="doc-tab-bar"></div>
       <div id="doc-email-header" class="doc-email-header" style="display:none">
         <button type="button" id="doc-email-collapse-btn" class="doc-email-collapse-btn" title="Hide email fields" aria-expanded="true">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>
+          ${uiIcon("chevron-up", 13)}
           <span id="doc-email-collapse-summary" class="doc-email-collapse-summary">No recipient · No subject</span>
         </button>
         <div id="doc-email-fields" class="doc-email-fields">
@@ -4874,13 +4967,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             <span class="email-field-prefix">Cc</span>
             <input type="text" id="doc-email-cc" placeholder="cc@example.com, example2" autocomplete="off" />
             <div id="doc-email-cc-suggestions" class="email-autocomplete" style="display:none"></div>
-            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc">${uiIcon("close", 11)}</button>
           </div>
           <div class="email-field" id="doc-email-bcc-row" style="display:none;position:relative">
             <span class="email-field-prefix">Bcc</span>
             <input type="text" id="doc-email-bcc" placeholder="bcc@example.com" autocomplete="off" />
             <div id="doc-email-bcc-suggestions" class="email-autocomplete" style="display:none"></div>
-            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            <button type="button" class="email-cc-close" data-cc-close title="Hide Cc/Bcc" aria-label="Hide Cc/Bcc">${uiIcon("close", 11)}</button>
           </div>
           <div class="email-field" style="position:relative"><span class="email-field-prefix">Subject</span><input type="text" id="doc-email-subject" placeholder="" /></div>
           <div id="doc-email-attachments" class="email-attachments" style="display:none"></div>
@@ -4896,41 +4989,41 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       <div class="doc-md-toolbar" id="doc-md-toolbar" style="display:none">
         <div class="md-toolbar-items" id="md-toolbar-items">
           <span class="md-view-toggle" id="doc-md-view-toggle" style="display:none" role="group" aria-label="Edit or preview">
-            <button type="button" class="md-view-opt" data-mdview="edit" title="Edit source (Ctrl+Alt+M to toggle)"><span class="md-view-label">Write</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
-            <button type="button" class="md-view-opt" data-mdview="preview" title="Preview (Ctrl+Alt+M to toggle)"><span class="md-view-label">Preview</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+            <button type="button" class="md-view-opt" data-mdview="edit" title="Edit source (Ctrl+Alt+M to toggle)"><span class="md-view-label">Write</span>${uiIcon("edit", 13)}</button>
+            <button type="button" class="md-view-opt" data-mdview="preview" title="Preview (Ctrl+Alt+M to toggle)"><span class="md-view-label">Preview</span>${uiIcon("eye", 13)}</button>
           </span>
           <span class="md-view-toggle" id="doc-render-view-toggle" style="display:none" role="group" aria-label="Code or run">
-            <button type="button" class="md-view-opt" data-renderview="code" title="Edit code"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
-            <button type="button" class="md-view-opt" data-renderview="run" title="Run / Preview"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+            <button type="button" class="md-view-opt" data-renderview="code" title="Edit code">${uiIcon("code", 13)}</button>
+            <button type="button" class="md-view-opt" data-renderview="run" title="Run / Preview">${uiIcon("play", 13)}</button>
           </span>
-          <button id="doc-email-ai-reply-btn" class="doc-action-icon-btn md-toolbar-email-only" type="button" title="Draft a reply with AI (Fast / Full + optional context)" style="display:none;align-items:center;gap:4px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg><span style="font-size:11px;">Reply</span></button>
-          <button id="doc-fontsize-btn" class="doc-action-icon-btn" title="Font size" style="position:relative;width:28px;height:26px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7;"><path d="M4 7V4h16v3"/><path d="M12 4v16"/><path d="M8 20h8"/></svg><span class="doc-fontsize-levels"><i data-sz="s">S</i><i data-sz="m">M</i><i data-sz="l">L</i></span></button>
-          <button id="doc-diff-toggle-btn" class="doc-action-icon-btn" title="Compare changes" style="opacity:0.7;display:none;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><path d="M5 12H2l5-5 5 5H9"/><path d="M19 12h3l-5 5-5-5h3"/></svg></button>
+          <button id="doc-email-ai-reply-btn" class="doc-action-icon-btn md-toolbar-email-only" type="button" title="Draft a reply with AI (fast + optional context)" style="display:none;align-items:center;gap:4px;">${uiIcon("sparkles", 12, {"style":"color:var(--accent, var(--red));flex-shrink:0;position:relative;top:-1px;"})}<span style="font-size:11px;">Reply</span></button>
+          <button id="doc-fontsize-btn" class="doc-action-icon-btn" title="Font size" style="position:relative;width:28px;height:26px;">${uiIcon("text-size", 14, {"style":"opacity:0.7;"})}<span class="doc-fontsize-levels"><i data-sz="s">S</i><i data-sz="m">M</i><i data-sz="l">L</i></span></button>
+          <button id="doc-diff-toggle-btn" class="doc-action-icon-btn" title="Compare changes" style="opacity:0.7;display:none;">${uiIcon("text-scale", 14)}</button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
           <button type="button" class="md-toolbar-edit-only" data-md="bold" title="Bold (Ctrl+B)"><b>B</b></button>
           <button type="button" class="md-toolbar-edit-only" data-md="italic" title="Italic (Ctrl+I)"><i>I</i></button>
           <button type="button" class="md-toolbar-edit-only" data-md="strike" title="Strikethrough"><s>S</s></button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
-          <button type="button" class="md-dd-toggle md-toolbar-edit-only" data-dd="heading" title="Heading"><b>H</b><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
-          <button type="button" class="md-dd-toggle md-toolbar-edit-only" data-dd="list" title="List"><span style="font-variant-numeric:tabular-nums;">1.</span><svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" class="md-dd-toggle md-toolbar-edit-only" data-dd="heading" title="Heading"><b>H</b>${uiIcon("chevron-down", 8)}</button>
+          <button type="button" class="md-dd-toggle md-toolbar-edit-only" data-dd="list" title="List"><span style="font-variant-numeric:tabular-nums;">1.</span>${uiIcon("chevron-down", 8)}</button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
-          <button type="button" class="md-toolbar-edit-only" data-md="link" title="Link"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
-          <button type="button" id="md-toolbar-attach-btn" class="md-toolbar-attach-btn md-toolbar-edit-only" title="Insert image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.8l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-          <button type="button" class="md-dd-toggle md-toolbar-email-hide md-toolbar-edit-only" data-dd="code" title="Code">\`<svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" class="md-toolbar-edit-only" data-md="link" title="Link">${uiIcon("link", 12)}</button>
+          <button type="button" id="md-toolbar-attach-btn" class="md-toolbar-attach-btn md-toolbar-edit-only" title="Insert image">${uiIcon("attachment", 13)}</button>
+          <button type="button" class="md-dd-toggle md-toolbar-email-hide md-toolbar-edit-only" data-dd="code" title="Code">\`${uiIcon("chevron-down", 8)}</button>
           <span class="md-toolbar-sep md-toolbar-edit-only"></span>
           <span id="md-toolbar-emoji-slot" class="md-toolbar-edit-only"></span>
           <span class="md-toolbar-sep md-toolbar-pdf-only" style="display:none"></span>
-          <button type="button" id="doc-pdf-add-text-btn" class="md-toolbar-pdf-only" title="Add text box (then click on PDF)" style="display:none"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg></button>
-          <button type="button" id="doc-pdf-add-check-btn" class="md-toolbar-pdf-only" title="Add checkmark (then click on PDF)" style="display:none"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></button>
-          <button type="button" id="doc-pdf-add-sign-btn" class="md-toolbar-pdf-only" title="Add signature (then click on PDF)" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3l6 6-9 9-3-3z"/><path d="M9 15l-3 1 1-3"/><path d="M4 18l3-3"/><path d="M3 20l3-3"/><path d="M5 22l3-3"/></svg><span class="doc-pdf-sign-label">sign</span></button>
-          <button type="button" id="doc-pdf-refresh-btn" class="md-toolbar-pdf-only" title="Reload PDF view" style="display:none"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button type="button" id="doc-pdf-add-text-btn" class="md-toolbar-pdf-only" title="Add text box (then click on PDF)" style="display:none">${uiIcon("text-size", 12)}</button>
+          <button type="button" id="doc-pdf-add-check-btn" class="md-toolbar-pdf-only" title="Add checkmark (then click on PDF)" style="display:none">${uiIcon("check", 12, {"role":"inherit"})}</button>
+          <button type="button" id="doc-pdf-add-sign-btn" class="md-toolbar-pdf-only" title="Add signature (then click on PDF)" style="display:none">${uiIcon("highlight", 14)}<span class="doc-pdf-sign-label">sign</span></button>
+          <button type="button" id="doc-pdf-refresh-btn" class="md-toolbar-pdf-only" title="Reload PDF view" style="display:none">${uiIcon("refresh", 12)}</button>
         </div>
         <div class="md-toolbar-overflow-wrapper" id="md-toolbar-overflow-wrapper" style="display:none">
-          <button class="md-toolbar-overflow-toggle" id="md-toolbar-overflow-toggle" title="More formatting"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+          <button class="md-toolbar-overflow-toggle" id="md-toolbar-overflow-toggle" title="More formatting">${uiIcon("more", 14)}</button>
           <div class="md-toolbar-overflow-menu" id="md-toolbar-overflow-menu"></div>
         </div>
-        <button type="button" class="md-scroll-arrow md-scroll-left" id="md-scroll-left" title="Scroll left" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <button type="button" class="md-scroll-arrow md-scroll-right" id="md-scroll-right" title="Scroll right" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+        <button type="button" class="md-scroll-arrow md-scroll-left" id="md-scroll-left" title="Scroll left" style="display:none">${uiIcon("chevron-left", 16)}</button>
+        <button type="button" class="md-scroll-arrow md-scroll-right" id="md-scroll-right" title="Scroll right" style="display:none">${uiIcon("chevron-right", 16)}</button>
       </div>
       <div id="doc-find-bar" class="doc-find-bar" style="display:none">
         <input id="doc-find-input" class="doc-find-input" type="text" placeholder="Find..." />
@@ -4950,15 +5043,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
            the existing send/draft/change-detection paths keep working. -->
       <div id="doc-email-richbody" class="doc-email-richbody" contenteditable="true" spellcheck="true" style="display:none" data-no-swipe-dismiss></div>
       <div id="doc-email-actions" class="doc-email-actions" style="display:none">
-        <button id="doc-email-discard-btn" class="email-discard-btn" title="Close email" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg><span>Close</span></button>
+        <button id="doc-email-discard-btn" class="email-discard-btn" title="Close email" style="display:inline-flex;align-items:center;gap:5px;">${uiIcon("close", 13)}<span>Close</span></button>
         <span style="flex:1"></span>
         <div class="email-send-split">
-          <button id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>Send</button>
-          <button id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>
+          <button type="button" id="doc-email-send-btn" class="email-send-btn email-send-main" title="Send email (Ctrl+Enter)" onpointerdown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onmousedown="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)" onclick="window.odysseusEmailSendIntent&&window.odysseusEmailSendIntent(event)">${uiIcon("send", 13)}Send</button>
+          <button type="button" id="doc-email-send-caret" class="email-send-btn email-send-caret" title="More send options" aria-haspopup="true" aria-expanded="false" onpointerdown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)" onmousedown="window.odysseusEmailCaretIntent&&window.odysseusEmailCaretIntent(event)">${uiIcon("chevron-down", 12)}</button>
           <div id="doc-email-more-menu" class="email-more-menu" style="display:none">
-            <div class="dropdown-item-compact" id="doc-email-draft-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg></span>Save Draft</div>
-            <div class="dropdown-item-compact" id="doc-email-schedule-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>Schedule Send...</div>
-            <div class="dropdown-item-compact" id="doc-email-unread-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg></span>Mark Unread</div>
+            <div class="dropdown-item-compact" id="doc-email-draft-btn"><span class="dropdown-icon">${uiIcon("save", 14)}</span>Save Draft</div>
+            <div class="dropdown-item-compact" id="doc-email-schedule-btn"><span class="dropdown-icon">${uiIcon("clock", 14)}</span>Schedule Send...</div>
+            <div class="dropdown-item-compact" id="doc-email-unread-btn"><span class="dropdown-icon">${uiIcon("select", 14)}</span>Mark Unread</div>
           </div>
         </div>
       </div>
@@ -4973,14 +5066,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
            csv / html / pdf) is the one growing to fill. -->
       <div id="doc-actions-footer" class="doc-email-actions">
         <span class="email-send-split" id="doc-copy-export-split">
-          <button type="button" id="doc-footer-copy-btn" class="email-send-btn email-send-main" title="Save new version" data-mode="save"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save</button>
-          <button type="button" id="doc-footer-export-btn" class="email-send-btn email-send-caret" title="Export as…" aria-label="Export options"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 15 12 9 18 15"/></svg></button>
+          <button type="button" id="doc-footer-copy-btn" class="email-send-btn email-send-main" title="Save new version" data-mode="save">${uiIcon("save", 13)}Save</button>
+          <button type="button" id="doc-footer-export-btn" class="email-send-btn email-send-caret" title="Export as…" aria-label="Export options">${uiIcon("chevron-up", 12)}</button>
         </span>
       </div>
       <div id="doc-version-panel" class="doc-version-panel hidden">
         <div class="doc-version-header">
           <span>Version History</span>
-          <button id="doc-version-close" class="doc-action-icon-btn" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="doc-version-close" class="doc-action-icon-btn" title="Close">${uiIcon("close", 14)}</button>
         </div>
         <div id="doc-version-list" class="doc-version-list"></div>
       </div>
@@ -4990,6 +5083,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         <button id="doc-mobile-copy" class="doc-mobile-footer-btn" type="button">Copy</button>
       </div>
     `;
+
+    _wireExpandedDocumentEditor(pane.querySelector('#doc-editor-textarea'));
 
     // Consolidate into a SINGLE action bar: move Undo + the type picker out of
     // the top header into the bottom footer (left side, next to Close) so a
@@ -5243,7 +5338,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
             // Empty value = the "type" placeholder option — small dot so the
             // row still aligns with the others (and the picker shows _some_
             // mark when no type is set yet).
-            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="opacity:0.5;"><circle cx="12" cy="12" r="3"/></svg>';
+            : uiIcon("dot", 14, {"style":"opacity:0.5;"});
           row.innerHTML = ic +
                           `<span class="doc-langpicker-label">${uiModule.esc(opt.textContent || opt.value)}</span>`;
           row.addEventListener('click', (e) => {
@@ -5265,10 +5360,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         const ic = v
           ? langIcon(v, 14, { style: 'opacity:0.85;flex-shrink:0;' })
           // No language picked yet → small dot mark so the trigger isn't bare.
-          : '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="opacity:0.5;flex-shrink:0;"><circle cx="12" cy="12" r="3"/></svg>';
+          : uiIcon("dot", 14, {"style":"opacity:0.5;flex-shrink:0;"});
         trigger.innerHTML = ic +
           `<span class="doc-langpicker-label">${uiModule.esc(sel?.textContent || 'type')}</span>` +
-          '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-left:4px;opacity:0.6;"><polyline points="6 9 12 15 18 9"/></svg>';
+          uiIcon("chevron-down", 10, {"style":"margin-left:4px;opacity:0.6;"});
         // Highlight the current row in the open menu.
         menu.querySelectorAll('.doc-langpicker-item').forEach(r => {
           r.classList.toggle('is-selected', r.dataset.value === v);
@@ -5390,13 +5485,80 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       ));
     }
 
-    document.getElementById('doc-email-send-btn')?.addEventListener('click', () => {
-      // Pressing Send must never leave the "more options" menu showing.
+    const _eventInsideElement = (e, el) => {
+      if (!e || !el || typeof e.clientX !== 'number' || typeof e.clientY !== 'number') return false;
+      const rect = el.getBoundingClientRect();
+      return e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    };
+
+    const handleSendIntent = (e) => {
+      if (e && e.__odysseusEmailSendHandled) return;
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const sendButtons = Array.from(document.querySelectorAll('#doc-email-send-btn'));
+      const targetBtn = target && target.closest ? target.closest('#doc-email-send-btn') : null;
+      const rectBtn = sendButtons.find((candidate) => _eventInsideElement(e, candidate));
+      const btn = targetBtn || rectBtn || null;
+      if (!btn || btn.disabled) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailSendHandled = true;
+      }
       const _m = document.getElementById('doc-email-more-menu');
       if (_m) _m.style.display = 'none';
       document.getElementById('doc-email-send-caret')?.setAttribute('aria-expanded', 'false');
       _sendEmail();
-    });
+    };
+    window.odysseusEmailSendIntent = handleSendIntent;
+    if (!window._emailSendDelegatedBoundV3) {
+      window._emailSendDelegatedBoundV3 = true;
+      ['pointerdown', 'mousedown', 'pointerup', 'click'].forEach((type) => {
+        window.addEventListener(type, handleSendIntent, true);
+        document.addEventListener(type, handleSendIntent, true);
+      });
+    }
+
+    let lastCaretToggleAt = 0;
+    const toggleSendMenu = (caret) => {
+      const menu = document.getElementById('doc-email-more-menu');
+      if (!menu) return;
+      const opening = menu.style.display === 'none';
+      menu.style.display = opening ? '' : 'none';
+      if (caret) caret.setAttribute('aria-expanded', String(opening));
+    };
+    const handleCaretIntent = (e) => {
+      if (e && e.__odysseusEmailCaretHandled) return;
+      const now = Date.now();
+      if (e && e.type === 'click' && now - lastCaretToggleAt < 350) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+        return;
+      }
+      const rawTarget = e && e.target;
+      const target = rawTarget && rawTarget.nodeType === Node.TEXT_NODE ? rawTarget.parentElement : rawTarget;
+      const carets = Array.from(document.querySelectorAll('#doc-email-send-caret'));
+      const targetCaret = target && target.closest ? target.closest('#doc-email-send-caret') : null;
+      const rectCaret = carets.find((candidate) => _eventInsideElement(e, candidate));
+      const caret = targetCaret || rectCaret || null;
+      if (!caret) return;
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.__odysseusEmailCaretHandled = true;
+      }
+      lastCaretToggleAt = now;
+      toggleSendMenu(caret);
+    };
+    window.odysseusEmailCaretIntent = handleCaretIntent;
+    if (!window._emailCaretDelegatedBoundV1) {
+      window._emailCaretDelegatedBoundV1 = true;
+      ['pointerdown', 'mousedown', 'click'].forEach((type) => {
+        window.addEventListener(type, handleCaretIntent, true);
+        document.addEventListener(type, handleCaretIntent, true);
+      });
+    }
 
     // Ctrl+Enter / Cmd+Enter sends the email when an email doc is active
     // Bind once at module level via a guard to avoid duplicate listeners on re-open
@@ -5483,16 +5645,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       window.visualViewport.addEventListener('resize', _maybeAutoCollapseEmailHeader);
     }
 
-    // Split-button caret toggles the send-options menu (drops up).
-    document.getElementById('doc-email-send-caret')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const menu = document.getElementById('doc-email-more-menu');
-      const caret = document.getElementById('doc-email-send-caret');
-      if (!menu) return;
-      const opening = menu.style.display === 'none';
-      menu.style.display = opening ? '' : 'none';
-      if (caret) caret.setAttribute('aria-expanded', String(opening));
-    });
+    // Split-button caret toggles the send-options menu.
+    document.getElementById('doc-email-send-caret')?.addEventListener('click', handleCaretIntent);
     document.addEventListener('click', (e) => {
       const menu = document.getElementById('doc-email-more-menu');
       // Keep the menu open ONLY while interacting with the caret itself or the
@@ -5685,6 +5839,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         return;
       }
       if (!activeDocId) return;
+      if (_isResourceDocument()) return;
       const ta = document.getElementById('doc-editor-textarea');
       if (!ta) return;
       const current = ta.value;
@@ -6999,6 +7154,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   export function injectFreshDoc(doc) {
     if (!doc || !doc.id) return;
     const sessionId = doc.session_id || _lastSessionId || null;
+    if (doc.language === 'email') {
+      doc._skipLocalDraftOnce = true;
+      try {
+        const fields = _parseEmailHeader(doc.current_content || doc.content || '');
+        _clearEmailLocalDraft(fields.sourceUid, fields.sourceFolder, fields.inReplyTo);
+      } catch (_) {}
+    }
     addDocToTabs(doc, sessionId);
     // Use _ensureDocPaneMounted (not `if (!isOpen) openPanel()`): when a draft
     // is composed from the email modal, `isOpen` can be stale-true while the
@@ -7006,10 +7168,13 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // mounts into a wrong/half-built pane (rendered as a narrow sidebar on
     // mobile instead of its own full-screen window). This remounts it cleanly.
     _ensureDocPaneMounted();
-    // Defer to next frame so the panel DOM exists before switchToDoc populates
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      switchToDoc(doc.id);
-    }));
+    // Defer to the next frame so the panel DOM exists before switchToDoc
+    // populates it. Do not call switchToDoc synchronously here: it saves the
+    // previously active doc and can re-enter the email draft path while a reply
+    // document is still being injected.
+    requestAnimationFrame(() => {
+      if (docs.has(doc.id)) switchToDoc(doc.id);
+    });
   }
 
   export async function replaceEmailReplyBody(docId, replyText, { force = false } = {}) {
@@ -7041,6 +7206,90 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
     clearTimeout(_autoSaveDebounce);
     _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+  }
+
+  function _buildEmailContentFromFields(fields, body) {
+    const f = fields || {};
+    let header = `To: ${f.to || ''}`;
+    if (f.cc) header += `\nCc: ${f.cc}`;
+    if (f.bcc) header += `\nBcc: ${f.bcc}`;
+    header += `\nSubject: ${f.subject || ''}`;
+    if (f.inReplyTo) header += `\nIn-Reply-To: ${f.inReplyTo}`;
+    if (f.references) header += `\nReferences: ${f.references}`;
+    if (f.sourceUid) header += `\nX-Source-UID: ${f.sourceUid}`;
+    if (f.sourceFolder) header += `\nX-Source-Folder: ${f.sourceFolder}`;
+    if (f.forwardAttachments) header += `\nX-Forward-Attachments: 1`;
+    if (Array.isArray(f.attachments) && f.attachments.length) {
+      const attStr = f.attachments
+        .map(a => `${a.index}:${a.filename}:${a.size}`)
+        .join('|');
+      header += `\nX-Attachments: ${attStr}`;
+    }
+    return header + '\n---\n' + (body || '');
+  }
+
+  export async function ensureEmailDraftEnvelope(docId, freshContent) {
+    const doc = docs.get(docId);
+    if (!doc || doc.language !== 'email') return false;
+    const current = _parseEmailHeader(doc.content || '');
+    const fresh = _parseEmailHeader(freshContent || '');
+    if (!fresh.to && !fresh.subject && !fresh.sourceUid) return false;
+
+    const needsEnvelope = (
+      (!current.to && !!fresh.to) ||
+      (!current.subject && !!fresh.subject) ||
+      (!current.inReplyTo && !!fresh.inReplyTo) ||
+      (!current.references && !!fresh.references) ||
+      (!current.sourceUid && !!fresh.sourceUid) ||
+      (!current.sourceFolder && !!fresh.sourceFolder)
+    );
+
+    const currentSplit = _splitEmailReplyQuote(current.body || '');
+    const freshSplit = _splitEmailReplyQuote(fresh.body || '');
+    const currentOwnText = String(currentSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshOwnText = String(freshSplit.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const currentBodyText = String(current.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const freshBodyText = String(fresh.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const needsBodyRepair = (
+      !!freshBodyText &&
+      (
+        !currentBodyText ||
+        (!currentOwnText && !!freshOwnText) ||
+        (!currentSplit.quote && !!freshSplit.quote)
+      )
+    );
+    if (!needsEnvelope && !needsBodyRepair) return false;
+
+    let body = current.body || '';
+    if (needsBodyRepair && (!currentBodyText || (!currentOwnText && !!freshOwnText))) {
+      body = fresh.body || '';
+    } else if (!String(body).trim()) {
+      body = fresh.body || '';
+    } else if (currentSplit.body && freshSplit.quote && !currentSplit.quote) {
+      body = `${currentSplit.body}\n\n${freshSplit.quote}`;
+    }
+
+    const merged = {
+      ...fresh,
+      to: current.to || fresh.to || '',
+      cc: current.cc || fresh.cc || '',
+      bcc: current.bcc || fresh.bcc || '',
+      subject: current.subject || fresh.subject || '',
+      inReplyTo: current.inReplyTo || fresh.inReplyTo || '',
+      references: current.references || fresh.references || '',
+      sourceUid: current.sourceUid || fresh.sourceUid || '',
+      sourceFolder: current.sourceFolder || fresh.sourceFolder || '',
+      forwardAttachments: current.forwardAttachments || fresh.forwardAttachments || false,
+      attachments: (current.attachments && current.attachments.length) ? current.attachments : (fresh.attachments || []),
+    };
+
+    doc.content = _buildEmailContentFromFields(merged, body);
+    if (activeDocId === docId) {
+      _showEmailFields(doc, { applyLocalDraft: false });
+    }
+    clearTimeout(_autoSaveDebounce);
+    _autoSaveDebounce = setTimeout(() => { saveDocument({ silent: true }); }, 800);
+    return true;
   }
 
   // Force the panel into a genuinely-open state. `isOpen` can be true while the
@@ -7177,31 +7426,22 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       _syncDocIndicator();
       // Switch to the most recently active one (or first)
       const target = activeDocs[0];
-      if (restoreMode && shouldRestoreMinimized && !shouldRestoreOpen) {
-        activeDocId = null;
+      if (restoreMode && !shouldRestoreOpen) {
+        // Coming back to a chat with documents should advertise the doc without
+        // stealing half the screen. Default to a docked chip; only reopen the
+        // full editor when this session explicitly persisted an open state.
+        activeDocId = target.id;
         _minimizedDocId = target.id;
         _markDocVisibleState(sessionId, 'minimized');
         _ensureDocChipRegistered();
-        Modals.minimize('doc-panel');
+        if (isOpen) {
+          try { switchToDoc(target.id); } catch (e) { console.error('Minimize restored doc failed:', e); }
+          closePanel('down');
+        } else {
+          Modals.minimize('doc-panel');
+        }
         return;
       }
-      // Removed: the old "if restoreMode && !shouldRestoreOpen → stay
-      // closed" branch. Users expect that entering a chat with an
-      // attached document opens the panel automatically, not just shows
-      // an indicator. The minimised branch above still respects an
-      // explicit user choice to dock the panel; everything else falls
-      // through to the "open panel" path below.
-      if (false) {
-        activeDocId = null;
-        _minimizedDocId = null;
-        if (Modals.isRegistered('doc-panel')) Modals.unregister('doc-panel');
-        return;
-      }
-      // Always open when there are docs — the minimised branch above
-      // already returned for users who explicitly docked the panel.
-      // The previous `if (!restoreMode || shouldRestoreOpen)` gate left
-      // the panel closed on first entry to a chat with docs, which
-      // hides the doc unless the user manually opens the panel.
       _markDocVisibleState(sessionId, 'open');
       if (!isOpen) openPanel();
       switchToDoc(target.id);
@@ -7221,17 +7461,106 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       id: doc.id,
       title: doc.title || '',
       language: doc.language || '',
-      content: doc.current_content || '',
+      content: doc.current_content || doc.content || '',
       version: doc.version_count || 1,
       sessionId: sessionId || doc.session_id,
       userSetLanguage: !!doc.language,
+      resourceRef: doc.resource_ref || doc.resourceRef || null,
+      readOnly: !!(doc.read_only || doc.readOnly),
+      archived: !!doc.archived,
       _composeAtts: existing?._composeAtts,
+      _skipLocalDraftOnce: !!doc._skipLocalDraftOnce,
       // Provenance for the "Send signed reply" flow
       sourceEmailUid:       doc.source_email_uid || null,
       sourceEmailFolder:    doc.source_email_folder || null,
       sourceEmailAccountId: doc.source_email_account_id || null,
       sourceEmailMessageId: doc.source_email_message_id || null,
     });
+  }
+
+  function _syncResourceReadOnly(doc = docs.get(activeDocId)) {
+    const readOnly = _isResourceDocument(doc);
+    const pane = document.getElementById('doc-editor-pane');
+    if (pane) pane.dataset.resourceReadonly = readOnly ? 'true' : 'false';
+    const textarea = document.getElementById('doc-editor-textarea');
+    if (textarea) textarea.readOnly = readOnly;
+    const title = document.getElementById('doc-title-input');
+    if (title) title.readOnly = readOnly;
+    const language = document.getElementById('doc-language-select');
+    if (language) language.disabled = readOnly;
+    const picker = document.getElementById('doc-langpicker-trigger');
+    if (picker) picker.disabled = readOnly;
+    const badge = document.getElementById('doc-version-badge');
+    if (badge && readOnly) badge.style.display = 'none';
+    const diff = document.getElementById('doc-diff-toggle-btn');
+    if (diff && readOnly) diff.style.display = 'none';
+    let show = document.getElementById('doc-show-in-files-btn');
+    if (readOnly && doc?.resourceRef) {
+      if (!show) {
+        show = document.createElement('button');
+        show.id = 'doc-show-in-files-btn';
+        show.type = 'button';
+        show.className = 'email-send-btn doc-show-in-files-btn';
+        show.textContent = 'Show in Files';
+        // Resource documents deliberately hide the legacy header. Keep this
+        // cross-app action in the visible, shared document footer so keyboard,
+        // pointer, and touch users can actually invoke it.
+        const footer = document.getElementById('doc-actions-footer');
+        const split = document.getElementById('doc-copy-export-split');
+        if (footer) footer.insertBefore(show, split || footer.firstChild);
+      }
+      const resourceRef = String(doc.resourceRef);
+      show.onclick = async () => {
+        show.disabled = true;
+        show.setAttribute('aria-busy', 'true');
+        try {
+          await showResourceInFiles(resourceRef);
+        } catch (error) {
+          uiModule?.showToast?.(error?.message || 'Resource could not be shown in Files', 3000);
+        } finally {
+          show.disabled = false;
+          show.removeAttribute('aria-busy');
+        }
+      };
+      show.hidden = false;
+    } else if (show) {
+      show.remove();
+    }
+    document.querySelectorAll('#doc-md-toolbar .md-toolbar-edit-only').forEach((control) => {
+      if ('disabled' in control) control.disabled = readOnly;
+      control.setAttribute('aria-disabled', String(readOnly));
+    });
+    const save = document.getElementById('doc-footer-copy-btn');
+    if (save) {
+      save.disabled = readOnly;
+      save.title = readOnly ? 'Opened read-only through Files' : 'Save new version';
+      if (readOnly) {
+        save.dataset.mode = 'readonly';
+        save.textContent = 'Read only';
+      }
+    }
+    _syncHeaderBarVisibility();
+  }
+
+  /** Open one Library document through its owner-bound Files ref. */
+  export async function openResource(resourceRef) {
+    const response = await fetch(`${API_BASE}/api/documents/resolve-resource`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource_ref: String(resourceRef || '') }),
+    });
+    if (!response.ok) {
+      throw new Error(response.status === 409
+        ? 'This Files selection is stale; select the document again.'
+        : response.status === 404 ? 'Document not found' : `HTTP ${response.status}`);
+    }
+    const doc = await response.json();
+    if (!doc || !doc.id) throw new Error('Document resource could not be resolved');
+    addDocToTabs(doc, doc.session_id);
+    _ensureDocPaneMounted();
+    switchToDoc(doc.id);
+    return doc.id;
   }
 
   /** Populate the editor with document data (used internally) */
@@ -7419,9 +7748,9 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // 'svg' so the preview/run routing still treats it as renderable markup).
     const _hlLang = lang === 'svg' ? 'xml' : lang;
     codeEl.className = _hlLang ? `language-${_hlLang}` : '';
-    if (window.hljs && _hlLang) {
-      codeEl.removeAttribute('data-highlighted');
-      window.hljs.highlightElement(codeEl);
+    if (window.odysseusHighlight && _hlLang) {
+      codeEl.removeAttribute('data-hl-done');
+      window.odysseusHighlight.highlight(codeEl);
     }
     // Markdown post-processing: colorize standalone [brackets] and heading markers
     if (lang === 'markdown') {
@@ -7637,7 +7966,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   }
 
   function attemptAutoDetect() {
-    if (!window.hljs || !activeDocId) return;
+    if (!window.odysseusHighlight || !activeDocId) return;
     const doc = docs.get(activeDocId);
     if (!doc || doc.userSetLanguage) return;
 
@@ -7678,11 +8007,11 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     }
 
     const sample = text.slice(0, AUTO_DETECT_SAMPLE_SIZE);
-    const result = window.hljs.highlightAuto(sample);
+    const detected = window.odysseusHighlight ? window.odysseusHighlight.detect(sample) : '';
 
-    if (!result.language || result.relevance < AUTO_DETECT_MIN_RELEVANCE) return;
+    if (!detected) return;
 
-    const mapped = HLJS_TO_DROPDOWN[result.language];
+    const mapped = HLJS_TO_DROPDOWN[detected];
     if (!mapped) return;
 
     const langSelect = document.getElementById('doc-language-select');
@@ -9038,14 +9367,14 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     else if (_isRenderLang(lang)) { previewIcon = '▶'; previewLabel = _htmlActive ? 'Edit' : 'Run / Preview'; }
 
     const _di = (svg) => `<span class="dropdown-icon">${svg}</span>`;
-    const _saveIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
-    const _copyIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-    const _runIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
-    const _previewIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
-    const _deleteIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>';
+    const _saveIco = uiIcon("save", 14);
+    const _copyIco = uiIcon("copy", 14);
+    const _runIco = uiIcon("play", 14);
+    const _previewIco = uiIcon("eye", 14);
+    const _deleteIco = uiIcon("trash", 14);
 
     let items = '';
-    items += `<div class="dropdown-item-compact doc-tab-action" data-action="save">${_di(_saveIco)}<span>Save</span></div>`;
+    if (!doc.readOnly) items += `<div class="dropdown-item-compact doc-tab-action" data-action="save">${_di(_saveIco)}<span>Save</span></div>`;
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="copy">${_di(_copyIco)}<span>Copy</span></div>`;
     if (canRun) {
       items += `<div class="dropdown-item-compact doc-tab-action" data-action="run">${_di(_runIco)}<span>Run</span></div>`;
@@ -9053,17 +9382,19 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     if (previewLabel) {
       items += `<div class="dropdown-item-compact doc-tab-action" data-action="preview"><span class="dropdown-icon">${previewIcon}</span><span>${previewLabel}</span></div>`;
     }
-    const _downloadIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    const _downloadIco = uiIcon("download", 14);
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="download">${_di(_downloadIco)}<span>Download</span></div>`;
     // "Send signed reply" — only if this doc was opened from an email attachment
     if (doc.sourceEmailUid && doc.sourceEmailFolder) {
-      const _sendBackIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
+      const _sendBackIco = uiIcon("reply", 14);
       items += `<div class="dropdown-item-compact doc-tab-action" data-action="signed-reply">${_di(_sendBackIco)}<span>Send signed reply</span></div>`;
     }
-    const _closeIco = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+    const _closeIco = uiIcon("close", 14);
     items += `<div class="dropdown-item-compact doc-tab-action" data-action="close">${_di(_closeIco)}<span>Close</span></div>`;
-    items += `<div class="dropdown-divider"></div>`;
-    items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
+    if (!doc.readOnly) {
+      items += `<div class="dropdown-divider"></div>`;
+      items += `<div class="dropdown-item-compact doc-tab-action doc-tab-action-delete" data-action="delete">${_di(_deleteIco)}<span>Delete</span></div>`;
+    }
 
     _docTabMenu.innerHTML = items;
     _docTabMenu.style.display = 'block';
@@ -9231,6 +9562,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Save manual edits */
   export async function saveDocument({ silent = false, forceVersion = false } = {}) {
     if (!activeDocId) return;
+    if (docs.get(activeDocId)?.readOnly) {
+      if (!silent && uiModule) uiModule.showToast('This Files resource is open read-only');
+      return;
+    }
     const textarea = document.getElementById('doc-editor-textarea');
     if (!textarea) return;
     const savingDocId = activeDocId;
@@ -9477,7 +9812,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // markdown source. Promote it to the top of the menu.
     const liveContent = document.getElementById('doc-editor-textarea')?.value
       || docs.get(activeDocId)?.content || '';
-    const isForm = _isFormBackedDoc(liveContent);
+    const isForm = !_isResourceDocument() && _isFormBackedDoc(liveContent);
     const options = [];
     // Import lives at the top of the same dropdown — it's a sibling action
     // ("bring something IN" vs "send something OUT"), and the footer was
@@ -9628,6 +9963,10 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function deleteActiveDocument() {
     if (!activeDocId) return;
     const doc = docs.get(activeDocId);
+    if (doc?.readOnly) {
+      if (uiModule) uiModule.showToast('This Files resource is open read-only');
+      return;
+    }
     const name = doc ? doc.title : 'this document';
     const ok = uiModule && uiModule.styledConfirm
       ? await uiModule.styledConfirm(`Delete "${name}"?`, { confirmText: 'Delete', danger: true })
@@ -9704,9 +10043,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       } else {
         preview.innerHTML = md.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>');
       }
-      if (window.hljs) {
-        preview.querySelectorAll('pre code').forEach(b => window.hljs.highlightElement(b));
-      }
+      if (window.odysseusHighlight) window.odysseusHighlight.highlightAll(preview);
       if (markdownModule && markdownModule.renderMermaid) {
         markdownModule.renderMermaid(preview);
       }
@@ -10664,6 +11001,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function toggleVersionHistory() {
     const panel = document.getElementById('doc-version-panel');
     if (!panel || !activeDocId) return;
+    if (_isResourceDocument()) return;
 
     if (panel.classList.contains('hidden')) {
       // Stash current content so we can restore on close
@@ -10761,6 +11099,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Load version history list */
   async function loadVersionHistory() {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     const list = document.getElementById('doc-version-list');
     if (!list) return;
 
@@ -10816,6 +11155,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Preview a specific version in the editor (without saving) */
   async function previewVersion(num) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     try {
       const res = await fetch(`${API_BASE}/api/document/${activeDocId}/version/${num}`);
       const ver = await res.json();
@@ -10830,6 +11170,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Restore an old version (creates new version) */
   async function restoreVersion(num) {
     if (!activeDocId) return;
+    if (_isResourceDocument()) return;
     try {
       const res = await fetch(`${API_BASE}/api/document/${activeDocId}/restore/${num}`, {
         method: 'POST',
@@ -10856,6 +11197,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   async function updateTitle(overrideDocId, overrideTitle) {
     const docId = overrideDocId || activeDocId;
     if (!docId) return;
+    if (docs.get(docId)?.readOnly) return;
     const title = overrideTitle || document.getElementById('doc-title-input')?.value;
     if (!title) return;
     try {
@@ -10923,6 +11265,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
   /** Update document language via PATCH */
   async function updateLanguage() {
     if (!activeDocId) return;
+    if (docs.get(activeDocId)?.readOnly) return;
     const select = document.getElementById('doc-language-select');
     if (!select) return;
     try {
@@ -10998,8 +11341,10 @@ const documentModule = {
   createDocument,
   newDocument,
   loadDocument,
+  openResource,
   injectFreshDoc,
   replaceEmailReplyBody,
+  ensureEmailDraftEnvelope,
   ensurePaneMounted: _ensureDocPaneMounted,
   loadSessionDocs,
   ensureDocPanel,
@@ -11020,6 +11365,7 @@ const documentModule = {
   clearSelection,
   clearAll,
   openLibrary,
+  openLibraryResource,
   closeLibrary,
   isLibraryOpen,
 };

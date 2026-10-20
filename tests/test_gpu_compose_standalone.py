@@ -77,12 +77,14 @@ def base():
 # --- Equivalence: standalone == base + overlay -----------------------------
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_nvidia_standalone_equals_base_plus_overlay(base):
     overlay = _load(NVIDIA_OVERLAY)
     standalone = _load(NVIDIA_STANDALONE)
     assert standalone == _merge_overlay_into_base(base, overlay)
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_amd_standalone_equals_base_plus_overlay(base):
     overlay = _load(AMD_OVERLAY)
     standalone = _load(AMD_STANDALONE)
@@ -93,6 +95,7 @@ def test_amd_standalone_equals_base_plus_overlay(base):
 
 
 @pytest.mark.parametrize("standalone_path", [NVIDIA_STANDALONE, AMD_STANDALONE])
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_non_odysseus_services_match_base(base, standalone_path):
     standalone = _load(standalone_path)
     for name, definition in base["services"].items():
@@ -103,6 +106,7 @@ def test_non_odysseus_services_match_base(base, standalone_path):
 
 
 @pytest.mark.parametrize("standalone_path", [NVIDIA_STANDALONE, AMD_STANDALONE])
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_top_level_volumes_match_base(base, standalone_path):
     standalone = _load(standalone_path)
     assert standalone.get("volumes") == base.get("volumes")
@@ -111,6 +115,7 @@ def test_top_level_volumes_match_base(base, standalone_path):
 # --- odysseus = base service + only the overlay additions ------------------
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_nvidia_odysseus_adds_only_overlay(base):
     standalone = _load(NVIDIA_STANDALONE)
     svc = standalone["services"][SERVICE]
@@ -138,6 +143,7 @@ def test_nvidia_odysseus_adds_only_overlay(base):
     assert "group_add" not in svc
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_amd_odysseus_adds_only_overlay(base):
     standalone = _load(AMD_STANDALONE)
     svc = standalone["services"][SERVICE]
@@ -159,6 +165,7 @@ def test_amd_odysseus_adds_only_overlay(base):
 # --- Host Docker opt-in combinations ---------------------------------------
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_base_has_no_host_docker_access(base):
     service = base["services"][SERVICE]
 
@@ -167,6 +174,7 @@ def test_base_has_no_host_docker_access(base):
     assert "group_add" not in service
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_base_plus_host_docker_overlay_has_explicit_access(base):
     merged = _merge_overlays_into_base(base, _load(HOST_DOCKER_OVERLAY))
     service = merged["services"][SERVICE]
@@ -176,6 +184,7 @@ def test_base_plus_host_docker_overlay_has_explicit_access(base):
     assert service["group_add"] == ["${DOCKER_GID:-963}"]
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_nvidia_plus_host_docker_preserves_gpu_and_docker_access(base):
     merged = _merge_overlays_into_base(
         base,
@@ -193,6 +202,7 @@ def test_nvidia_plus_host_docker_preserves_gpu_and_docker_access(base):
     assert service["group_add"] == ["${DOCKER_GID:-963}"]
 
 
+@pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
 def test_amd_plus_host_docker_preserves_gpu_and_docker_groups(base):
     merged = _merge_overlays_into_base(
         base,

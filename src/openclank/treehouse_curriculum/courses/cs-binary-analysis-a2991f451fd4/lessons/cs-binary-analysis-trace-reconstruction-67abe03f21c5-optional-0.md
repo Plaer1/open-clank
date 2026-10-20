@@ -1,0 +1,1 @@
+Instruction results3 and8 match A; B predicts1 and6, so conflicts. A matches this excerpt under the givens/domain. Original names, source types/comments and surrounding code remain unknown; these two examples alone do not reconstruct an entire executable or settle overflow behavior outside the domain.

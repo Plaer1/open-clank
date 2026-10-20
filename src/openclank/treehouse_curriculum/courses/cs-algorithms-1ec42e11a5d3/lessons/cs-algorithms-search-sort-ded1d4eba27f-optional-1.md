@@ -1,0 +1,1 @@
+The returned boundary is not necessarily an equal item; check i<n and A[i]==x for membership.

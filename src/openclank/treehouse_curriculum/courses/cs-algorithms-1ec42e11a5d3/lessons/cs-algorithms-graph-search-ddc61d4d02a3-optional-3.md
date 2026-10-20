@@ -1,0 +1,1 @@
+Try A:[B,C], B:[D], C:[E], E:[D], D:[]. Listed-neighbor BFS first reaches D through B at distance2. A depth-first traversal that chooses C before B reaches D via C,E at depth3; that order must be specified. FIFO discovery processes earlier distance layers before later ones.

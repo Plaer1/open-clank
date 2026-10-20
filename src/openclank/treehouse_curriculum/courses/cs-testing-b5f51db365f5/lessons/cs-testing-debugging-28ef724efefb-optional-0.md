@@ -1,0 +1,1 @@
+Use first item or an explicit optional accumulator; return −2 for the failing case; specify empty behavior.

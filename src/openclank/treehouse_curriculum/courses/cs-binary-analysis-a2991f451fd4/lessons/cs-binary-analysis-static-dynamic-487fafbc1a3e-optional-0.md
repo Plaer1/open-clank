@@ -1,0 +1,1 @@
+String exists in artifact; this run produced ok; vary a relevant input or inspect the branch/cross-reference without claiming full coverage.

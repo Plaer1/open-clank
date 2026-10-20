@@ -1,4 +1,5 @@
-export const NOTES_WORKSPACE_VERSION = 2;
+export const NOTES_WORKSPACE_VERSION = 3;
+export const NOTES_SELECTION_VERSION = 1;
 
 const MODES = new Set(['live', 'source', 'reading']);
 const PREVIEW_LAYOUTS = new Set(['inline', 'side-by-side']);
@@ -46,6 +47,37 @@ function safeNumber(value, fallback, minimum, maximum) {
   return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
 }
 
+function normalizeSelection(value, length) {
+  const max = Math.max(0, Number.isFinite(Number(length)) ? Number(length) : Number.MAX_SAFE_INTEGER);
+  const bounded = (candidate) => {
+    const number = Number(candidate);
+    return Number.isFinite(number) ? Math.min(max, Math.max(0, Math.trunc(number))) : 0;
+  };
+  const source = Array.isArray(value?.ranges) && value.ranges.length
+    ? value.ranges
+    : [{ anchor:value?.anchor, head:value?.head }];
+  const requestedMain = Math.max(0, Math.min(source.length - 1, Math.trunc(Number(value?.mainIndex) || 0)));
+  const indexed = source.map((range, index) => ({
+    index, anchor:bounded(range?.anchor), head:bounded(range?.head),
+  })).sort((a, b) => Math.min(a.anchor, a.head) - Math.min(b.anchor, b.head) || Math.max(a.anchor, a.head) - Math.max(b.anchor, b.head) || a.index - b.index);
+  const ranges = [];
+  let mainIndex = 0;
+  for (const candidate of indexed) {
+    const previous = ranges[ranges.length - 1];
+    if (previous && Math.min(candidate.anchor, candidate.head) < Math.max(previous.anchor, previous.head)) continue;
+    if (candidate.index === requestedMain) mainIndex = ranges.length;
+    ranges.push({ anchor:candidate.anchor, head:candidate.head });
+  }
+  if (!ranges.length) ranges.push({ anchor:0, head:0 });
+  if (mainIndex >= ranges.length) mainIndex = Math.min(ranges.length - 1, requestedMain);
+  const main = ranges[mainIndex];
+  return { version:NOTES_SELECTION_VERSION, ranges, mainIndex, anchor:main.anchor, head:main.head };
+}
+
+export function normalizeNoteSelection(value, length = Number.MAX_SAFE_INTEGER) {
+  return normalizeSelection(value, length);
+}
+
 export function normalizeNotesSettings(raw = {}) {
   const settings = raw && typeof raw === 'object' ? raw : {};
   return {
@@ -54,6 +86,35 @@ export function normalizeNotesSettings(raw = {}) {
     readableLineWidth:settings.readableLineWidth !== false,
     ribbon:settings.ribbon === true,
     completedVisibility:settings.completedVisibility === 'hide' ? 'hide' : 'show',
+    // Built-in handbook visibility is on by default; global Copal collections
+    // stay out of a Host folder workspace unless the owner opts in.
+    showTutorialFolder:settings.showTutorialFolder !== false,
+    showCopalInFolderWorkspace:settings.showCopalInFolderWorkspace === true,
+    // Template preferences are ordinary workspace state. Keep paths and IDs
+    // opaque strings; Files/host authorization remains provider-owned.
+    templateFolder:typeof settings.templateFolder === 'string' ? settings.templateFolder.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') : '',
+    // The visible path is only a presentation hint.  A configured template
+    // folder remains bound to this opaque Files-v1 identity and revision.
+    ...(settings.templateFolderRef && typeof settings.templateFolderRef === 'object' ? { templateFolderRef:{
+        resourceRef:String(settings.templateFolderRef.resourceRef || settings.templateFolderRef.ref || '').trim(),
+        resourceKey:String(settings.templateFolderRef.resourceKey || '').trim(),
+        provider:String(settings.templateFolderRef.provider || '').trim(),
+        kind:String(settings.templateFolderRef.kind || 'folder').trim() || 'folder',
+        logicalPath:String(settings.templateFolderRef.logicalPath || settings.templateFolderRef.logical_path || '').trim(),
+        revision:settings.templateFolderRef.revision && typeof settings.templateFolderRef.revision === 'object'
+          ? { kind:String(settings.templateFolderRef.revision.kind || ''), value:String(settings.templateFolderRef.revision.value || '') }
+          : null,
+        capabilities:Array.isArray(settings.templateFolderRef.capabilities)
+          ? [...new Set(settings.templateFolderRef.capabilities.map(String))]
+          : Object.fromEntries(Object.entries(settings.templateFolderRef.capabilities || {}).filter(([, value]) => value === true).map(([key]) => [key, true])),
+        ...(settings.templateFolderRef.accountId || settings.templateFolderRef.account_id || settings.templateFolderRef.accountScope
+          ? { accountId:String(settings.templateFolderRef.accountId || settings.templateFolderRef.account_id || settings.templateFolderRef.accountScope) } : {}),
+        ...(settings.templateFolderRef.workspaceId || settings.templateFolderRef.workspace_id || settings.templateFolderRef.workspaceScope
+          ? { workspaceId:String(settings.templateFolderRef.workspaceId || settings.templateFolderRef.workspace_id || settings.templateFolderRef.workspaceScope) } : {}),
+        ...(settings.templateFolderRef.generation != null ? { generation:Number(settings.templateFolderRef.generation) } : {}),
+        ...(settings.templateFolderRef.policyGeneration != null ? { policyGeneration:Number(settings.templateFolderRef.policyGeneration) } : {}),
+      } } : {}),
+    dailyTemplateId:typeof settings.dailyTemplateId === 'string' ? settings.dailyTemplateId.trim() : '',
   };
 }
 
@@ -63,6 +124,9 @@ export function noteViewType(doc = {}) {
   if (kind === 'timeline') return 'timeline';
   if (kind === 'note') return 'note';
   if (kind === 'copal-event') return 'event';
+  // Native Wiki articles keep a typed Editor view. A Wiki resource must never
+  // fall through to the Markdown leaf merely because its body is readable text.
+  if (kind === 'wiki' || kind === 'meme') return 'wiki';
   if (kind === 'canvas' || name.endsWith('.canvas')) return 'canvas';
   if (kind === 'base' || name.endsWith('.base')) return 'base';
   if (kind === 'asset') {
@@ -77,6 +141,9 @@ export function noteViewType(doc = {}) {
 
 function makeLeaf(doc, source = {}) {
   const view = noteViewType(doc);
+  const selection = source.selection && typeof source.selection === 'object'
+    ? normalizeSelection(source.selection, String(doc.text || '').length)
+    : null;
   return {
     type: 'leaf',
     id: typeof source.id === 'string' && source.id ? source.id : nextId('leaf'),
@@ -85,12 +152,7 @@ function makeLeaf(doc, source = {}) {
     mode:view === 'note' && source.mode === 'source' ? 'live' : MODES.has(source.mode) ? source.mode : 'live',
     pinned: source.pinned === true,
     rawSource: source.rawSource === true,
-    selection: source.selection && typeof source.selection === 'object'
-      ? {
-          anchor: safeNumber(source.selection.anchor, 0, 0, Number.MAX_SAFE_INTEGER),
-          head: safeNumber(source.selection.head, 0, 0, Number.MAX_SAFE_INTEGER),
-        }
-      : null,
+    selection,
     scrollTop: safeNumber(source.scrollTop, 0, 0, Number.MAX_SAFE_INTEGER),
   };
 }
@@ -159,37 +221,14 @@ function flattenLeaves(node, output = []) {
   return output;
 }
 
-function migrateLegacy(raw, docsById, fallbackDoc) {
-  const ids = uniqueStrings(raw?.tabs).filter((id) => docsById.has(id));
-  if (typeof raw?.selected === 'string' && docsById.has(raw.selected) && !ids.includes(raw.selected)) ids.push(raw.selected);
-  if (!ids.length && fallbackDoc) ids.push(fallbackDoc.id);
-  const pinned = new Set(uniqueStrings(raw?.pinned));
-  const cursors = raw?.cursors && typeof raw.cursors === 'object' ? raw.cursors : {};
-  const mode = MODES.has(raw?.mode) ? raw.mode : 'live';
-  const leaves = ids.map((id) => makeLeaf(docsById.get(id), { mode, pinned:pinned.has(id), selection:cursors[id] }));
-  const main = makeGroup(leaves, { activeLeafId:leaves.find((leaf) => leaf.docId === raw?.selected)?.id });
-  let root = main;
-  if (typeof raw?.split === 'string' && docsById.has(raw.split)) {
-    const splitLeaf = makeLeaf(docsById.get(raw.split), { mode, selection:cursors[`${raw.split}:split`] });
-    root = { type:'split', id:nextId('split'), orientation:'horizontal', children:[main, makeGroup([splitLeaf])], sizes:[50, 50] };
-  }
-  const activeLeaf = flattenLeaves(root).find((leaf) => leaf.docId === raw?.selected) || flattenLeaves(root)[0] || null;
+function createEmptyWorkspace(fallbackDoc) {
+  const leaf = fallbackDoc ? makeLeaf(fallbackDoc) : null;
+  const root = makeGroup(leaf ? [leaf] : []);
   return {
-    version: NOTES_WORKSPACE_VERSION,
-    root,
-    activeLeafId: activeLeaf?.id || null,
-    left: { open:raw?.explorerOpen !== false, width:224, tab:'files', sort:'name', expanded:uniqueStrings(raw?.expanded), selected:[], showDotFolders:raw?.showDotFolders === true },
-    right: {
-      open:raw?.sidebarOpen === true,
-      width:280,
-      tab:RIGHT_TABS.has(raw?.sidebar) ? raw.sidebar : 'properties',
-      pinnedDocId:null,
-    },
-    panels:defaultPanels(),
-    settings:normalizeNotesSettings(),
-    bookmarks:uniqueStrings(raw?.bookmarks || raw?.pinned).filter((id) => docsById.has(id)),
-    recent:ids.slice().reverse(),
-    closed:[],
+    version:NOTES_WORKSPACE_VERSION, root, activeLeafId:leaf?.id || null,
+    left:{ open:true, width:224, tab:'files', sort:'name', expanded:[], selected:[], showDotFolders:false, resourceRoot:null, folderWorkspaceRoot:null, folderWorkspaceId:'', resourceRows:[], resourceCursor:null, resourceQuery:'' },
+    right:{ open:false, width:280, tab:'properties', pinnedDocId:null },
+    panels:defaultPanels(), settings:normalizeNotesSettings(), bookmarks:[], recent:leaf ? [leaf.docId] : [], closed:[],
   };
 }
 
@@ -197,7 +236,7 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const visibleDocs = docs.filter((doc) => doc && typeof doc.id === 'string');
   const docsById = new Map(visibleDocs.map((doc) => [doc.id, doc]));
   const fallbackDoc = docsById.get(selected) || visibleDocs[0] || null;
-  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return migrateLegacy(raw || {}, docsById, fallbackDoc);
+  if (!raw || raw.version !== NOTES_WORKSPACE_VERSION || !raw.root) return createEmptyWorkspace(fallbackDoc);
 
   let root = normalizeNode(raw.root, docsById, new Set(), new Set()) || makeGroup();
   let leaves = flattenLeaves(root);
@@ -229,6 +268,9 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
   const right = raw.right && typeof raw.right === 'object' ? raw.right : {};
   const settings = normalizeNotesSettings(raw.settings);
   const panels = normalizePanels(raw.panels, left, right);
+  const visibleOn = (side) => Object.entries(panels).filter(([, item]) => item.side === side && !item.hidden).sort(([, a], [, b]) => a.order - b.order).map(([id]) => id);
+  const leftVisible = visibleOn('left');
+  const rightVisible = visibleOn('right');
   return {
     version: NOTES_WORKSPACE_VERSION,
     root,
@@ -236,16 +278,22 @@ export function normalizeNotesWorkspace(raw, docs = [], selected = null) {
     left: {
       open:left.open !== false,
       width:safeNumber(left.width, 224, 150, 420),
-      tab:LEFT_TABS.has(left.tab) ? left.tab : 'files',
+      tab:leftVisible.includes(left.tab) ? left.tab : leftVisible[0] || null,
       sort:FILE_SORTS.has(left.sort) ? left.sort : 'name',
       expanded:uniqueStrings(left.expanded),
       selected:uniqueStrings(left.selected).filter((id) => docsById.has(id)),
       showDotFolders:left.showDotFolders === true,
+      resourceRoot:left.resourceRoot && typeof left.resourceRoot === 'object' ? left.resourceRoot : null,
+      folderWorkspaceRoot:left.folderWorkspaceRoot && typeof left.folderWorkspaceRoot === 'object' ? left.folderWorkspaceRoot : null,
+      folderWorkspaceId:typeof left.folderWorkspaceId === 'string' ? left.folderWorkspaceId.trim() : '',
+      resourceRows:Array.isArray(left.resourceRows) ? left.resourceRows.slice(0, 5001) : [],
+      resourceCursor:left.resourceCursor || null,
+      resourceQuery:typeof left.resourceQuery === 'string' ? left.resourceQuery : '',
     },
     right: {
       open:right.open === true,
       width:safeNumber(right.width, 280, 190, 480),
-      tab:RIGHT_TABS.has(right.tab) ? right.tab : 'properties',
+      tab:rightVisible.includes(right.tab) ? right.tab : rightVisible[0] || null,
       pinnedDocId:typeof right.pinnedDocId === 'string' && docsById.has(right.pinnedDocId) ? right.pinnedDocId : null,
     },
     panels,
@@ -293,14 +341,67 @@ export function activateWorkspaceLeaf(workspace, groupId, leafId) {
   return true;
 }
 
+// Explicit navigation intent for document opens. `current` replaces the
+// active tab's document (retaining the leaf id so buffer bindings survive);
+// `newTab` always creates a tab; split intents create a sibling group.
+export const NAVIGATION_INTENTS = Object.freeze(['current', 'newTab', 'splitRight', 'splitBelow']);
+
+/** Derive navigation intent from a click/keyboard event's modifiers. */
+export function navigationIntentFromEvent(event = null, { mac = undefined } = {}) {
+  if (!event) return 'current';
+  const isMac = mac ?? (typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || ''));
+  // Ctrl on Windows/Linux and Command on macOS open a new tab. Shift splits
+  // right and Alt splits below, matching the quick-switcher chooser.
+  if (event.altKey) return 'splitBelow';
+  if (event.shiftKey) return 'splitRight';
+  if (isMac ? event.metaKey : event.ctrlKey) return 'newTab';
+  return 'current';
+}
+
+function normalizeNavigationIntent(options = {}) {
+  if (typeof options.intent === 'string' && NAVIGATION_INTENTS.includes(options.intent)) return options.intent;
+  // Legacy `reuse:false` is newTab; `reuse:true`/absent keeps find-or-create.
+  return options.reuse === false ? 'newTab' : null;
+}
+
 export function openWorkspaceDocument(workspace, doc, options = {}) {
+  const intent = normalizeNavigationIntent(options);
   let group = findWorkspaceGroup(workspace, options.groupId);
   if (!group) group = groupForLeaf(workspace, workspace.activeLeafId) || workspaceGroups(workspace)[0];
   if (!group) {
     group = makeGroup();
     workspace.root = group;
   }
-  let leaf = options.reuse === false ? null : group.tabs.find((item) => item.docId === doc.id);
+  if (intent === 'splitRight' || intent === 'splitBelow') {
+    return splitWorkspaceGroup(workspace, group.id, doc, intent === 'splitBelow' ? 'vertical' : 'horizontal');
+  }
+  if (intent === 'current') {
+    const active = group.tabs.find((item) => item.id === group.activeLeafId) || group.tabs[0] || null;
+    // Pinned leaves keep their document (close paths skip pins the same way);
+    // fall through to find-or-create instead of evicting a pin.
+    if (active && !active.pinned) {
+      if (active.docId === doc.id) {
+        // Same-document current keeps the leaf's selection and scroll; only an
+        // explicit mode request may change presentation.
+        if (active.view !== 'note' && options.mode && MODES.has(options.mode)) active.mode = options.mode;
+        activateWorkspaceLeaf(workspace, group.id, active.id);
+        return active;
+      }
+      // Replace the active tab's document in place. The leaf id is retained
+      // so note-buffer and editor-view bindings keyed by leaf stay coherent;
+      // per-document dirty buffers live on the doc id and are not discarded.
+      active.docId = doc.id;
+      active.view = noteViewType(doc);
+      active.mode = active.view === 'note' ? 'live' : MODES.has(options.mode) ? options.mode : 'live';
+      active.selection = null;
+      active.scrollTop = 0;
+      active.rawSource = false;
+      activateWorkspaceLeaf(workspace, group.id, active.id);
+      return active;
+    }
+    // Empty group or pinned active: fall through and create/activate a tab.
+  }
+  let leaf = intent === 'newTab' ? null : group.tabs.find((item) => item.docId === doc.id);
   if (!leaf) {
     leaf = makeLeaf(doc, { mode:options.mode });
     group.tabs.push(leaf);
@@ -433,6 +534,10 @@ function normalizePanels(rawPanels, left, right) {
         hidden: entry.hidden === true,
       };
     }
+  }
+  for (const id of ['files', 'search']) {
+    panels[id].side = 'left';
+    panels[id].hidden = false;
   }
   // Ensure no two panels share the same (side, order) — break ties by
   // stable panel-id sort so the result is deterministic.

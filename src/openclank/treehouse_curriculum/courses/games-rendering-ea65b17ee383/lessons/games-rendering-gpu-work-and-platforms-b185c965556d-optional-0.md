@@ -1,0 +1,1 @@
+The answer requires write-to-read ordering/visibility and names concrete CPU/GPU time or memory measurements tied to a target.

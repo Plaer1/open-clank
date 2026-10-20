@@ -1,0 +1,1 @@
+Reaching three outputs does not establish surjectivity into a four-element codomain.

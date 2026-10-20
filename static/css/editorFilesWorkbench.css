@@ -1,0 +1,48 @@
+.copal-notes-window .copal-window-nav { display:none; }
+/* Shared places and Copal documents each own a bounded scrolling region. */
+.copal-notes-explorer .copal-side-body:has(> .copal-editor-files-explorer) { overflow:hidden; }
+.copal-editor-files-explorer { display:flex; flex-direction:column; min-width:0; min-height:0; flex:1 1 0; overflow:hidden; }
+.copal-editor-files-explorer ~ .copal-file-tree { flex:1 1 0; }
+.copal-editor-files-navigation { display:flex; flex-wrap:wrap; align-items:center; gap:3px; padding:4px 0; flex:none; }
+.copal-editor-files-navigation .copal-btn { display:inline-flex; align-items:center; justify-content:center; min-width:27px; padding:4px; }
+.copal-editor-files-location { font-size:11px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:3px 0; }
+.copal-editor-files-mount { flex:1 1 0; min-width:0; min-height:0; overflow:hidden; }
+.copal-editor-files-mount .files-sidebar { box-sizing:border-box; max-width:none; min-width:0; overflow:auto; padding:4px; }
+.copal-editor-files-status { font-size:11px; padding:4px 0; }
+.copal-editor-files-status:empty { display:none; }
+.copal-editor-files-retry { flex:none; align-self:flex-start; margin:0 0 4px; }
+.copal-editor-files-retry[hidden] { display:none; }
+.copal-editor-files-status.error,.copal-resource-picker-status.error { color:var(--color-danger,var(--red)); }
+.copal-resource-picker.copal-files-selection-dialog[open] { width:min(1000px,calc(100vw - 32px)); height:min(720px,calc(100dvh - 32px)); max-width:calc(100vw - 32px); padding:12px; gap:6px; }
+.copal-files-selection-dialog .copal-resource-picker-browser { flex:1 1 auto; min-width:0; min-height:0; overflow:hidden; }
+.copal-files-selection-dialog .files-shell { height:100%; }
+.copal-files-selection-dialog .files-sidebar { min-width:0; }
+.copal-files-selection-dialog .files-main { min-height:0; overflow:hidden; }
+.copal-files-selection-dialog .files-toolbar select { flex:0 0 auto; width:auto; min-width:0; padding:5px 8px; font-size:11px; }
+.copal-files-selection-dialog .files-toolbar .files-size-label { display:inline-flex; flex:0 0 auto; align-items:center; gap:4px; width:auto; margin:0; font-size:11px; white-space:nowrap; }
+.copal-files-selection-dialog .files-toolbar .files-search-input { min-width:0; padding:5px 8px; font-size:11px; }
+.copal-files-selection-dialog .files-browser-body { overflow:auto; }
+.copal-files-selection-dialog .copal-resource-picker-status { flex:none; min-height:1.4em; font-size:12px; margin:0; }
+.copal-files-selection-dialog > .copal-dialog-actions { display:flex; flex:none; justify-content:flex-end; gap:8px; padding-top:8px; border-top:1px solid var(--border); }
+.copal-files-selection-dialog .files-operation-shelf,.copal-files-selection-dialog .oc-explorer-tree__actions { display:none !important; }
+@media(max-width:650px) {
+  .copal-resource-picker.copal-files-selection-dialog[open] { width:calc(100vw - 12px); max-width:calc(100vw - 12px); height:calc(100dvh - 12px); padding:8px; }
+}
+
+.copal-editor-files-mount .oc-explorer-tree__actions { display:none; }
+
+.copal-notes-window .copal-file-kind { display:inline-flex; align-items:center; flex:none; width:16px; height:16px; }
+.copal-notes-window .copal-note-tab-label { display:inline-flex; align-items:center; gap:5px; min-width:0; }
+.copal-notes-window .copal-note-tab-label > span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.copal-notes-window .copal-file-kind::before,.copal-notes-window .copal-file-kind::after { content:none; }
+
+.copal-notes-explorer .copal-side-body.copal-explorer-sections { display:flex; flex-direction:column; min-height:0; overflow:auto; }
+.copal-explorer-section { display:flex; flex-direction:column; min-width:0; min-height:32px; overflow:hidden; }
+.copal-explorer-section-heading { display:flex; flex:none; border-bottom:1px solid var(--border); padding:3px 0; }
+.copal-explorer-section-heading button { flex:1; text-align:left; background:transparent; color:inherit; border:0; font:inherit; cursor:pointer; padding:4px; }
+.copal-explorer-section > .copal-file-tree { flex:1 1 0; min-height:0; overflow:auto; }
+.copal-explorer-section > [hidden],.copal-explorer-section[hidden],.copal-explorer-section-divider[hidden] { display:none !important; }
+.copal-explorer-section-divider { flex:none; height:8px; cursor:row-resize; touch-action:none; background:var(--border); border-block:2px solid transparent; background-clip:content-box; }
+.copal-explorer-section-divider:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.copal-editor-files-status { flex:none; max-height:88px; overflow:auto; }
+.copal-explorer-section .copal-editor-files-explorer { min-height:0; }

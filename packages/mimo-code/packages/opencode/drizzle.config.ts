@@ -3,8 +3,8 @@ import { defineConfig } from "drizzle-kit"
 export default defineConfig({
   dialect: "sqlite",
   schema: "./src/**/*.sql.ts",
-  out: "./migration",
+  out: "../../../../.clanker/tools/native/mimo/journals",
   dbCredentials: {
-    url: "/home/thdxr/.local/share/opencode/opencode.db",
+    url: process.env.MIMOCODE_DB || ":memory:",
   },
 })

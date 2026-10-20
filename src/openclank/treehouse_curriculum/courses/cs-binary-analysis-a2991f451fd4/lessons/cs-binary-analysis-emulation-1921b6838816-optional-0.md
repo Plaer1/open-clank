@@ -1,0 +1,1 @@
+First DBT/emulation, second introspection; mention timing, hardware, OS, or environment-dependent behavior.

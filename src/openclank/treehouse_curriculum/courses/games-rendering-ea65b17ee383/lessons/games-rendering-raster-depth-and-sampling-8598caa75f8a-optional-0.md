@@ -1,0 +1,1 @@
+The checkerboard diagnosis concerns sampling/minification; the decal diagnosis concerns depth conflict or a suitable decal technique.

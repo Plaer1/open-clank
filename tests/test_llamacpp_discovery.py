@@ -6,6 +6,8 @@ Ollama, or plain OpenAI-compatible servers.
 Companion to test_lmstudio_discovery.py; the llama.cpp fingerprint is checked
 *after* the LM Studio one, so LM Studio still wins when both could match.
 """
+
+import pytest
 from src.model_discovery import ModelDiscovery
 
 
@@ -141,6 +143,7 @@ class TestLlamaCppFingerprint:
 # ════════════════════════════════════════════════════════════
 
 class TestDockerLoopbackScan:
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_host_docker_internal_in_scan_hosts(self, monkeypatch):
         """When no LLM_HOSTS env override is set, host.docker.internal must be
         included in the scan host list so llama-server on the Docker host is
@@ -153,6 +156,7 @@ class TestDockerLoopbackScan:
         hosts = discovery._get_hosts()
         assert "host.docker.internal" in hosts
 
+    @pytest.mark.skip(reason="Docker is unsupported; legacy Docker qualification is disabled")
     def test_discovered_endpoint_url_uses_provided_host(self, monkeypatch):
         """When host.docker.internal:8080 is probed, the returned base_url
         contains host.docker.internal — not a rewritten 127.0.0.1."""

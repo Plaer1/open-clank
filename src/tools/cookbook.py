@@ -33,6 +33,57 @@ def _validate_cookbook_ssh_target(remote_host: Any, ssh_port: Any = "") -> tuple
     return remote, sport
 
 
+def _cookbook_label_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _cookbook_is_exact_repo_id(value: Any) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(value or "").strip()))
+
+
+def _cookbook_match_saved_preset(query: str, presets: List[Any], host: str = "") -> Optional[Dict[str, Any]]:
+    """Resolve a user-facing model label to a saved serve preset.
+
+    The launch agent should be callable directly. If the model says
+    `repo_id="Qwen3.6-27B-AEON"` because the user used the short UI label, do
+    not force it through `list_serve_presets`; match the saved preset inside
+    the autopilot and let `do_serve_preset` reuse the known-good command.
+    """
+    q = _cookbook_label_key(query)
+    if not q:
+        return None
+    host = str(host or "")
+    exact_repo = _cookbook_is_exact_repo_id(query)
+    candidates: List[tuple[int, Dict[str, Any]]] = []
+    for p in presets or []:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "")
+        model = str(p.get("model") or p.get("modelId") or "")
+        phost = str(p.get("host") or p.get("remoteHost") or "")
+        haystacks = [_cookbook_label_key(name), _cookbook_label_key(model)]
+        if exact_repo:
+            # If the user gave a real HF repo, only reuse a preset that names
+            # that exact repo/label. A substring match here is dangerous:
+            # cyankiwi/Qwen3.5-122B-A10B-AWQ-8bit must not launch the saved
+            # generic Qwen/Qwen3.5-122B-A10B preset.
+            if not any(h and q == h for h in haystacks):
+                continue
+        else:
+            if not any(h and (q == h or q in h or h in q) for h in haystacks):
+                continue
+        score = 10
+        if host and phost == host:
+            score += 20
+        if q in haystacks:
+            score += 10
+        candidates.append((score, p))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 async def _cookbook_servers() -> Dict[str, Any]:
     """Return the cookbook's configured servers + the currently-selected
     default host. Shape: {default_host, hosts: [{host, platform, env, envPath}]}.
@@ -120,55 +171,26 @@ async def _cookbook_env_for_host(host: str) -> Dict[str, Any]:
     if not isinstance(env_root, dict):
         return {}
 
-    # Per-host entry takes precedence over top-level.
-    per_host: Dict[str, Any] = {}
-    for s in (env_root.get("servers") or []):
-        if isinstance(s, dict) and (s.get("host") or "") == (host or ""):
-            per_host = s
-            break
-
-    env_kind = per_host.get("env") or env_root.get("env") or "none"
-    env_path = per_host.get("envPath") or env_root.get("envPath") or ""
-    platform = per_host.get("platform") or env_root.get("platform") or "linux"
-    ssh_port = per_host.get("sshPort") or env_root.get("sshPort") or ""
-
-    env_prefix = ""
-    if env_kind == "venv" and env_path:
-        if platform == "windows":
-            activate = env_path if env_path.endswith("\\Scripts\\Activate.ps1") else env_path.rstrip("\\") + "\\Scripts\\Activate.ps1"
-            env_prefix = f"& {activate}"
-        else:
-            activate = env_path if env_path.endswith("/bin/activate") else env_path.rstrip("/") + "/bin/activate"
-            env_prefix = f"source {activate}"
-    elif env_kind == "conda" and env_path:
-        if platform == "windows":
-            env_prefix = f"conda activate {env_path}"
-        else:
-            env_prefix = f'eval "$(conda shell.bash hook)" && conda activate {env_path}'
-
+    from src.openclank.cookbook_execution import cookbook_launch_environment
     from routes.cookbook_helpers import load_stored_hf_token
-    return {
-        "env_prefix": env_prefix,
-        "env_type": env_kind,
-        "env_path": env_path,
-        "gpus": env_root.get("gpus") or "",
-        "platform": platform,
-        "hf_token": load_stored_hf_token(),
-        "ssh_port": ssh_port,
-    }
+
+    resolved = cookbook_launch_environment(env_root, host)
+    resolved.pop("remote_host", None)
+    resolved["hf_token"] = load_stored_hf_token()
+    return resolved
 
 
 def _infer_serve_port(cmd: str) -> int:
     """Infer likely listen port from a serve command."""
     if not cmd:
         return 8080
-    m = re.search(r"--port\\s+(\\d+)", cmd)
+    m = re.search(r"--port\s+(\d+)", cmd)
     if m:
         try:
             return int(m.group(1))
         except Exception:
             pass
-    m = re.search(r"OLLAMA_HOST=[^\\s]*?:(\\d+)", cmd)
+    m = re.search(r"OLLAMA_HOST=[^\s]*?:(\d+)", cmd)
     if m:
         try:
             return int(m.group(1))
@@ -180,58 +202,66 @@ def _infer_serve_port(cmd: str) -> int:
 
 
 def _infer_serve_host(host: str | None) -> tuple[str, bool]:
-    """Return (host, container_local) for registering a served endpoint."""
+    """Return a connectable host and whether the serve is container-local."""
     if not (host or "").strip():
         return "localhost", True
     base_host = host.split("@", 1)[-1] if "@" in host else host
     return base_host, False
 
 
-async def _ensure_served_endpoint(
+async def _ensure_served_provider(
     *,
     model: str,
     cmd: str,
     host: str | None,
     owner: str | None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
-    """Register/fetch a model endpoint for a running serve session."""
+    """Register a served model through the normalized provider authority."""
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
-    endpoint_host, container_local = _infer_serve_host(host)
+    provider_host, _container_local = _infer_serve_host(host)
     port = _infer_serve_port(cmd)
-    base_url = f"http://{endpoint_host}:{port}/v1"
+    provider_url = f"http://{provider_host}:{port}/v1"
     short_name = model.split("/")[-1] if "/" in model else model
-    is_image = "diffusion_server.py" in (cmd or "")
+    is_image = "diffusion_server.py" in (cmd or "") or "mlx_image_server.py" in (cmd or "")
     payload = {
         "name": short_name if not is_image else f"{short_name} (image)",
-        "base_url": base_url,
-        "skip_probe": "true",
+        "url": provider_url,
+        "model_id": model,
         "model_type": "image" if is_image else "llm",
-        "container_local": "true" if container_local else "false",
+        "session_id": session_id,
+        "supports_tools": "--enable-auto-tool-choice" in (cmd or ""),
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{_INTERNAL_BASE}/api/model-endpoints",
-                data=payload,
+                f"{_INTERNAL_BASE}/api/cookbook/provider-connections",
+                json=payload,
                 headers=_internal_headers(owner),
             )
             data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code >= 400:
             logger.debug(
-                f"ensure endpoint failed for {model!r}: status={resp.status_code} data={data}"
+                f"ensure provider failed for {model!r}: status={resp.status_code} data={data}"
             )
-            return {"added": False, "endpoint_id": "", "base_url": base_url, "error": data}
-        ep_id = data.get("id") if isinstance(data, dict) else None
+            return {"added": False, "connection_id": "", "url": provider_url, "error": data}
+        connection_id = data.get("id") if isinstance(data, dict) else None
         return {
-            "added": bool(ep_id),
-            "endpoint_id": ep_id or "",
-            "base_url": base_url,
+            "added": bool(connection_id),
+            "connection_id": connection_id or "",
+            "model_route_id": data.get("model_route_id", "") if isinstance(data, dict) else "",
+            "url": provider_url,
             "data": data,
         }
     except Exception as e:
-        logger.debug(f"ensure endpoint exception for {model!r}: {e}")
-        return {"added": False, "endpoint_id": "", "base_url": base_url, "error": str(e)}
+        logger.debug(f"ensure provider exception for {model!r}: {e}")
+        return {"added": False, "connection_id": "", "url": provider_url, "error": str(e)}
+
+
+# Compatibility export for the tool facade. The implementation no longer
+# reads or writes the retired endpoint table; callers receive connection IDs.
+_ensure_served_endpoint = _ensure_served_provider
 
 
 async def _cookbook_register_task(
@@ -241,8 +271,8 @@ async def _cookbook_register_task(
     cmd: str,
     task_type: str = "serve",
     *,
-    endpoint_added: bool = False,
-    endpoint_id: str = "",
+    provider_connected: bool = False,
+    provider_connection_id: str = "",
     owner: str | None = None,
 ) -> bool:
     """Append a task entry to cookbook_state.json after the agent
@@ -295,8 +325,8 @@ async def _cookbook_register_task(
         "sshPort": "",
         "platform": "linux",
         "_serveReady": False,
-        "_endpointAdded": bool(endpoint_added),
-        "_endpointId": endpoint_id or "",
+        "_providerConnected": bool(provider_connected),
+        "_providerConnectionId": provider_connection_id or "",
         "owner": owner or "",
     })
     state["tasks"] = tasks
@@ -318,6 +348,7 @@ async def _cookbook_register_task(
 _MODEL_PROCESS_PATTERNS = [
     ("vLLM",            ["vllm.entrypoints", "vllm serve", "/vllm/", "vllm-openai"]),
     ("SGLang",          ["sglang.launch_server", "sglang/launch_server"]),
+    ("MLX Image",       ["mlx_image_server.py", "mflux-generate-qwen", "mflux-generate"]),
     ("MLX",             ["mlx_lm.server", "mlx-lm"]),
     ("llama.cpp",       ["llama-server", "llama_cpp_server", "llamacppserver"]),
     ("Ollama",          ["ollama serve", "ollama runner", "/ollama "]),
@@ -359,6 +390,139 @@ def _cookbook_apply_retry_suggestion(cmd: str, suggestion: Dict[str, Any]) -> st
             return re.sub(rf"(^|\s){re.escape(flag)}(?:\s+\S+)?", lambda m: (m.group(1) or " ") + repl, cmd).strip()
         return f"{cmd.rstrip()} {repl}"
     return cmd
+
+
+def _cookbook_engine_from_model_info(repo_id: str, info: Optional[Dict[str, Any]], host_meta: Optional[Dict[str, Any]] = None) -> str:
+    """Choose a conservative serve engine from repo metadata and target host.
+
+    This is intentionally heuristic: the model card / file list tells us the
+    official repo and likely format, while the actual serve command still goes
+    through Cookbook and is diagnosed/retried after launch.
+    """
+    rid = (repo_id or "").lower()
+    info = info or {}
+    host_meta = host_meta or {}
+    platform = (host_meta.get("platform") or "").lower()
+    tags = {str(t).lower() for t in (info.get("tags") or []) if t is not None}
+    siblings = [str(s).lower() for s in (info.get("siblings") or []) if s is not None]
+    files = " ".join(siblings)
+    is_image = (
+        "diffusers" in tags
+        or "text-to-image" in tags
+        or "image-to-image" in tags
+        or any(k in rid for k in ("qwen-image", "z-image", "flux", "stable-diffusion", "sdxl", "hidream", "boogu", "krea-2"))
+    )
+    is_mlx_image = is_image and ("mlx" in tags or "mlx" in rid or "mlx-community/" in rid)
+    if is_mlx_image:
+        return "mlx_image"
+    if is_image:
+        return "diffusers"
+    if "mlx" in tags or "mlx" in rid or "mlx-community/" in rid or platform in {"macos", "darwin"}:
+        return "mlx"
+    if "gguf" in tags or "gguf" in rid or ".gguf" in files:
+        return "llama.cpp"
+    if "sglang" in tags or "sglang" in rid:
+        return "sglang"
+    if any(q in rid or q in files or q in tags for q in ("awq", "fp8", "gptq", "bnb", "bitsandbytes")):
+        return "vllm"
+    return "vllm"
+
+
+def _cookbook_default_launch_cmd(repo_id: str, engine: str, *, port: int = 8000, info: Optional[Dict[str, Any]] = None) -> str:
+    """Build a simple first-attempt command for a selected engine."""
+    engine = (engine or "vllm").lower()
+    port = int(port or 8000)
+    if engine in {"mlx", "mlx-lm", "mlx_lm"}:
+        return f"python3 -m mlx_lm.server --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"mlx_image", "mlx-image", "mflux"}:
+        return f"python3 scripts/mlx_image_server.py --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"diffusers", "diffusion", "image"}:
+        return f"python3 scripts/diffusion_server.py --model {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"sglang", "sgl"}:
+        return f"python3 -m sglang.launch_server --model-path {repo_id} --host 0.0.0.0 --port {port}"
+    if engine in {"llama.cpp", "llamacpp", "llama"}:
+        siblings = [str(s) for s in ((info or {}).get("siblings") or []) if str(s).lower().endswith(".gguf")]
+        if siblings:
+            # llama-server accepts HF repo + filename separately on recent builds.
+            return f"llama-server -hf {repo_id} -hfr {siblings[0]} --host 0.0.0.0 --port {port}"
+        return f"llama-server -hf {repo_id} --host 0.0.0.0 --port {port}"
+    return f"vllm serve {repo_id} --host 0.0.0.0 --port {port}"
+
+
+async def _cookbook_hf_model_info(repo_id: str) -> Dict[str, Any]:
+    """Fetch lightweight official Hugging Face metadata for launch planning.
+
+    Uses the public HF API directly so this works even when huggingface_hub is
+    not installed in Odysseus. Failures return a structured warning rather than
+    blocking launch; cached/private/offline models can still be served.
+    """
+    import httpx
+    from routes.cookbook_helpers import load_stored_hf_token
+
+    repo_id = (repo_id or "").strip().strip("/")
+    if not repo_id:
+        return {"error": "repo_id is required"}
+    headers: Dict[str, str] = {"Accept": "application/json"}
+    token = load_stored_hf_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"https://huggingface.co/api/models/{repo_id}"
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code >= 400:
+            return {
+                "repo_id": repo_id,
+                "url": f"https://huggingface.co/{repo_id}",
+                "error": f"HF metadata lookup returned HTTP {resp.status_code}",
+            }
+        data = resp.json() if resp.content else {}
+    except Exception as e:
+        return {
+            "repo_id": repo_id,
+            "url": f"https://huggingface.co/{repo_id}",
+            "error": f"HF metadata lookup failed: {e}",
+        }
+    siblings = []
+    for s in data.get("siblings") or []:
+        if isinstance(s, dict) and s.get("rfilename"):
+            siblings.append(s["rfilename"])
+    return {
+        "repo_id": repo_id,
+        "url": f"https://huggingface.co/{repo_id}",
+        "pipeline_tag": data.get("pipeline_tag") or "",
+        "library_name": data.get("library_name") or "",
+        "tags": data.get("tags") or [],
+        "sha": data.get("sha") or "",
+        "private": bool(data.get("private")),
+        "gated": data.get("gated"),
+        "siblings": siblings[:500],
+        "cardData": data.get("cardData") or {},
+    }
+
+
+def _cookbook_host_meta(host: str, servers: Dict[str, Any]) -> Dict[str, Any]:
+    for item in servers.get("hosts") or []:
+        if not isinstance(item, dict):
+            continue
+        if (item.get("host") or "") == (host or ""):
+            return item
+    return {}
+
+
+def _cookbook_find_task(tasks: List[Dict[str, Any]], session_id: str) -> Optional[Dict[str, Any]]:
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("session_id") == session_id or task.get("sessionId") == session_id or task.get("id") == session_id:
+            return task
+    return None
+
+
+def _cookbook_phase(task: Optional[Dict[str, Any]]) -> str:
+    if not task:
+        return "unknown"
+    return str(task.get("phase") or task.get("status") or "unknown").lower()
 
 
 def _scan_running_model_processes() -> List[Dict[str, Any]]:
@@ -553,19 +717,20 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
-            endpoint_id = data.get("endpoint_id") or ""
-            if endpoint_id:
-                endpoint_added = True
+            connection_id = data.get("provider_connection_id") or ""
+            if connection_id:
+                provider_connected = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(
-                    model=repo_id, cmd=cmd, host=host, owner=owner
+                provider_meta = await _ensure_served_provider(
+                    model=repo_id, cmd=cmd, host=host, owner=owner, session_id=sid
                 )
-                endpoint_added = bool(endpoint_meta.get("added"))
-                endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
+                provider_connected = bool(provider_meta.get("added"))
+                connection_id = provider_meta.get("connection_id", "") or connection_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id,
                 host=host, cmd=cmd, task_type="serve",
-                endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                provider_connected=provider_connected,
+                provider_connection_id=connection_id or "",
                 owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
@@ -582,7 +747,7 @@ async def do_serve_model(content: str, owner: Optional[str] = None) -> Dict:
                 "task_type": "serve",
                 "phase": "running",
                 "host": host,
-                "endpoint_id": endpoint_id,
+                "provider_connection_id": connection_id,
                 "log_path": log_path,
                 "next_tools": [
                     {"name": "list_served_models", "arguments": {}},
@@ -701,7 +866,7 @@ async def do_list_served_models(content: str, owner: Optional[str] = None) -> Di
                 # Prefer a window around a Python traceback if one exists,
                 # falling back to the last 30 lines. The previous 6-line
                 # tail showed only the post-crash bash prompt / neofetch
-                # banner ("Locale: C / Ubuntu_Odysseus ❯") — useless for
+                # banner ("Locale: C / Ubuntu_Open Clank ❯") — useless for
                 # diagnosis. The traceback we want is usually 50-200 lines
                 # earlier in the buffer.
                 _tail_lines = tail.splitlines()
@@ -1045,7 +1210,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
     """Register an externally-launched model server (bash + tmux + ssh, or
     anything else) into the Cookbook so it appears in list_served_models,
     can be stopped via stop_served_model, and is added to the user's
-    endpoint list for chat. Use this when a model was started outside
+    normalized provider catalogue for chat. Use this when a model was started outside
     the cookbook's serve flow but you want first-class tracking.
 
     Args (JSON):
@@ -1054,7 +1219,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
       model:         "cyankiwi/MiniMax-M2.7-AWQ-4bit" (HF repo or display name)
       port:          8000
       name:          optional display name (defaults to model basename)
-      add_endpoint:  bool (default true) — also register as a chat endpoint
+      add_provider:  bool (default true) — also register as a managed provider route
     """
     from src.tool_implementations import _internal_headers, _INTERNAL_BASE  # shared, lives in facade
     import httpx
@@ -1069,7 +1234,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
     model = (args.get("model") or args.get("repo_id") or "").strip()
     port = args.get("port") or 8000
     display_name = (args.get("name") or "").strip() or (model.split("/")[-1] if "/" in model else model)
-    add_endpoint = args.get("add_endpoint", True)
+    add_provider = args.get("add_provider", True)
 
     if not sess or not model:
         return {"error": "tmux_session and model are required", "exit_code": 1}
@@ -1145,7 +1310,7 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
             "sshPort": "",
             "platform": "linux",
             "_serveReady": bool(server_up),
-            "_endpointAdded": False,
+            "_providerConnected": False,
             "_adoptedExternally": True,
         }
         tasks.append(new_task)
@@ -1157,37 +1322,39 @@ async def do_adopt_served_model(content: str, owner: Optional[str] = None) -> Di
         except Exception as e:
             return {"error": f"could not save cookbook state: {e}", "exit_code": 1}
 
-    # Optionally register as a chat endpoint
-    endpoint_msg = ""
-    if add_endpoint:
+    # Optionally register as a normalized, keyless local provider.
+    provider_msg = ""
+    if add_provider:
         # Resolve host to a URL. SSH form `user@host` → just take host.
         host_only = host.split("@", 1)[-1] if host else "localhost"
-        endpoint_url = f"http://{host_only}:{int(port)}/v1"
+        provider_url = f"http://{host_only}:{int(port)}/v1"
         try:
-            from src.tool_implementations import do_manage_endpoints  # avoid forward ref issues
-        except Exception:
-            do_manage_endpoints = None
-        if do_manage_endpoints is not None:
-            try:
-                ep_result = await do_manage_endpoints(json.dumps({
-                    "action": "add",
-                    "name": display_name,
-                    "endpoint_url": endpoint_url,
-                    "is_local": False,
-                }), owner=owner)
-                if isinstance(ep_result, dict) and not ep_result.get("error"):
-                    endpoint_msg = f" Endpoint {endpoint_url} added as {display_name!r}."
-                else:
-                    endpoint_msg = f" Endpoint registration skipped: {(ep_result or {}).get('error', 'unknown')}"
-            except Exception as e:
-                endpoint_msg = f" Endpoint registration failed: {e}"
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{_INTERNAL_BASE}/api/cookbook/provider-connections",
+                    json={
+                        "url": provider_url,
+                        "model_id": model,
+                        "name": display_name,
+                        "model_type": "llm",
+                        "session_id": sess,
+                    },
+                    headers=headers,
+                )
+                result = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            if response.status_code < 400 and result.get("id"):
+                provider_msg = f" Managed provider {provider_url} added as {display_name!r}."
+            else:
+                provider_msg = f" Provider registration skipped: {result.get('detail') or result.get('error') or 'unknown'}"
+        except Exception as e:
+            provider_msg = f" Provider registration failed: {e}"
 
     return {
         "output": (
             f"Adopted session {sess!r} ({model}) on {host or 'local'}:{port}. "
             + ("Already tracked — skipped state write. " if adopted_already else "Added to cookbook state. ")
             + ("Server responding. " if server_up else "Server not responding yet (still loading?). ")
-            + endpoint_msg
+            + provider_msg
         ).strip(),
         "session_id": sess,
         "host": host,
@@ -1329,23 +1496,24 @@ async def do_serve_preset(content: str, owner: Optional[str] = None) -> Dict:
             data = resp.json()
         if data.get("ok"):
             sid = data.get("session_id", "?")
-            endpoint_id = data.get("endpoint_id") or ""
-            if endpoint_id:
-                endpoint_added = True
+            connection_id = data.get("provider_connection_id") or ""
+            if connection_id:
+                provider_connected = True
             else:
-                endpoint_meta = await _ensure_served_endpoint(
-                    model=repo_id, cmd=cmd, host=host, owner=owner
+                provider_meta = await _ensure_served_provider(
+                    model=repo_id, cmd=cmd, host=host, owner=owner, session_id=sid
                 )
-                endpoint_added = bool(endpoint_meta.get("added"))
-                endpoint_id = endpoint_meta.get("endpoint_id", "") or endpoint_id
+                provider_connected = bool(provider_meta.get("added"))
+                connection_id = provider_meta.get("connection_id", "") or connection_id
             registered = await _cookbook_register_task(
                 session_id=sid, model=repo_id, host=host,
                 cmd=cmd, task_type="serve",
-                endpoint_added=endpoint_added, endpoint_id=endpoint_id or "",
+                provider_connected=provider_connected,
+                provider_connection_id=connection_id or "",
                 owner=owner,
             )
             note = "" if registered else " (state-write failed — task may not show in UI)"
-            return {"output": f"Launched preset {chosen.get('name')!r}: {repo_id} on {host or 'local'} (session: {sid}){note}", "session_id": sid, "host": host, "endpoint_id": endpoint_id, "exit_code": 0}
+            return {"output": f"Launched preset {chosen.get('name')!r}: {repo_id} on {host or 'local'} (session: {sid}){note}", "session_id": sid, "host": host, "provider_connection_id": connection_id, "exit_code": 0}
         return {"error": data.get("error", "Serve failed"), "exit_code": 1}
     except Exception as e:
         return {"error": str(e), "exit_code": 1}

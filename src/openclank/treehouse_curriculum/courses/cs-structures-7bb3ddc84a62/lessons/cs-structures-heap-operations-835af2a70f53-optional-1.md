@@ -1,0 +1,1 @@
+Do not sort the array after an operation: that hides whether the stated heap procedure preserves its invariant.

@@ -1,0 +1,1 @@
+No scout5,1 action→5/action. Perfect cost2:8,2 actions→4/action, advantage3 per round. Imperfect cost2:0.75·10−2=5.5,2 actions→2.75/action. Perfect cost6:4,2 actions→2/action; skip scout if maximizing round score. Information changes chosen action and uncertainty, not the world's10/0 reward. The objective's unit matters; delay/action cost is a downside.

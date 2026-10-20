@@ -1,0 +1,1 @@
+Checking only the final sum misses a loop that never reaches it.

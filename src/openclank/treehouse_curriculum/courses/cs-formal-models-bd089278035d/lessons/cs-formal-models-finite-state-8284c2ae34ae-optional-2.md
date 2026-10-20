@@ -1,0 +1,1 @@
+For contains101, use progress states empty/1/10/found. Their transitions on 0/1 are (empty,1), (10,1), (empty,found), (found,found). Products of automata track two states at once; accept both components to recognize intersection.

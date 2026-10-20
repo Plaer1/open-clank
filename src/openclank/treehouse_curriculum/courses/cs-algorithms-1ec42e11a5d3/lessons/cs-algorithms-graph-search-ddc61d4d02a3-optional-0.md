@@ -1,0 +1,1 @@
+Distances A0 B1 C1 D2 E2; each discovered once; D parent B under listed neighbor order.

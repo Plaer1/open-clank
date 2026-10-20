@@ -1,0 +1,1 @@
+Heap order does not compare every pair of siblings or unrelated descendants.

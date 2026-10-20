@@ -1,0 +1,491 @@
+{
+  "id": "batch-072",
+  "group": "treehouse.lesson.house-stewardship",
+  "surface": "treehouse",
+  "entry_count": 40,
+  "character_count": 10679,
+  "complexity": "prose",
+  "instruction": "Complex prose batch: keep meaning, tone and product voice; prefer natural software language over literal wording.",
+  "entries": [
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.body",
+      "source": "Follow one shared app link from content in [Editor](clank://editor) and one from TreeHouse content — for example [Settings](clank://settings) and [Graph](clank://graph). Confirm each resolves to an existing app destination.\n\n**Observable result:** two successful shared app-link resolutions, one from Editor content and one from TreeHouse content, each landing on a real destination.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1170"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.explanation",
+      "source": "Rich content can link to app screens with `clank://` destinations. A link in [Editor](clank://editor) and a link in TreeHouse use the same resolver: the destination opens and focuses its screen, chat identity is preserved, and unsaved drafts stay in their buffers. A link never toggles an already-open window closed and never starts an unrelated chat.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1170"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.practice.cleanup",
+      "source": "Delete the practice document when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1202"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.practice.expectedEvidence",
+      "source": "Both app links resolve to existing destinations without disturbing open drafts.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1203"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.practice.seed",
+      "source": "Place one clank:// link in a practice document and follow one in this lesson.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1201"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.practice.title",
+      "source": "App-link practice pair",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1200"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.result",
+      "source": "Two shared app links that open their destinations without disturbing your work.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1170"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.title",
+      "source": "App links across Editor and TreeHouse",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1170"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.app-links.whyThisHelps",
+      "source": "Instructions that take you to the screen they describe are instructions you can follow. One resolver means one behaviour: the link in a lesson and the link in a note work the same way.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1170"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.body",
+      "source": "Write a local email draft and create a matching calendar placeholder. Then open [Settings → Integrations](clank://settings/integrations) and inspect webhook status.\n\n**What is distinctive:** drafts and placeholders stay local and inspectable; webhook status is visible before you rely on it. Opening this lesson never sends anything externally.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1207"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.explanation",
+      "source": "Email and calendar examples in the Field Guide use **local drafts**. Nothing is sent externally by opening a lesson or writing a draft. Webhooks are an integration: their configuration and delivery status are inspectable in [Settings → Integrations](clank://settings/integrations), and an unconfigured webhook is visibly disabled rather than silently broken.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1207"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.practice.cleanup",
+      "source": "Delete the draft and placeholder when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1239"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.practice.expectedEvidence",
+      "source": "The draft and placeholder remain local and inspectable.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1240"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.practice.seed",
+      "source": "One local email draft and one calendar placeholder; no external send.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1238"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.practice.title",
+      "source": "Local communication draft",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1237"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.result",
+      "source": "A local draft and a calendar placeholder that never leave the machine until you send.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1207"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.title",
+      "source": "Local email and calendar drafts, and webhook status",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1207"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.email-calendar.whyThisHelps",
+      "source": "Drafting locally is how you practise safely. And knowing whether a webhook is actually configured is how you avoid believing an alert went out when nothing did.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1207"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.official-docs.body",
+      "source": "Open the handbook from Help and read one non-demo page — for example the Open Clank Handbook home — in [Editor](clank://editor). Then open the Markdown Formatting Demo and switch between its rendered view and exact source view.\n\n**Observable result:** an official non-demo documentation page opens by its provisioned identity (a personal folder with a similar name does not qualify), and the formatting demo switches between rendered and source views.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1093"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.official-docs.explanation",
+      "source": "The maintained handbook ships with Open Clank and opens inside [Editor](clank://editor) — there is no separate help browser. Official pages are read-only; **Make editable copy** keeps your own notes beside them and updates never touch your copy. The Markdown Formatting Demo shows rendered Markdown and its exact source.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1093"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.official-docs.result",
+      "source": "A handbook page opened in Editor, and the formatting demo's exact source view.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1093"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.official-docs.title",
+      "source": "Official docs and the formatting demo",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1093"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.official-docs.whyThisHelps",
+      "source": "Documentation that opens where you work is documentation you will actually read. And a formatting demo with real source reveal teaches Markdown by showing the bytes, not by describing them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1093"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.progress-secrets.body",
+      "source": "Open [TreeHouse](clank://treehouse) and read the achievements view. Note which of your completions were self-checks and which were verified. Mystery entries show `???`; unearned ultra rares are not listed at all. In alpha admin/edit mode, spoilers are visible.\n\nYour account-wide achievements are lifetime records: resetting Class progress does not erase them, and changing workspace does not re-award them.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1280"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.progress-secrets.explanation",
+      "source": "Progress in the built-in Field Guide is free exploration: any lesson, any order. A lesson marked **self-check** is reading plus your own check; a lesson marked **verified** has an observable persisted result. Completing a lesson is not automatic evidence for an unrelated action award. In the achievements view, mystery entries show `???` until earned and count toward the normal total from the beginning; ultra rares stay absent until earned and appear as a separate ` + U` suffix. Alpha admin/edit mode may reveal spoilers.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1280"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.progress-secrets.result",
+      "source": "An honest reading of what you have completed and what is still hidden.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1280"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.progress-secrets.title",
+      "source": "Reading progress, mystery achievements and alpha spoilers",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1280"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.progress-secrets.whyThisHelps",
+      "source": "Honest labelling is what keeps achievements meaningful. A self-check is a self-check; a verified practice is something that actually happened. And the secret rules are there so a surprise stays surprising until you earn it.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1280"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.body",
+      "source": "In [TreeHouse](clank://treehouse), create a Class with at least one nonempty lesson. Preview it as a learner, then publish it. Optionally share it with another account.\n\n**Observable result:** your authored Class is previewed as a learner and then explicitly published with at least one nonempty lesson. Seeded official Classes are excluded — this is your own work.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1244"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.explanation",
+      "source": "You can author a Class in TreeHouse. Write at least one nonempty lesson, preview it as a learner to see what they will see, then publish. Sharing gives another account access; prerequisites and assessment are features of authored Classes, even though the built-in Field Guide itself is free exploration.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1244"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.practice.cleanup",
+      "source": "Delete or archive the practice Class when finished.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1274"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.practice.expectedEvidence",
+      "source": "The authored Class previews as learner and publishes with its nonempty lesson.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1275"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.practice.seed",
+      "source": "One authored Class with a single nonempty lesson.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1273"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.practice.title",
+      "source": "Practice Class draft",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1272"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.result",
+      "source": "A Class of your own, previewed as a learner and then published.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1244"
+      ],
+      "context": "result",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.title",
+      "source": "Making and sharing a Class",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1244"
+      ],
+      "context": "title",
+      "complexity": "label"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.teach-a-class.whyThisHelps",
+      "source": "Teaching is how you hand over what you learned. The learner preview is the check that the lesson reads the way you meant it to — before anyone depends on it.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1244"
+      ],
+      "context": "whyThisHelps",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.body",
+      "source": "Open [Settings → Appearance](clank://settings/appearance). Choose a theme and a background effect. Adjust intensity or size if the effect supports them, and set the UI text-size scale where you need it. Reload.\n\n**Observable result:** your owner-scoped theme preference is confirmed and the same values rehydrate after a fresh settings load.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1127"
+      ],
+      "context": "body",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.explanation",
+      "source": "Appearance lives in [Settings → Appearance](clank://settings/appearance) — there is no separate theme applet. Themes change colours across the shell; the picker shows live previews. **Background / Effect** chooses a decorative effect — Solid, Clanker Signal Routes, Shipibo Kene-Inspired Signal Weave, Clanker LCARS, Clanker Gem Drift, Clanker Emoji Drift, Clanker Matrix Rain, Clanker Emoji Rain, Clanker LCARS Status Sweep, Dots, Synapse, Rain, Constellations, Perlin Flow, Petals, Sparkles or Embers — with effect colour, intensity and size where the effect supports them. Typography offers font and density (comfortable, compact, spacious) plus a UI text-size scale. Frosted glass is a toggle.",
+      "placeholders": [],
+      "kind": "structured-prose",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1127"
+      ],
+      "context": "explanation",
+      "complexity": "prose"
+    },
+    {
+      "key": "treehouse.lesson.house-stewardship.theme-effects.practice.cleanup",
+      "source": "Change the values back if you prefer; nothing destructive is involved.",
+      "placeholders": [],
+      "kind": "structured-label",
+      "status": "live",
+      "locations": [
+        "src/openclank/treehouse_field_guide.py:1165"
+      ],
+      "context": "practice",
+      "complexity": "label"
+    }
+  ]
+}

@@ -1,10 +1,13 @@
 """Tests for endpoint_resolver — endpoint/model selection and enabled-model filtering."""
 import json
+import sqlite3
 
+import core.database as database
 from src.endpoint_resolver import (
     _first_chat_model,
     _endpoint_hidden_models,
     _endpoint_enabled_models,
+    normalize_model_list,
 )
 
 
@@ -65,3 +68,67 @@ class TestEnabledModels:
         if not configured:
             configured = _first_chat_model(_endpoint_enabled_models(ep))
         assert configured == "openai/gpt-oss-120b"
+
+    def test_legacy_csv_fields_match_json_behavior(self):
+        ep = _Ep()
+        ep.cached_models = "deepseek-chat, deepseek-reasoner"
+        ep.pinned_models = "deepseek-chat, deepseek-coder"
+        ep.hidden_models = "deepseek-reasoner"
+        assert _endpoint_enabled_models(ep) == ["deepseek-chat", "deepseek-coder"]
+
+    def test_pinned_allowlist_drains_cached_models(self):
+        # The ody-* projection serves `_endpoint_enabled_models`; with an
+        # explicit pin list it must match the chat picker's allow-list, or
+        # unpinned models stay dispatchable forever.
+        ep = _Ep(cached=["a", "b", "c"])
+        ep.pinned_models = json.dumps(["a"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
+    def test_explicit_empty_pins_drain_everything(self):
+        # Explicit [] means "show nothing" in the picker; projection agrees.
+        ep = _Ep(cached=["a", "b"])
+        ep.pinned_models = "[]"
+        assert _endpoint_enabled_models(ep) == []
+
+    def test_null_pins_keep_cached_minus_hidden(self):
+        ep = _Ep(cached=["a", "b"], hidden=["b"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
+    def test_hidden_still_applies_to_pins(self):
+        ep = _Ep(cached=["a", "b"])
+        ep.pinned_models = json.dumps(["a", "b"])
+        ep.hidden_models = json.dumps(["b"])
+        assert _endpoint_enabled_models(ep) == ["a"]
+
+
+def test_model_list_normalizer_accepts_json_and_legacy_csv():
+    assert normalize_model_list('["a", "b", "a"]') == ["a", "b"]
+    assert normalize_model_list(" a, b ,, a ") == ["a", "b"]
+    assert normalize_model_list(["a", " b ", None, "a"]) == ["a", "b"]
+
+
+def test_legacy_model_lists_migrate_once_to_canonical_json(tmp_path, monkeypatch):
+    path = tmp_path / "model-lists.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE model_endpoints ("
+            "id TEXT PRIMARY KEY, cached_models TEXT, pinned_models TEXT, hidden_models TEXT"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO model_endpoints VALUES (?, ?, ?, ?)",
+            ("legacy", "a, b, a", '["p", " q "]', None),
+        )
+        conn.execute(
+            "INSERT INTO model_endpoints VALUES (?, ?, ?, ?)",
+            ("current", '["x"]', None, "[]"),
+        )
+    monkeypatch.setattr(database, "DATABASE_URL", f"sqlite:///{path}")
+
+    assert database._migrate_model_endpoint_model_lists() == 1
+    assert database._migrate_model_endpoint_model_lists() == 0
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT cached_models, pinned_models FROM model_endpoints "
+            "WHERE id = 'legacy'"
+        ).fetchone() == ('["a","b"]', '["p","q"]')

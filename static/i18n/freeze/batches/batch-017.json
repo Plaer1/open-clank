@@ -1,0 +1,861 @@
+{
+  "id": "batch-017",
+  "group": "cookbook",
+  "surface": "cookbook",
+  "entry_count": 63,
+  "character_count": 6556,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.update",
+      "source": "Update",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1809",
+        "static/js/cookbook.js:1816",
+        "static/js/cookbook.js:1845",
+        "static/js/notes.js:3040",
+        "static/js/notes.js:3041",
+        "static/js/notes.js:3793",
+        "static/js/notes.js:3794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.image.dependencies",
+      "source": "Update image dependencies",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:459"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.llama.cpp.source.and.rebuild",
+      "source": "Update llama.cpp source and rebuild",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1785"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.source.rebuild",
+      "source": "Update source + rebuild",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1867"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.triton.on.server",
+      "source": "Update triton on server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:744"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.value.to.the.latest.version.pip.install.u",
+      "source": "Update {0} to the latest version (pip install -U)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1846"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.update.vllm.on.server",
+      "source": "Update vLLM on server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:644",
+        "static/js/cookbook-diagnosis.js:769"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.updated.source.and.cleared",
+      "source": "Updated source and cleared",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1813"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.updating",
+      "source": "Updating...",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1497",
+        "static/js/cookbook.js:1793",
+        "static/js/emailLibrary.js:1805"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.updating.ec6952e0",
+      "source": "Updating",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1498"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upgrade.failed",
+      "source": "Upgrade failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1560"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upgrade.request.failed",
+      "source": "Upgrade request failed:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1565"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upgrade.the.vllm.environment.that.provides.the.selected.vllm.cli.1c0e021b",
+      "source": "Upgrade the vLLM environment that provides the selected vllm CLI, or use a compatible checkpoint. Do not assume Open Clank owns PATH/system/source/Docker installs.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:364"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.upgrade.torch.only",
+      "source": "Upgrade torch only",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:815"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.use.port.8001",
+      "source": "Use port 8001",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:405"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.useful.checks",
+      "source": "Useful checks:",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:1045"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.user.message.content",
+      "source": "user {{ message['content'] }}",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:167"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.using.manual.hardware",
+      "source": "Using manual hardware",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:1133"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.uv.pip.install.u.sglang.all.torch.backend.auto",
+      "source": "uv pip install -U \"sglang[all]\" --torch-backend auto",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-deps-recipes.js:47"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vae.slicing.value",
+      "source": "VAE Slicing{1}",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1780"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.bin.python3",
+      "source": "{0}/bin/python3",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:648",
+        "static/js/cookbook-diagnosis.js:659",
+        "static/js/cookbook-diagnosis.js:746",
+        "static/js/cookbook-diagnosis.js:771",
+        "static/js/cookbook-diagnosis.js:793",
+        "static/js/cookbook-diagnosis.js:812",
+        "static/js/cookbook-diagnosis.js:817"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.failed",
+      "source": "{0} failed:",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1809",
+        "static/js/cookbook.js:1816"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.full.storage.format",
+      "source": "{0} — full storage format",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:1421"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.g.9cc672f0",
+      "source": "{4}G",
+      "placeholders": [
+        "4"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:2857"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.gpu.value",
+      "source": "{2} GPU{3}",
+      "placeholders": [
+        "2",
+        "3"
+      ],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:280"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.has.multiple.gguf.files.pick.what.to.delete",
+      "source": "{0} has multiple GGUF files. Pick what to delete.",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1018"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.already.value",
+      "source": "{0} is already {1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookDownload.js:567"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.not.finished.downloading.resume.the.download.on.the",
+      "source": "{0} is not finished downloading. Resume the download on the selected cache server?",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:3919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.still.downloading.was.marked.finished.after.a.restart",
+      "source": "{0} is still downloading (was marked finished after a restart — revived)",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookDownload.js:603"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.llama.cpp.build.on.value.re.launch.the.serve",
+      "source": "{0} llama.cpp build on {1}. Re-launch the serve task to rebuild.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1813"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.force.reinstall.vllm",
+      "source": "{0} -m pip install --force-reinstall vllm",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:813"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.u.torch",
+      "source": "{0} -m pip install -U torch",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:818"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.u.triton.triton.kernels",
+      "source": "{0} -m pip install -U triton triton-kernels",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:747"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.u.vllm",
+      "source": "{0} -m pip install -U vllm",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:772"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.u.vllm.transformers",
+      "source": "{0} -m pip install -U vllm transformers",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:649"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.install.user.break.system.packages.kernels.0",
+      "source": "{0} -m pip install --user --break-system-packages \"kernels<0.15\"",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:660"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.m.pip.uninstall.flashinfer.python.y",
+      "source": "{0} -m pip uninstall flashinfer-python -y",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:794"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.model.value.already.serving.on.value.value.value.stop.002186d9",
+      "source": "{0} model{1} already serving on {2} ({3}){4}. Stop it first, or launch anyway?",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:3370"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.not.installed.on.value.opening.dependencies.pick.your.model",
+      "source": "{0} not installed on {1}. Opening Dependencies — pick your model and click Run.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:124"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.on.value.value",
+      "source": "{0} on {1}? {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1789"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.process.es.survived.sigterm.value.force.kill.with.sigkill",
+      "source": "{0} process(es) survived SIGTERM: {1} Force-kill with SIGKILL?",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:3074"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.saved.launch.config.value.for.value.click.to.load",
+      "source": "{0} saved launch config{1} for {2} — click ▾ to load or delete",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1476",
+        "static/js/cookbookServe.js:2468"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.on.value",
+      "source": "{0} {1} on {2}...",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:1498"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.provider.is.ready",
+      "source": "{0}:{1} provider is ready",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookRunning.js:3978"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.venv.or.conda.env",
+      "source": "~/venv or conda-env",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1540"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vertical.align.middle",
+      "source": "vertical-align:middle;",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:2808"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.view.download.source.on.huggingface",
+      "source": "View download source on HuggingFace",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:1634"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vision.is.checked.but.no.mmproj.projector.is.in.the",
+      "source": "Vision is checked, but no mmproj projector is in the launch command. Refresh cached models after downloading mmproj, or add --mmproj manually.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:3337"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.vision.is.enabled.but.no.mmproj.gguf.projector.was.found",
+      "source": "Vision is enabled, but no mmproj GGUF projector was found in the cached model scan. Download an mmproj-*.gguf for this model, then refresh the cached model list before launching.",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1504"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.vision.value",
+      "source": "Vision{1}",
+      "placeholders": [
+        "1"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1771"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm",
+      "source": "vllm",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:361",
+        "static/js/cookbook-diagnosis.js:522",
+        "static/js/cookbook-hwfit.js:1771",
+        "static/js/cookbook-hwfit.js:1807",
+        "static/js/cookbook-hwfit.js:1821"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.engine.failed.to.start.check.the.error.above",
+      "source": "vLLM engine failed to start. Check the error above.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:610"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.is.not.installed.or.not.in.path",
+      "source": "vLLM is not installed or not in PATH.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:520"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.needs.a.visible.cuda.rocm.gpu",
+      "source": "vLLM needs a visible CUDA/ROCm GPU.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:601"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.speculative.config.method",
+      "source": "vLLM --speculative-config method",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1715"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.use.flashinfer.sampler.0",
+      "source": "VLLM_USE_FLASHINFER_SAMPLER=0",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:787"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vllm.was.built.against.a.newer.torch.than.what.is",
+      "source": "vLLM was built against a newer torch than what is installed. Reinstall vLLM so pip pulls a compatible torch (or upgrade torch directly).",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-diagnosis.js:806"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.vram.5ca61a69",
+      "source": "VRAM",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:1285",
+        "static/js/cookbook.js:3119"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vram.per.gpu",
+      "source": "VRAM per GPU",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook.js:3164"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.which.gpu.pool.to.serve.from.vllm.can.only.tensor",
+      "source": "Which GPU pool to serve from — vLLM can only tensor-parallel across identical GPUs",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:250"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.whole.repo",
+      "source": "Whole repo",
+      "placeholders": [],
+      "kind": "js-string-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1001"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.width.value.75047159",
+      "source": "Width{0}",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/cookbookServe.js:1654"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.windows",
+      "source": "windows",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/cookbook-hwfit.js:2670"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

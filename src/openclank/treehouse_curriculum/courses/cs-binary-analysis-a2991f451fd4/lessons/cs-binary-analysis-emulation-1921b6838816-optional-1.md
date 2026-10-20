@@ -1,0 +1,1 @@
+A trace from an emulator is evidence about that environment, not automatically every native machine.

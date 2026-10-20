@@ -1,0 +1,1 @@
+Encryption for confidentiality; signature plus trusted publisher-key binding; an attacker can replace both file and untrusted digest.

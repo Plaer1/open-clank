@@ -1,0 +1,1 @@
+Require expected fields/types, a stated score range, and mention tuple/type or shared-identity loss.

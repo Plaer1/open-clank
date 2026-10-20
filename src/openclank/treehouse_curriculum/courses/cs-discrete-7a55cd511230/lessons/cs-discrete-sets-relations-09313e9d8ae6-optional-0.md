@@ -1,0 +1,1 @@
+Union {1,2,3}, intersection {2}; not a function because input 1 has two outputs.

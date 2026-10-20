@@ -1,0 +1,1 @@
+The record distinguishes original work from external terms, and unknown permission is not represented as confirmed.

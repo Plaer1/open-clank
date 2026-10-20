@@ -1,0 +1,1 @@
+Keep each change separate; changing both the argument and operator answers a different question.

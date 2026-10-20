@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::collections::{HashMap,HashSet};
 
 use fm_core::config::FmConfig;
-use fm_core::embed::{EmbeddingClient, HttpEmbeddingClient, NoopEmbeddingClient};
+use fm_core::embed::{DisabledEmbeddingClient, EmbeddingClient};
 use fm_core::provider::native::NativeProvider;
 use fm_core::provider::{GroomOpArgs, MemoryProvider};
 use fm_core::record::*;
-use fm_core::store::sqlite::SqliteStore;
+use fm_core::store::sqlite::{ForgetSelector, RetentionPolicy, SqliteStore};
 use rmcp::{
     handler::server::{tool::Parameters, tool::ToolCallContext, ServerHandler},
     model::*,
@@ -18,13 +19,200 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+// Private isolated-candidate diagnostics only. No public/wire result fields,
+// and disabled operations create neither a collector nor an Instant.
+struct VisualTiming {
+    context: fm_core::code_metrics::MetricsContext,
+    started: std::time::Instant,
+    lane_wait_ns: u64,
+}
+static VISUAL_TIMING_RECORDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn visual_timings_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FM_CODE_QUERY_TIMINGS").is_some_and(|v| v == "1"))
+}
+#[derive(Clone, Copy)]
+enum VisualTimingPhase { Worker, Delivery }
+impl VisualTiming {
+    fn begin(enabled: bool, records: &std::sync::atomic::AtomicUsize) -> Option<Self> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !enabled || records.fetch_update(Relaxed, Relaxed, |n| if n < 128 {Some(n + 1)} else {None}).is_err() { return None; }
+        Some(Self { context: Default::default(), started: std::time::Instant::now(), lane_wait_ns: 0 })
+    }
+    fn lane_acquired(&mut self) { self.lane_wait_ns = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64; }
+    fn record(self, token: &str, phase: VisualTimingPhase) -> serde_json::Value {
+        serde_json::json!({"schema":"openclank.code-visual-timing/v1","token":token,
+            "phase":match phase {VisualTimingPhase::Worker=>"worker",VisualTimingPhase::Delivery=>"delivery"},
+            "elapsed_ns":self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            "lane_wait_ns":self.lane_wait_ns,"metrics":self.context.snapshot()})
+    }
+    fn emit(self, token: &str, phase: VisualTimingPhase) {
+        tracing::info!(target:"fm_code_query_timing", record=%self.record(token,phase));
+    }
+}
+
+#[cfg(test)]
+mod visual_timing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize,Ordering};
+
+    #[tokio::test]
+    async fn interactive_activity_survives_abandoned_worker_and_delivery_waiters() {
+        // Same closure-owned lifetime as both production blocking phases. No
+        // completed-token retention, browser, authority fixture or index job.
+        for phase in ["worker","delivery"] {
+            let scheduler=Arc::new(fm_core::code_index_scheduler::IndexScheduler::default());
+            let owned=scheduler.clone();let (entered,seen)=std::sync::mpsc::channel();let (release,released)=std::sync::mpsc::channel();let (finished,finish_seen)=std::sync::mpsc::channel();
+            let waiter=tokio::task::spawn_blocking(move||{
+                let activity=owned.interactive_activity();entered.send(()).unwrap();released.recv().unwrap();drop(activity);finished.send(()).unwrap();
+            });
+            seen.recv_timeout(std::time::Duration::from_secs(2)).unwrap();waiter.abort();drop(waiter);
+            let background=scheduler.clone();let (progress,progress_seen)=std::sync::mpsc::channel();
+            let verification=std::thread::spawn(move||background.run(||{background.verification_checkpoint()?;progress.send(()).unwrap();Ok(())}));
+            assert!(matches!(progress_seen.recv_timeout(std::time::Duration::from_millis(20)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)),"{phase} guard must outlive async waiter");
+            release.send(()).unwrap();finish_seen.recv_timeout(std::time::Duration::from_secs(2)).unwrap();progress_seen.recv_timeout(std::time::Duration::from_secs(2)).unwrap();verification.join().unwrap().unwrap();
+            assert_eq!(scheduler.status().active,0);
+        }
+    }
+
+    #[test]
+    fn visual_timing_disabled_and_process_cap_are_bounded() {
+        let records=AtomicUsize::new(0);
+        assert!(VisualTiming::begin(false,&records).is_none());
+        assert_eq!(records.load(Ordering::Relaxed),0);
+        for _ in 0..128 { assert!(VisualTiming::begin(true,&records).is_some()); }
+        assert!(VisualTiming::begin(true,&records).is_none());
+        assert_eq!(records.load(Ordering::Relaxed),128);
+        records.store(usize::MAX,Ordering::Relaxed);
+        assert!(VisualTiming::begin(true,&records).is_none());
+    }
+
+    #[test]
+    fn visual_timing_record_has_only_fixed_numeric_phase_fields() {
+        use fm_core::code_metrics::{span,Stage};
+        let records=AtomicUsize::new(0);
+        let mut timing=VisualTiming::begin(true,&records).unwrap();
+        timing.lane_acquired();
+        timing.context.enter(|| {
+            let _context=span(Stage::MapContext);
+            {let _entry=span(Stage::MapPolicyEntry);}
+            {let _projection=span(Stage::MapProjection);}
+            {let _final=span(Stage::MapPolicyFinal);}
+        });
+        let row=timing.record("query_fixture",VisualTimingPhase::Worker);
+        let mut fields=row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();fields.sort();
+        assert_eq!(fields,vec!["elapsed_ns","lane_wait_ns","metrics","phase","schema","token"]);
+        assert_eq!(row["phase"],"worker");assert_eq!(row["schema"],"openclank.code-visual-timing/v1");
+        assert!(row["elapsed_ns"].as_u64().unwrap()>=row["lane_wait_ns"].as_u64().unwrap());
+        let stages=row["metrics"]["stages"].as_array().unwrap();assert_eq!(stages.len(),29);
+        for name in ["map_context","map_policy_entry","map_policy_final","map_projection"] {
+            let value=stages.iter().find(|s|s["stage"]==name).unwrap();assert_eq!(value["counters"]["calls"],1);
+        }
+        let delivery=VisualTiming::begin(true,&records).unwrap().record("query_fixture",VisualTimingPhase::Delivery);
+        assert_eq!(delivery["phase"],"delivery");assert_eq!(delivery["lane_wait_ns"],0);
+    }
+}
+
 #[derive(Clone)]
 struct FrankenmemoryServer {
     provider: Arc<NativeProvider>,
     /// Concrete store handle for graph ops (they live on SqliteStore, not
     /// on the MemoryStore trait).
     graph_store: Arc<SqliteStore>,
+    code_tasks: Arc<std::sync::Mutex<HashMap<String,CodeTask>>>,
+    code_queries: Arc<std::sync::Mutex<HashMap<String,CodeQueryTask>>>,
+    // The authority database has one exclusive publication fence. Queue code
+    // readers cooperatively instead of racing that fence's short busy timeout.
+    // Four jobs remain admitted; recall and cancellation do not take this lane.
+    code_query_lane: Arc<tokio::sync::Semaphore>,
+    code_query_secret: [u8;32],
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
+}
+
+#[derive(Default)]
+struct CodeTask { running:bool, token:String, ticket:Option<fm_core::code::CodeWorkTicket>, subscribers:HashSet<String>, error:Option<String>, cancel:Arc<std::sync::atomic::AtomicBool> }
+
+struct CodeQueryTask {
+    binding_key:String,
+    cancel:Arc<std::sync::atomic::AtomicBool>,
+    result:Option<Result<serde_json::Value,fm_core::code_query::QueryError>>,
+    completed:Option<std::time::Instant>,
+}
+fn query_binding_key(binding:&fm_core::code::WorkspaceBinding)->String{
+    serde_json::to_string(&(binding.owner.as_str(),binding.owner_subject_id.as_str(),binding.workspace_id.as_str(),binding.location_id.as_str(),binding.workspace_revision,binding.policy_generation,binding.origin.as_str(),&binding.root,binding.subscriber_id.as_str())).unwrap()
+}
+
+fn lifecycle_error(message:String)->rmcp::ErrorData {
+    if message.starts_with("code_node_forget_requires_workspace_erase:") {
+        return rmcp::ErrorData::invalid_params(message,Some(serde_json::json!({"code":"code_node_forget_requires_workspace_erase"})));
+    }
+    if ["denied:","erased:","ambiguous_registration:","stale_queued_ticket:"].iter().any(|prefix|message.starts_with(prefix)) {
+        rmcp::ErrorData::invalid_params(message,None)
+    } else {rmcp::ErrorData::internal_error(message,None)}
+}
+
+fn scrub_private_root(value:&mut serde_json::Value,root:&str){
+    if root.is_empty(){return;}
+    if let Some(text)=value.get_mut("error").and_then(|e|e.get_mut("message")).and_then(|v|v.as_str().map(str::to_string)){
+        value["error"]["message"]=text.replace(root,"[root]").into();
+    }
+    if let Some(coverage)=value.get_mut("coverage").and_then(|v|v.as_array_mut()){
+        for entry in coverage{if let Some(text)=entry.get("detail").and_then(|v|v.as_str()){entry["detail"]=text.replace(root,"[root]").into();}}
+    }
+}
+
+fn code_task_key(scope:&fm_core::graph::GraphScope,checkout:&str)->String{serde_json::to_string(&[scope.owner.as_str(),scope.workspace_id.as_str(),checkout]).expect("string tuple serialization")}
+
+#[cfg(test)]
+mod s03_wire_tests{
+    use super::*;
+    #[test]
+    fn root_redaction_preserves_canonical_coverage_and_ids(){
+        for root in ["/","src"]{
+            let mut value=serde_json::json!({"registration_id":"src_registration","coverage":[{"rel_path":"src/sub/file.py","source_hash":"src_hash","source_generation":"src_generation","detail":format!("failed {root}private")}],"error":{"message":format!("failed {root}private")}});
+            scrub_private_root(&mut value,root);assert_eq!(value["registration_id"],"src_registration");assert_eq!(value["coverage"][0]["rel_path"],"src/sub/file.py");assert_eq!(value["coverage"][0]["source_hash"],"src_hash");assert_eq!(value["coverage"][0]["source_generation"],"src_generation");assert!(value["error"]["message"].as_str().unwrap().contains("[root]"));
+        }
+        let error=lifecycle_error("code_node_forget_requires_workspace_erase: use workspace erasure".into());assert_eq!(error.code,rmcp::model::ErrorCode::INVALID_PARAMS);assert_eq!(error.data.unwrap()["code"],"code_node_forget_requires_workspace_erase");
+    }
+}
+
+#[cfg(feature="s03-fixtures")]
+async fn fixture_queued_gate(token:&str)->Result<(),String> {
+    if let Ok(directory)=std::env::var("FM_S03_FIXTURE_GATE") {
+        let directory=std::path::PathBuf::from(directory);
+        if !directory.is_absolute() || !directory.is_dir(){return Err("invalid fixture gate directory".into());}
+        std::fs::write(directory.join(format!("{token}.held")),b"queued-before-claim").map_err(|e|e.to_string())?;
+        let deadline=std::time::Instant::now()+std::time::Duration::from_secs(60);
+        while !directory.join("release").exists() {
+            if std::time::Instant::now()>deadline{return Err("fixture_gate_deadline".into());}
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature="s03-fixtures")]
+fn fixture_finished(token:&str,rejected:bool){
+    if let Ok(directory)=std::env::var("FM_S03_FIXTURE_GATE"){
+        let directory=std::path::PathBuf::from(directory);
+        if directory.is_absolute() && directory.is_dir(){let _=std::fs::write(directory.join(format!("{token}.finished")),if rejected{b"rejected".as_slice()}else{b"completed".as_slice()});}
+    }
+}
+
+fn reject_agent_bridge_internal_tool(tool: &str) -> Result<(), rmcp::ErrorData> {
+    let agent_bridge = std::env::var("FM_AGENT_BRIDGE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    });
+    if agent_bridge {
+        return Err(rmcp::ErrorData::invalid_params(
+            format!("{tool} is not available through an Agent memory bridge"),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn request_scope(
@@ -107,6 +295,8 @@ struct CaptureParams {
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
+    source_type: Option<String>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
@@ -116,7 +306,7 @@ struct CaptureParams {
     user_text: Option<String>,
     #[serde(default)]
     assistant_text: Option<String>,
-    /// raw_only | candidate | manual
+    /// raw_only | candidate | review_only | manual
     #[serde(default)]
     capture_mode: Option<String>,
     #[serde(default)]
@@ -248,6 +438,18 @@ struct CandidateReviewParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct CandidateUpdateParams {
+    id: String,
+    content: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    owner: String,
+    workspace_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DigestParams {
     #[serde(default)]
     owner: Option<String>,
@@ -290,6 +492,73 @@ struct OwnerLifecycleParams {
     workspace_id: Option<String>,
     #[serde(default)]
     new_owner: Option<String>,
+    #[serde(default)]
+    components: Vec<String>,
+    #[serde(default)]
+    expected_counts: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryRetentionParams {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    raw_days: Option<u32>,
+    #[serde(default)]
+    candidate_days: Option<u32>,
+    #[serde(default)]
+    curated_days: Option<u32>,
+    #[serde(default)]
+    clear_curated_days: bool,
+    #[serde(default)]
+    graph_days: Option<u32>,
+    #[serde(default)]
+    clear_graph_days: bool,
+    #[serde(default)]
+    recovery_seconds: Option<u32>,
+    #[serde(default)]
+    preview_token: Option<String>,
+    #[serde(default)]
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryForgetParams {
+    action: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    selector_kind: Option<String>,
+    #[serde(default)]
+    selector: Option<String>,
+    #[serde(default)]
+    preview_token: Option<String>,
+    #[serde(default)]
+    tombstone_id: Option<String>,
+    #[serde(default)]
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ScopedExportParams {
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct MemoryExplainParams {
+    id: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -302,6 +571,24 @@ struct QuarantineMigrationParams {
 
 fn default_true() -> bool {
     true
+}
+
+fn forget_selector(
+    kind: Option<&str>,
+    value: Option<String>,
+) -> Result<ForgetSelector, rmcp::ErrorData> {
+    let value = value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| rmcp::ErrorData::invalid_params("selector is required", None))?;
+    match kind.unwrap_or("record_id") {
+        "record_id" => Ok(ForgetSelector::RecordId(value)),
+        "source_uri" => Ok(ForgetSelector::SourceUri(value)),
+        "source_message_id" => Ok(ForgetSelector::SourceMessageId(value)),
+        _ => Err(rmcp::ErrorData::invalid_params(
+            "selector_kind must be record_id|source_uri|source_message_id",
+            None,
+        )),
+    }
 }
 
 fn parse_memory_kind(value: &str) -> Option<MemoryKind> {
@@ -359,6 +646,8 @@ struct GraphWalkParams {
     dst_id: Option<String>,
     #[serde(default)]
     max_depth: Option<usize>,
+    /// For action=impact: maximum returned files; the response always carries
+    /// the exact total and a truncated flag.
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -372,12 +661,142 @@ struct CodeIndexParams {
     #[serde(default)]
     workspace_id: Option<String>,
     /// Absolute path of the codebase root (the opt-in namespace).
+    #[serde(default)]
     path: String,
+    #[serde(default)] root: Option<String>,
+    #[serde(default)] owner_subject_id: Option<String>,
+    #[serde(default)] location_id: Option<String>,
+    #[serde(default)] workspace_revision: Option<i64>,
+    #[serde(default)] policy_generation: Option<i64>,
+    #[serde(default)] origin: Option<String>,
+    #[serde(default)] subscriber_id: Option<String>,
+    #[serde(default)] authority_expires_unix_ms: Option<i64>,
     /// For action=impact: file path relative to the codebase root.
     #[serde(default)]
     rel_path: Option<String>,
     #[serde(default)]
     max_depth: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug,Deserialize,JsonSchema)]
+#[serde(tag="action",rename_all="snake_case",deny_unknown_fields)]
+enum CodeIndexSchedulerParams{Status{origin:String},Configure{origin:String,revision:u64,max_threads:u8}}
+
+impl CodeIndexSchedulerParams {
+    fn request(self) -> fm_core::code_index_scheduler::SchedulerRequest {
+        match self {
+            Self::Status { origin } => fm_core::code_index_scheduler::SchedulerRequest::Status { origin },
+            Self::Configure { origin, revision, max_threads } => fm_core::code_index_scheduler::SchedulerRequest::Configure { origin, revision, max_threads },
+        }
+    }
+}
+
+#[cfg(test)]
+mod index_scheduler_wire_tests {
+    use super::*;
+    #[test]
+    fn scheduler_wire_rejects_unknown_fields_and_non_integer_limits() {
+        for raw in [
+            serde_json::json!({"action":"status","origin":"app","revision":1}),
+            serde_json::json!({"action":"configure","origin":"app","revision":1,"max_threads":true}),
+            serde_json::json!({"action":"configure","origin":"app","revision":1,"max_threads":1.5}),
+            serde_json::json!({"action":"configure","origin":"app","revision":1,"max_threads":null}),
+            serde_json::json!({"action":"configure","origin":"app","revision":1,"max_threads":"2"}),
+        ] { assert!(serde_json::from_value::<CodeIndexSchedulerParams>(raw).is_err()); }
+    }
+    #[test]
+    fn scheduler_app_only_and_strict_ranges_are_checked_before_mutation() {
+        for (origin, revision, max_threads) in [("agent",1,2),("broker",1,2),("app",0,2),("app",1,0),("app",1,33),("app",1u64<<53,2)] {
+            let params:CodeIndexSchedulerParams=serde_json::from_value(serde_json::json!({"action":"configure","origin":origin,"revision":revision,"max_threads":max_threads})).unwrap();
+            assert!(params.request().validate().is_err());
+        }
+        for max_threads in [1,2,32] {
+            let params:CodeIndexSchedulerParams=serde_json::from_value(serde_json::json!({"action":"configure","origin":"app","revision":1,"max_threads":max_threads})).unwrap();
+            assert!(params.request().validate().is_ok());
+        }
+    }
+    #[test]
+    fn scheduler_status_wire_has_exact_python_readback_contract() {
+        let scheduler=fm_core::code_index_scheduler::IndexScheduler::default();
+        let params:CodeIndexSchedulerParams=serde_json::from_value(serde_json::json!({"action":"status","origin":"app"})).unwrap();
+        let status=serde_json::to_value(scheduler.request(&params.request()).unwrap()).unwrap();
+        assert_eq!(status,serde_json::json!({"schema":"open-clank.index-scheduler/v1","revision":0,"effective_revision":0,"desired":2,"effective":2,"active":0,"queued":0,"drain_pending":false}));
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CodeQueryParams {
+    action:String,
+    binding:serde_json::Value,
+    #[serde(default)] query:Option<serde_json::Value>,
+    #[serde(default)] token:Option<String>,
+    /// Private Files-byte ExactText validation, never a model-visible input.
+    #[serde(default)] source_claim:Option<serde_json::Value>,
+    #[serde(default)] read_fence_only:bool,
+    /// App-only map/selection on the existing owned read-job lifecycle.
+    #[serde(default)] visual_request:Option<serde_json::Value>,
+}
+
+fn visual_request(params:&CodeQueryParams,origin:&str)->Result<Option<fm_core::code_visual::VisualRequest>,rmcp::ErrorData>{
+    let Some(raw)=&params.visual_request else{return Ok(None)};
+    let invalid=||rmcp::ErrorData::invalid_params("Invalid private visual request",None);
+    if params.action!="start"||origin!="app"||params.query.is_some()||params.source_claim.is_some()||params.read_fence_only{return Err(invalid());}
+    // Count before typed deserialization without allocating an unbounded copy.
+    struct Bound(usize);
+    impl std::io::Write for Bound {
+        fn write(&mut self,bytes:&[u8])->std::io::Result<usize>{
+            self.0=self.0.checked_add(bytes.len()).filter(|n|*n<=fm_core::code_visual::MAX_REQUEST_BYTES).ok_or_else(||std::io::Error::other("visual request too large"))?;Ok(bytes.len())
+        }
+        fn flush(&mut self)->std::io::Result<()>{Ok(())}
+    }
+    serde_json::to_writer(&mut Bound(0),raw).map_err(|_|invalid())?;
+    let request:fm_core::code_visual::VisualRequest=serde_json::from_value(raw.clone()).map_err(|_|invalid())?;
+    match &request{fm_core::code_visual::VisualRequest::Map(q)=>q.validate(),fm_core::code_visual::VisualRequest::Selection(q)=>q.validate()}.map_err(|_|invalid())?;
+    Ok(Some(request))
+}
+
+fn visual_delivery(token:&str,value:serde_json::Value,checked:Result<(),fm_core::code_query::QueryError>,cancel:&std::sync::atomic::AtomicBool)->serde_json::Value{
+    // A cancel RPC can arrive during the awaited final check. Do not disclose
+    // its payload just because the worker observed an earlier uncancelled flag.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed){return serde_json::json!({"state":"failed","token":token,"error":{"code":"cancelled","message":"Code query cancelled"}});}
+    match checked{
+        Ok(())=>serde_json::json!({"state":"completed","token":token,"result":value}),
+        Err(error)=>serde_json::json!({"state":"failed","token":token,"error":error}),
+    }
+}
+
+#[cfg(test)]
+mod visual_wire_tests {
+    use super::*;
+    fn params()->CodeQueryParams{serde_json::from_value(serde_json::json!({"action":"start","binding":{},"visual_request":{"mode":"map","request":{"schema":"open-clank.code-map/v1","operation":"overview"}}})).unwrap()}
+    #[test]
+    fn visual_start_is_app_only_and_exclusive(){
+        assert!(visual_request(&params(),"app").unwrap().is_some());
+        for origin in ["agent","","broker"]{assert!(visual_request(&params(),origin).is_err());}
+        for variant in 0..5{let mut p=params();match variant{0=>p.query=Some(serde_json::json!({})),1=>p.source_claim=Some(serde_json::json!({})),2=>p.read_fence_only=true,3=>p.action="poll".into(),_=>p.action="cancel".into()};assert!(visual_request(&p,"app").is_err());}
+        let mut p=params();p.visual_request=None;assert!(visual_request(&p,"agent").unwrap().is_none());
+    }
+    #[test]
+    fn visual_input_rejects_unknown_malformed_and_oversized_contracts(){
+        for raw in [serde_json::json!({"mode":"other","request":{}}),serde_json::json!({"mode":"map","request":{},"extra":true}),serde_json::json!({"mode":"map","request":{"schema":"open-clank.code-map/v1","operation":"overview","root":{"kind":"visual","id":"x"}}}),serde_json::json!({"mode":"map","request":{"schema":"open-clank.code-map/v1","operation":"overview","cursor":"x".repeat(fm_core::code_visual::MAX_REQUEST_BYTES)}})]{let mut p=params();p.visual_request=Some(raw);assert!(visual_request(&p,"app").is_err());}
+    }
+    #[tokio::test]
+    async fn completed_visual_poll_cancel_during_final_check_never_discloses(){
+        let cancel=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let(started_tx,started_rx)=tokio::sync::oneshot::channel();
+        let(release_tx,release_rx)=std::sync::mpsc::channel();
+        let worker=tokio::task::spawn_blocking(move||{started_tx.send(()).unwrap();release_rx.recv().unwrap();Ok(())});
+        started_rx.await.unwrap();cancel.store(true,std::sync::atomic::Ordering::Relaxed);release_tx.send(()).unwrap();
+        let value=visual_delivery("owned",serde_json::json!({"must_not_disclose":true}),worker.await.unwrap(),&cancel);
+        assert_eq!(value["error"]["code"],"cancelled");assert!(value.get("result").is_none());
+        cancel.store(false,std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(visual_delivery("owned",serde_json::json!({"mode":"map"}),Ok(()),&cancel)["state"],"completed");
+        let error=fm_core::code_query::QueryError{code:"stale_cursor".into(),message:"changed".into()};
+        assert_eq!(visual_delivery("owned",serde_json::json!({}),Err(error),&cancel)["error"]["code"],"stale_cursor");
+    }
 }
 
 #[tool_router]
@@ -386,13 +805,17 @@ impl FrankenmemoryServer {
         Self {
             provider,
             graph_store,
+            code_tasks:Arc::new(std::sync::Mutex::new(HashMap::new())),
+            code_queries:Arc::new(std::sync::Mutex::new(HashMap::new())),
+            code_query_lane:Arc::new(tokio::sync::Semaphore::new(1)),
+            code_query_secret:fm_core::code_query::new_query_secret(),
             tool_router: Self::tool_router(),
         }
     }
 
     #[tool(
         name = "capture",
-        description = "Capture one complete conversation turn. Automatic callers use user_text+assistant_text with capture_mode=raw_only, owner, workspace_id, source_event_id, and source_message_ids. Deliberate remember operations use capture_mode=manual."
+        description = "Capture one complete conversation turn. Automatic callers use user_text+assistant_text with capture_mode=raw_only, candidate, or review_only plus owner/workspace provenance. review_only always leaves eligible content pending for human approval. Deliberate remember operations use capture_mode=manual."
     )]
     async fn capture(
         &self,
@@ -418,9 +841,12 @@ impl FrankenmemoryServer {
                 "candidate".into()
             }
         });
-        if !matches!(capture_mode.as_str(), "raw_only" | "candidate" | "manual") {
+        if !matches!(
+            capture_mode.as_str(),
+            "raw_only" | "candidate" | "review_only" | "manual"
+        ) {
             return Err(rmcp::ErrorData::invalid_params(
-                "capture_mode must be raw_only|candidate|manual",
+                "capture_mode must be raw_only|candidate|review_only|manual",
                 None,
             ));
         }
@@ -439,6 +865,9 @@ impl FrankenmemoryServer {
         };
         if let Some(object) = metadata.as_object_mut() {
             object.insert("capture_mode".into(), capture_mode.into());
+            if let Some(source_type) = params.source_type {
+                object.insert("source_type".into(), source_type.into());
+            }
             if let Some(category) = params.category.as_deref() {
                 object.insert("category".into(), category.into());
             }
@@ -503,6 +932,45 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "update_candidate",
+        description = "Edit one still-pending admission candidate in its exact owner/workspace scope without publishing it."
+    )]
+    async fn update_candidate(
+        &self,
+        Parameters(params): Parameters<CandidateUpdateParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("update_candidate")?;
+        let scope = request_scope(Some(params.owner), Some(params.workspace_id), false)?;
+        let kind = params.category.as_deref().and_then(parse_memory_kind);
+        if params.category.is_some() && kind.is_none() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "unsupported memory category",
+                None,
+            ));
+        }
+        let candidate = self
+            .provider
+            .update_candidate(
+                &params.id,
+                &scope.owner,
+                &scope.workspace_id,
+                &params.content,
+                kind,
+                params.reason.as_deref().unwrap_or("edited_by_user"),
+            )
+            .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?;
+        let candidate = candidate.ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                "pending candidate not found in this scope or edit was rejected",
+                None,
+            )
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"updated": true, "candidate": candidate}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "review_candidate",
         description = "Accept or reject one candidate. Owner and workspace are mandatory; acceptance creates the only curated record and embedding."
     )]
@@ -510,6 +978,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<CandidateReviewParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("review_candidate")?;
         let scope = request_scope(Some(params.owner), Some(params.workspace_id), false)?;
         let curated_id = self
             .provider
@@ -535,6 +1004,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<IngestAuthoredParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("ingest_authored")?;
         let scope = request_scope(params.owner, params.workspace_id, true)?;
         let sections: Vec<(String, String)> = params
             .sections
@@ -582,12 +1052,15 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<MemoryQualityParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if params.rebuild_graph_fts.unwrap_or(false) {
+            reject_agent_bridge_internal_tool("memory_quality rebuild")?;
+        }
         let result = if params.rebuild_graph_fts.unwrap_or(false) {
             self.provider.rebuild_graph_cue_fts()
         } else {
             self.provider.quality_status()
         }
-        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
         )]))
@@ -595,12 +1068,13 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "owner_lifecycle",
-        description = "Privileged owner-scoped lifecycle operation. action=stats counts every memory tier; action=purge atomically removes the authenticated owner's tiers and graph; action=rename atomically moves them to new_owner."
+        description = "Privileged owner-scoped lifecycle operation. reset_preview returns exact count/fingerprint snapshots for selected memories, graph, or ingest components; reset_commit atomically validates that snapshot and erases it. Memories defensively expands to its graph and ingest dependency closure."
     )]
     async fn owner_lifecycle(
         &self,
         Parameters(params): Parameters<OwnerLifecycleParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("owner_lifecycle")?;
         let scope = request_scope(params.owner, params.workspace_id, false)?;
         let result = match params.action.as_str() {
             "stats" => self.graph_store.owner_counts(&scope.owner),
@@ -611,16 +1085,235 @@ impl FrankenmemoryServer {
                 })?;
                 self.graph_store.rename_owner(&scope.owner, new_owner)
             }
+            "reset_preview" | "reset_commit" => self.graph_store.reset_owner(
+                &params.action,
+                &scope.owner,
+                &params.components,
+                params.expected_counts.as_ref(),
+            ),
             _ => {
                 return Err(rmcp::ErrorData::invalid_params(
-                    "action must be stats|purge|rename",
+                    "action must be stats|purge|rename|reset_preview|reset_commit",
                     None,
                 ));
             }
         }
-        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(
             result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_retention",
+        description = "Get, set, preview expiry, expire, or query expiry status for bounded owner/workspace memory retention. preview_expire returns the exact current closure and token. Token-checked expire also requires a client-generated 32-hex operation_id for exact retry recovery; status returns absent or the committed closure. Raw, candidate, curated, and graph tiers are independent; omitted curated/graph retention means keep. Mutations are unavailable through an Agent bridge."
+    )]
+    async fn memory_retention(
+        &self,
+        Parameters(params): Parameters<MemoryRetentionParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = match params.action.as_str() {
+            "get" => serde_json::to_value(
+                self.graph_store
+                    .retention_policy(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+            ),
+            "set" => {
+                reject_agent_bridge_internal_tool("memory_retention set")?;
+                let current = self
+                    .graph_store
+                    .retention_policy(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+                let policy = RetentionPolicy {
+                    raw_days: params.raw_days.unwrap_or(current.raw_days),
+                    candidate_days: params.candidate_days.unwrap_or(current.candidate_days),
+                    curated_days: if params.clear_curated_days {
+                        None
+                    } else {
+                        params.curated_days.or(current.curated_days)
+                    },
+                    graph_days: if params.clear_graph_days {
+                        None
+                    } else {
+                        params.graph_days.or(current.graph_days)
+                    },
+                    recovery_seconds: params.recovery_seconds.unwrap_or(current.recovery_seconds),
+                };
+                serde_json::to_value(
+                    self.graph_store
+                        .set_retention_policy(&scope.owner, &scope.workspace_id, &policy)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            "preview_expire" => serde_json::to_value(
+                self.graph_store
+                    .preview_expire_retention(&scope.owner, &scope.workspace_id)
+                    .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+            ),
+            "expire" => {
+                reject_agent_bridge_internal_tool("memory_retention expire")?;
+                let closure = match (
+                    params.preview_token.as_deref(),
+                    params.operation_id.as_deref(),
+                ) {
+                    (Some(token), Some(operation_id)) => self
+                        .graph_store
+                        .expire_retention_with_operation(
+                            &scope.owner,
+                            &scope.workspace_id,
+                            token,
+                            operation_id,
+                        )
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                    (None, None) => self
+                        .graph_store
+                        .expire_retention(&scope.owner, &scope.workspace_id)
+                        .map_err(|error| rmcp::ErrorData::internal_error(error, None))?,
+                    (Some(_), None) => {
+                        return Err(rmcp::ErrorData::invalid_params(
+                            "operation_id is required with preview_token",
+                            None,
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        return Err(rmcp::ErrorData::invalid_params(
+                            "preview_token is required with operation_id",
+                            None,
+                        ));
+                    }
+                };
+                serde_json::to_value(closure)
+            }
+            "status" => {
+                let operation_id = params.operation_id.as_deref().ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .retention_operation_status(&scope.owner, &scope.workspace_id, operation_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            _ => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "action must be get|set|preview_expire|expire|status",
+                    None,
+                ));
+            }
+        }
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_forget",
+        description = "Preview or commit a provenance-closure forget, restore it within the configured recovery window, or query an operation status. Commit requires the exact preview token plus a client-generated 32-hex operation_id, making transport retries idempotent. All actions are unavailable through an Agent bridge."
+    )]
+    async fn memory_forget(
+        &self,
+        Parameters(params): Parameters<MemoryForgetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("memory_forget")?;
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = match params.action.as_str() {
+            "preview" => {
+                let selector = forget_selector(params.selector_kind.as_deref(), params.selector)?;
+                serde_json::to_value(
+                    self.graph_store
+                        .preview_forget(&scope.owner, &scope.workspace_id, selector)
+                        .map_err(lifecycle_error)?,
+                )
+            }
+            "commit" => {
+                let selector = forget_selector(params.selector_kind.as_deref(), params.selector)?;
+                let token = params.preview_token.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("preview_token is required", None)
+                })?;
+                let operation_id = params.operation_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .commit_forget_with_operation(
+                            &scope.owner,
+                            &scope.workspace_id,
+                            selector,
+                            &token,
+                            &operation_id,
+                        )
+                        .map_err(lifecycle_error)?,
+                )
+            }
+            "status" => {
+                let operation_id = params.operation_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("operation_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .forget_operation_status(&scope.owner, &scope.workspace_id, &operation_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            "restore" => {
+                let tombstone_id = params.tombstone_id.ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params("tombstone_id is required", None)
+                })?;
+                serde_json::to_value(
+                    self.graph_store
+                        .restore_forget(&scope.owner, &scope.workspace_id, &tombstone_id)
+                        .map_err(|error| rmcp::ErrorData::invalid_params(error, None))?,
+                )
+            }
+            _ => {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "action must be preview|commit|status|restore",
+                    None,
+                ));
+            }
+        }
+        .map_err(|error| rmcp::ErrorData::internal_error(error.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_export",
+        description = "Export the authenticated owner/workspace memory tiers with provenance, trust, policy, graph nodes, and non-sensitive tombstone metadata. Unavailable through an Agent bridge."
+    )]
+    async fn memory_export(
+        &self,
+        Parameters(params): Parameters<ScopedExportParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("memory_export")?;
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = self
+            .graph_store
+            .export_scope(&scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    #[tool(
+        name = "memory_explain",
+        description = "Explain one curated memory's source identity, revision, trust, evidence, and graph projection in the authenticated scope."
+    )]
+    async fn memory_explain(
+        &self,
+        Parameters(params): Parameters<MemoryExplainParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let result = self
+            .graph_store
+            .explain_memory(&params.id, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"explanation": result}).to_string(),
         )]))
     }
 
@@ -654,6 +1347,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<QuarantineMigrationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("quarantine_legacy_state")?;
         let result = self
             .provider
             .quarantine_legacy_state(
@@ -886,6 +1580,24 @@ impl FrankenmemoryServer {
     }
 
     #[tool(
+        name = "reopen_memory",
+        description = "Reopen one previously resolved question in the exact owner/workspace scope. Only archived unknown-kind records are eligible."
+    )]
+    async fn reopen_memory(
+        &self,
+        Parameters(params): Parameters<MemoryGetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        let reopened = self
+            .provider
+            .reopen_unknown(&params.id, &scope.owner, &scope.workspace_id)
+            .map_err(|error| rmcp::ErrorData::internal_error(error, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({"id": params.id, "reopened": reopened}).to_string(),
+        )]))
+    }
+
+    #[tool(
         name = "delete_memory",
         description = "Delete one curated memory by id within the owner/workspace scope."
     )]
@@ -911,6 +1623,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<GraphUpsertParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("graph_upsert")?;
         let scope = request_scope(params.owner, params.workspace_id, false)?;
         let input = fm_core::graph::GraphUpsertInput {
             nodes: params.nodes,
@@ -1071,59 +1784,320 @@ impl FrankenmemoryServer {
         )]))
     }
 
+    #[tool(name="code_query",description="Private app-broker code-only bounded read jobs: start/poll/cancel. Never admits, rebuilds, erases or changes Trust. Not exposed through the Agent memory bridge.")]
+    async fn code_query(&self,Parameters(params):Parameters<CodeQueryParams>)->Result<CallToolResult,rmcp::ErrorData>{
+        reject_agent_bridge_internal_tool("code_query")?;
+        let invalid=|message:&str|rmcp::ErrorData::invalid_params(message.to_owned(),None);
+        let authority_error=|error:String|if error.starts_with("denied:"){invalid("Code workspace authority unavailable")}else{rmcp::ErrorData::internal_error("Code workspace authority unavailable",None)};
+        let binding:fm_core::code::WorkspaceBinding=serde_json::from_value(params.binding.clone()).map_err(|_|invalid("Invalid trusted code binding"))?;
+        let visual=visual_request(&params,&binding.origin)?;
+        let scope=request_scope(Some(binding.owner.clone()),Some(binding.workspace_id.clone()),false)?;
+        let binding_key=query_binding_key(&binding);
+        let payload=match params.action.as_str(){
+            "start"=>{
+                let query:Option<fm_core::code_query::CodeQuery>=if visual.is_some(){None}else{
+                    let query=serde_json::from_value(params.query.ok_or_else(||invalid("Code query required"))?).map_err(|_|invalid("Invalid public code query"))?;
+                    fm_core::code_query::validate_query(&query).map_err(|_|invalid("Code query exceeds its finite contract"))?;Some(query)
+                };
+                let source_claim:Option<fm_core::code_evidence::SourceClaim>=params.source_claim.map(serde_json::from_value).transpose().map_err(|_|invalid("Invalid private source claim"))?;
+                if params.read_fence_only && source_claim.is_some(){return Err(invalid("Read fence cannot carry source claims"));}
+                let read_fence_only=params.read_fence_only;
+                if let Some(claim)=&source_claim{
+                    if query.as_ref().is_none_or(|q|q.expected_receipt.is_none()) || !matches!(&claim.predicate,fm_core::code_evidence::SourcePredicate::ExactText{text} if text.len()<=32768){return Err(invalid("Expected receipt and bounded Files ExactText claim required"));}
+                }
+                // Scheduling discloses no evidence. The worker reacquires the
+                // original exclusive authority fence before any snapshot/read.
+                binding.validate().map_err(authority_error)?;
+                let token=format!("query_{}",generate_id());let cancel=Arc::new(std::sync::atomic::AtomicBool::new(false));
+                {
+                    let mut tasks=self.code_queries.lock().unwrap();
+                    if tasks.values().filter(|t|t.result.is_none()).count()>=4{return Err(rmcp::ErrorData::invalid_params("Code query capacity exhausted",Some(serde_json::json!({"code":"busy"}))));}
+                    let mut completed:Vec<_>=tasks.iter().filter_map(|(k,t)|t.completed.map(|at|(at,k.clone()))).collect();completed.sort();
+                    let remove=completed.len().saturating_sub(31);for(_,key)in completed.into_iter().take(remove){tasks.remove(&key);}
+                    tasks.insert(token.clone(),CodeQueryTask{binding_key,cancel:cancel.clone(),result:None,completed:None});
+                }
+                let store=self.graph_store.clone();let tasks=self.code_queries.clone();let job_token=token.clone();let secret=self.code_query_secret;let lane=self.code_query_lane.clone();
+                tokio::spawn(async move{
+                    #[cfg(feature="s03-fixtures")]
+                    let gate=fixture_queued_gate(&job_token).await;
+                    #[cfg(not(feature="s03-fixtures"))]
+                    let gate:Result<(),String>=Ok(());
+                    let result=if gate.is_err(){Err(fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code fixture gate failed".into()})}else{
+                        // Owned by the blocking worker, even if its async waiter
+                        // is dropped. No task-map lock or RPC queue is held.
+                        let mut visual_timing=visual.as_ref().and_then(|_|VisualTiming::begin(visual_timings_enabled(),&VISUAL_TIMING_RECORDS));
+                        let permit=lane.acquire_owned().await.expect("code query lane remains open");
+                        if let Some(timing)=&mut visual_timing{timing.lane_acquired();}
+                        let timing_token=job_token.clone();
+                        match tokio::task::spawn_blocking(move||{
+                            let _permit=permit;
+                            let _interactive=store.index_scheduler().interactive_activity();
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(fm_core::code_query::QueryError{code:"cancelled".into(),message:"Code query cancelled".into()});}
+                            if let Some(request)=visual{
+                                let work=||store.code_visual(&scope,&binding,&request,&cancel,&secret).and_then(|result|serde_json::to_value(result).map_err(|_|fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code map serialization unavailable".into()}));
+                                let result=if let Some(timing)=&visual_timing{timing.context.enter(work)}else{work()};
+                                if let Some(timing)=visual_timing{timing.emit(&timing_token,VisualTimingPhase::Worker);}
+                                return result;
+                            }
+                            let query=query.expect("validated evidence query or visual request");
+                            if read_fence_only{return store.code_read_fence(&scope,&binding,query.expected_receipt.as_ref()).map(|fence|serde_json::json!({"private_read_fence":fence,"receipt":null}));}
+                            let mut result=store.code_query(&scope,&binding,&query,&cancel,&secret)?;
+                            let mut value=serde_json::to_value(&result).map_err(|_|fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code serialization unavailable".into()})?;
+                            if let Some(claim)=source_claim{
+                                if cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(fm_core::code_query::QueryError{code:"cancelled".into(),message:"Code query cancelled".into()});}
+                                let(validation,bytes)=store.code_validate_source_measured(&scope,&binding,&result.receipt.as_ref().unwrap().evidence,&claim);
+                                result.cost.validation_bytes_read=bytes;
+                                value["cost"]["validation_bytes_read"]=serde_json::json!(bytes);
+                                value["source_validation"]=match validation{Ok(v)=>serde_json::to_value(v).unwrap(),Err(e)=>serde_json::json!({"state":"unavailable","reason":"Current source validation unavailable","error_code":e.code})};
+                                store.code_query_check(&scope,&binding,result.receipt.as_ref().unwrap())?;
+                            }
+                            if cancel.load(std::sync::atomic::Ordering::Relaxed){return Err(fm_core::code_query::QueryError{code:"cancelled".into(),message:"Code query cancelled".into()});}
+                            Ok(value)
+                        }).await{
+                            Ok(result)=>result.and_then(|v|serde_json::to_value(v).map_err(|_|fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code query serialization failed".into()})),
+                            Err(_)=>Err(fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code query worker failed".into()}),
+                        }
+                    };
+                    #[cfg(feature="s03-fixtures")]
+                    let rejected=result.is_err();
+                    {
+                        let mut tasks=tasks.lock().unwrap();
+                        if let Some(task)=tasks.get_mut(&job_token){
+                            task.result=Some(if task.cancel.load(std::sync::atomic::Ordering::Relaxed){Err(fm_core::code_query::QueryError{code:"cancelled".into(),message:"Code query cancelled".into()})}else{result});task.completed=Some(std::time::Instant::now());
+                        }
+                        let mut completed:Vec<_>=tasks.iter().filter_map(|(k,t)|t.completed.map(|at|(at,k.clone()))).collect();completed.sort();
+                        let remove=completed.len().saturating_sub(32);for(_,key)in completed.into_iter().take(remove){tasks.remove(&key);}
+                    }
+                    #[cfg(feature="s03-fixtures")]
+                    fixture_finished(&job_token,rejected);
+                });
+                serde_json::json!({"state":"running","token":token})
+            }
+            "poll"|"cancel"=>{
+                let token=params.token.ok_or_else(||invalid("Code query token required"))?;
+                if token.len()>128{return Err(invalid("Invalid code query token"));}
+                if params.action=="cancel"{binding.validate_cleanup().map_err(authority_error)?;}
+                // Clone bounded completed payload, then release task lock before
+                // policy/SQLite checks. No lock order inversion with a worker.
+                let(result,cancel)={let mut tasks=self.code_queries.lock().unwrap();let task=tasks.get_mut(&token).filter(|t|t.binding_key==binding_key).ok_or_else(||invalid("Code query token unavailable"))?;
+                    let result=if params.action=="cancel"{task.cancel.store(true,std::sync::atomic::Ordering::Relaxed);None}else if task.cancel.load(std::sync::atomic::Ordering::Relaxed){Some(Err(fm_core::code_query::QueryError{code:"cancelled".into(),message:"Code query cancelled".into()}))}else{task.result.clone()};(result,task.cancel.clone())
+                };
+                if params.action=="cancel"{
+                    serde_json::json!({"state":"cancelled","token":token,"error":{"code":"cancelled","message":"Code query cancelled"}})
+                }else{
+                    // Completed disclosure also uses the lane: never wait for
+                    // a worker's exclusive fence inside the single RPC owner.
+                    // While occupied, disclose only authenticated running state.
+                    let permit=if result.is_some(){match self.code_query_lane.clone().try_acquire_owned(){
+                        Ok(permit)=>Some(permit),
+                        Err(_)=>{binding.validate().map_err(authority_error)?;return Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"state":"running","token":token}).to_string())]));}
+                    }}else{None};
+                    if result.is_none() {
+                        // A running status carries no evidence. Validate current
+                        // access without contending with the worker's exclusive
+                        // authority fence while it captures a bounded snapshot.
+                        // Completed payloads still require the original fence
+                        // and receipt/head recheck below before disclosure.
+                        binding.validate().map_err(authority_error)?;
+                    } else if !matches!(&result,Some(Ok(value)) if value.get("mode").is_some()) {
+                        let guard=binding.publication_guard().map_err(authority_error)?;drop(guard);
+                    }
+                    match result{
+                        None=>serde_json::json!({"state":"running","token":token}),
+                        Some(Err(error))=>serde_json::json!({"state":"failed","token":token,"error":error}),
+                        Some(Ok(value))=>{
+                            if value.get("mode").is_some(){
+                                // Preview has no evidence receipt. Its bounded
+                                // inventory fence must run on a blocking worker,
+                                // not the async RPC executor or task-map lock.
+                                let result:fm_core::code_visual::VisualResult=serde_json::from_value(value.clone()).map_err(|_|invalid("Code map result unavailable"))?;
+                                let authority=match result{fm_core::code_visual::VisualResult::Map(r)=>r.authority,fm_core::code_visual::VisualResult::Selection(r)=>r.authority};
+                                let store=self.graph_store.clone();let current_binding=binding.clone();let current_scope=scope.clone();
+                                let check_cancel=cancel.clone();
+                                // Delivery uses try_acquire above: it never
+                                // waits inside this RPC for a busy lane. This
+                                // record's lane_wait_ns is therefore zero;
+                                // running polls/backoff are not hidden here.
+                                let timing=VisualTiming::begin(visual_timings_enabled(),&VISUAL_TIMING_RECORDS);
+                                let timing_token=token.clone();
+                                let checked=tokio::task::spawn_blocking(move||{
+                                    let _permit=permit;
+                                    let _interactive=store.index_scheduler().interactive_activity();
+                                    let work=||store.code_visual_check(&current_scope,&current_binding,&authority,&check_cancel);
+                                    let result=if let Some(timing)=&timing{timing.context.enter(work)}else{work()};
+                                    if let Some(timing)=timing{timing.emit(&timing_token,VisualTimingPhase::Delivery);}
+                                    result
+                                }).await.unwrap_or_else(|_|Err(fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code map delivery unavailable".into()}));
+                                return Ok(CallToolResult::success(vec![Content::text(visual_delivery(&token,value,checked,&cancel).to_string())]));
+                            }
+                            let _permit=permit;
+                            let _interactive=self.graph_store.index_scheduler().interactive_activity();
+                            if let Some(expected_fence)=value["private_read_fence"].as_str(){
+                                let current=self.graph_store.code_read_fence(&scope,&binding,None).map_err(|_|invalid("Code read authority or admission changed"))?;
+                                if current!=expected_fence{return Err(invalid("Code read admission or head changed"));}
+                                return Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"state":"completed","token":token,"result":value}).to_string())]));
+                            }
+                            let receipt:fm_core::code_query::QueryReceipt=serde_json::from_value(value["receipt"].clone()).map_err(|_|invalid("Code result receipt unavailable"))?;
+                            self.graph_store.code_query_check(&scope,&binding,&receipt).map_err(|_|invalid("Code result scope or generation changed"))?;
+                            serde_json::json!({"state":"completed","token":token,"result":value})
+                        }
+                    }
+                }
+            }
+            _=>return Err(invalid("Unknown read-only code job action")),
+        };
+        Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
+    }
+
+    #[tool(name="code_index_scheduler",description="Private app-owner indexing CPU ceiling/readback. Status/configuration never starts an index or worker. Not an agent operation.")]
+    async fn code_index_scheduler(&self,Parameters(params):Parameters<CodeIndexSchedulerParams>)->Result<CallToolResult,rmcp::ErrorData>{
+        reject_agent_bridge_internal_tool("code_index_scheduler")?;
+        let request=params.request();
+        let status=self.graph_store.index_scheduler().request(&request).map_err(|error|rmcp::ErrorData::invalid_params(error,None))?;
+        Ok(CallToolResult::success(vec![Content::text(serde_json::to_string(&status).map_err(|_|rmcp::ErrorData::internal_error("Scheduler serialization unavailable",None))?)]))
+    }
+
     #[tool(
         name = "code_index",
-        description = "OPT-IN code graph. action=index parses a codebase (Rust/Python/TypeScript) into symbols, imports and name-matched call edges — nothing is ever indexed without this explicit call. action=status reports file/symbol counts, action=remove deletes the codebase's entire namespace, action=impact lists files transitively importing rel_path (blast radius). Explore results with graph_walk."
+        description = "App-only admitted code index lifecycle: ensure queues one coalesced background verification/build, status reads progress and prior ready head, release drops one subscriber, cancel explicitly fences a job, remove atomically erases the workspace code scope, and admit explicitly renews erased admission. Source languages Rust/Python/TypeScript/TSX; failed prior files are excluded with coverage. Legacy index/stale actions are unavailable; legacy status/impact are bounded metadata reads. Never available on Agent memory bridge."
     )]
     async fn code_index(
         &self,
         Parameters(params): Parameters<CodeIndexParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let scope = request_scope(params.owner, params.workspace_id, false)?;
+        reject_agent_bridge_internal_tool("code_index")?;
+        let scope = request_scope(params.owner.clone(), params.workspace_id.clone(), false)?;
         let err = |m: String| rmcp::ErrorData::invalid_params(m, None);
         let ierr = |m: String| rmcp::ErrorData::internal_error(m, None);
+        if matches!(params.action.as_str(),"ensure"|"admit"|"release"|"cancel") || params.root.is_some() || params.owner_subject_id.is_some() {
+            let cleanup=matches!(params.action.as_str(),"release"|"cancel"|"remove");
+            let binding=fm_core::code::WorkspaceBinding {
+                owner:scope.owner.clone(),workspace_id:scope.workspace_id.clone(),
+                owner_subject_id:params.owner_subject_id.ok_or_else(||err("owner_subject_id required".into()))?,
+                location_id:params.location_id.ok_or_else(||err("location_id required".into()))?,
+                workspace_revision:params.workspace_revision.ok_or_else(||err("workspace_revision required".into()))?,
+                policy_generation:params.policy_generation.ok_or_else(||err("policy_generation required".into()))?,
+                root:if cleanup {params.root.unwrap_or_default()} else {params.root.ok_or_else(||err("root required".into()))?}.into(),
+                origin:params.origin.ok_or_else(||err("origin required".into()))?,
+                subscriber_id:params.subscriber_id.ok_or_else(||err("subscriber_id required".into()))?,
+                authority_expires_unix_ms:params.authority_expires_unix_ms,
+            };
+            let mut payload=if cleanup {
+                let checkouts=self.graph_store.code_workspace_checkouts(&scope,&binding).map_err(lifecycle_error)?;
+                if params.action=="remove" {
+                    self.graph_store.code_workspace_remove(&scope,&binding).map_err(lifecycle_error)?;
+                }
+                for checkout in &checkouts {
+                    let key=code_task_key(&scope,checkout);
+                    if params.action=="release" {
+                        if let Some(task)=self.code_tasks.lock().unwrap().get_mut(&key){task.subscribers.remove(&binding.subscriber_id);}
+                    } else if params.action=="cancel" {
+                        self.graph_store.code_workspace_cancel(&scope,checkout).map_err(lifecycle_error)?;
+                        if let Some(task)=self.code_tasks.lock().unwrap().get_mut(&key){task.cancel.store(true,std::sync::atomic::Ordering::Release);task.running=false;task.token=format!("cancelled_{}",generate_id());task.ticket=None;}
+                    } else {
+                        if let Some(task)=self.code_tasks.lock().unwrap().get_mut(&key){task.cancel.store(true,std::sync::atomic::Ordering::Release);task.running=false;task.token=format!("erased_{}",generate_id());task.ticket=None;task.subscribers.clear();}
+                    }
+                }
+                self.graph_store.index_scheduler().wake();
+                serde_json::json!({"lifecycle":if params.action=="remove"{"erased"}else if params.action=="cancel"{"cancelled"}else{"released"},"checkout_id":if checkouts.len()==1{checkouts.first()}else{None},"error":null})
+            } else if params.action=="status" {
+                self.graph_store.code_workspace_status(&scope,&binding).map_err(lifecycle_error)?
+            } else if params.action=="ensure" || params.action=="admit" {
+                let payload=self.graph_store.code_workspace_prepare(&scope,&binding,params.action=="admit").map_err(lifecycle_error)?;
+                let checkout=payload["checkout_id"].as_str().ok_or_else(||ierr("missing checkout receipt".into()))?.to_string();
+                let key=code_task_key(&scope,&checkout);
+                let ticket=fm_core::code::CodeWorkTicket{checkout_id:checkout,admission_epoch:payload["admission_epoch"].as_i64().ok_or_else(||ierr("missing epoch".into()))?,config_fingerprint:payload["config_fingerprint"].as_str().ok_or_else(||ierr("missing fingerprint".into()))?.into(),policy_generation:binding.policy_generation,workspace_revision:binding.workspace_revision};
+                let token=format!("task_{}",generate_id());
+                let start={
+                    let mut tasks=self.code_tasks.lock().unwrap();
+                    let task=tasks.entry(key.clone()).or_default();
+                    task.subscribers.insert(binding.subscriber_id.clone());
+                    if task.running && task.ticket.as_ref()==Some(&ticket){None}else{
+                        task.cancel.store(true,std::sync::atomic::Ordering::Release);
+                        task.cancel=Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        task.running=true;task.token=token.clone();task.ticket=Some(ticket.clone());task.error=None;
+                        // Snapshot the token's cancellation handle under the
+                        // same lock; a concurrent successor must not lend its
+                        // uncancelled handle to this older admission.
+                        Some(task.cancel.clone())
+                    }
+                };
+                if let Some(cancel)=start {
+                    let scheduler=self.graph_store.index_scheduler();scheduler.wake();
+                    let descriptor_bytes=binding.owner.len()+binding.owner_subject_id.len()+binding.workspace_id.len()+binding.location_id.len()+binding.subscriber_id.len()+binding.root.as_os_str().len()+ticket.checkout_id.len()+ticket.config_fingerprint.len()+256;
+                    let admission=match scheduler.reserve(descriptor_bytes){Ok(admission)=>admission,Err(error)=>{if let Some(task)=self.code_tasks.lock().unwrap().get_mut(&key){if task.token==token{task.running=false;task.error=Some(error.clone());}}return Err(lifecycle_error(error));}};
+                    let store=self.graph_store.clone();let tasks=self.code_tasks.clone();let job_scope=scope.clone();let job_binding=binding.clone();
+                    tokio::spawn(async move {
+                        #[cfg(feature="s03-fixtures")]
+                        let gate_error=fixture_queued_gate(&token).await.err();
+                        #[cfg(not(feature="s03-fixtures"))]
+                        let gate_error:Option<String>=None;
+                        let private_root=job_binding.root.to_string_lossy().to_string();
+                        let error=if gate_error.is_some(){gate_error}else {
+                            match admission.wait(&cancel).await{
+                                Err(error)=>Some(error),
+                                Ok(cohort)=>{let result=tokio::task::spawn_blocking(move||cohort.run(||{if cancel.load(std::sync::atomic::Ordering::Acquire){return Err("cancelled: queued indexing".into());}store.code_index_bound(&job_scope,&job_binding,&ticket)})).await;
+                                    match result{Ok(Ok(_))=>None,Ok(Err(error))=>Some(error.replace(&private_root,"[root]")),Err(_)=>Some("index_worker_failed: coordinator panic".into())}
+                                }
+                            }
+                        };
+                        #[cfg(feature="s03-fixtures")]
+                        let rejected=error.is_some();
+                        if let Some(task)=tasks.lock().unwrap().get_mut(&key){if task.token==token {task.running=false;task.error=error;}}
+                        #[cfg(feature="s03-fixtures")]
+                        fixture_finished(&token,rejected);
+                    });
+                }
+                payload
+            } else {return Err(err("invalid lifecycle action".into()));};
+            if let Some(checkout)=payload["checkout_id"].as_str().map(str::to_owned) {
+                let key=code_task_key(&scope,&checkout);
+                if let Some(task)=self.code_tasks.lock().unwrap().get(&key) {
+                    if task.running && (matches!(params.action.as_str(),"ensure"|"admit") || !matches!(payload["lifecycle"].as_str(),Some("erased"|"released"|"cancelled"|"building"))) {payload["lifecycle"]=serde_json::json!("queued");payload["freshness"]=serde_json::json!(if payload["head_generation"].is_null(){"missing"}else{"stale"});}
+                    payload["task_token"]=serde_json::json!(task.token);
+                    if let Some(error)=&task.error {payload["error"]=serde_json::json!({"code":"index_job_failed","message":error});}
+                    payload["subscribers"]=serde_json::json!(task.subscribers.len());
+                }
+            }
+            scrub_private_root(&mut payload,binding.root.to_str().unwrap_or(""));
+            return Ok(CallToolResult::success(vec![Content::text(payload.to_string())]));
+        }
         let payload = match params.action.as_str() {
             "index" => {
-                let root = std::path::Path::new(&params.path);
-                if !root.is_absolute() || !root.is_dir() {
-                    return Err(err(format!(
-                        "path must be an existing absolute directory, got {}",
-                        params.path
-                    )));
-                }
-                let result = self
-                    .graph_store
-                    .code_index(&scope, root)
-                    .map_err(|e| ierr(format!("code index failed: {e}")))?;
-                serde_json::to_value(&result).unwrap_or_default()
+                return Err(err("legacy index unavailable: use admitted ensure lifecycle".into()));
             }
             "status" => {
                 let (files, symbols, last) = self
                     .graph_store
                     .code_status(&scope, &params.path)
                     .map_err(|e| ierr(format!("status failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "files": files, "symbols": symbols, "last_indexed": last })
+                let head = self
+                    .graph_store
+                    .code_index_head(&scope, &params.path)
+                    .map_err(|e| ierr(format!("status head failed: {e}")))?;
+                serde_json::json!({
+                    "repository_id": head.as_ref().map(|h|h.source_snapshot.repository_id.clone()),
+                    "files": files,
+                    "symbols": symbols,
+                    "last_indexed": last,
+                    "ready_generation": head,
+                    "code_index_lease_seconds": self.graph_store.code_index_lease_seconds(),
+                })
             }
             "stale" => {
-                let root = std::path::Path::new(&params.path);
-                if !root.is_absolute() || !root.is_dir() {
-                    return Err(err(format!(
-                        "path must be an existing absolute directory, got {}",
-                        params.path
-                    )));
-                }
-                let result = self
-                    .graph_store
-                    .code_stale(&scope, root)
-                    .map_err(|e| ierr(format!("stale check failed: {e}")))?;
-                serde_json::to_value(&result).unwrap_or_default()
+                return Err(err("legacy stale unavailable: use admitted ensure/status lifecycle".into()));
             }
             "remove" => {
                 let removed = self
                     .graph_store
                     .code_remove(&scope, &params.path)
                     .map_err(|e| ierr(format!("remove failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "files_removed": removed })
+                let repository_id = std::path::Path::new(&params.path)
+                    .is_dir()
+                    .then(|| fm_core::code::repository_id(std::path::Path::new(&params.path)).ok())
+                    .flatten()
+                    .unwrap_or_else(|| params.path.clone());
+                serde_json::json!({ "repository_id": repository_id, "files_removed": removed })
             }
             "impact" => {
                 let rel = params
@@ -1131,9 +2105,20 @@ impl FrankenmemoryServer {
                     .ok_or_else(|| err("action=impact requires 'rel_path'".into()))?;
                 let impacted = self
                     .graph_store
-                    .code_impact(&scope, &params.path, &rel, params.max_depth.unwrap_or(4))
+                    .code_impact_bounded(
+                        &scope,
+                        &params.path,
+                        &rel,
+                        params.max_depth.unwrap_or(4),
+                        params.limit.unwrap_or(100).min(1000),
+                    )
                     .map_err(|e| ierr(format!("impact failed: {e}")))?;
-                serde_json::json!({ "codebase": params.path, "rel_path": rel, "impacted_files": impacted })
+                let repository_id = std::path::Path::new(&params.path)
+                    .is_dir()
+                    .then(|| fm_core::code::repository_id(std::path::Path::new(&params.path)).ok())
+                    .flatten()
+                    .unwrap_or_else(|| params.path.clone());
+                serde_json::json!({ "repository_id": repository_id, "rel_path": rel, "impacted_files": impacted.impacted_files, "total": impacted.total, "truncated": impacted.truncated })
             }
             other => {
                 return Err(err(format!(
@@ -1154,6 +2139,7 @@ impl FrankenmemoryServer {
         &self,
         Parameters(params): Parameters<GroomParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        reject_agent_bridge_internal_tool("groom")?;
         let scope = request_scope(params.owner, params.workspace_id, true)?;
         let op = match params.op.as_str() {
             "decay" => GroomOp::Decay,
@@ -1183,6 +2169,10 @@ impl FrankenmemoryServer {
             "records_archived": result.records_archived,
             "records_merged": result.records_merged,
             "records_reflected": result.records_reflected,
+            "records_selected": result.records_selected,
+            "records_changed": result.records_changed,
+            "records_skipped": result.records_skipped,
+            "records_conflicted": result.records_conflicted,
             "alerts": result.alerts,
         });
 
@@ -1252,6 +2242,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let prepare_only = args.as_slice() == ["--prepare-database"];
+    if !args.is_empty() && !prepare_only {
+        return Err("usage: fm-mcp [--prepare-database]; FM_DB_PATH selects the absolute database".into());
+    }
     let config = FmConfig::default();
     let db_path = std::path::Path::new(&config.db_path);
     if !db_path.is_absolute() {
@@ -1260,10 +2255,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let store = Arc::new(SqliteStore::new(
-        &config.db_path,
-        config.embedding.dimensions,
-    )?);
+    let mut store = SqliteStore::new(&config.db_path, config.embedding.dimensions)?;
+    store
+        .set_code_index_lease_seconds(config.code_index.lease_seconds)
+        .map_err(|error| format!("invalid code-index configuration: {error}"))?;
+    let store = Arc::new(store);
     let (database_id, schema_version) = store.database_identity()?;
     if let Ok(expected) = std::env::var("FM_DB_ID") {
         if !expected.trim().is_empty() && expected.trim() != database_id {
@@ -1275,32 +2271,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    if prepare_only {
+        println!("{}", serde_json::json!({
+            "database_id": database_id,
+            "schema_version": schema_version,
+            "database_path": config.db_path,
+        }));
+        return Ok(());
+    }
     tracing::info!(database_id, schema_version, path = %config.db_path, "frankenmemory database ready");
-    // Real embeddings by DEFAULT: unset FM_EMBED_API_BASE means the local
-    // ollama endpoint baked into EmbeddingConfig::default(). If that isn't
-    // running, per-call embed errors degrade gracefully to vectorless
-    // records + FTS-only recall — honest, unlike hash pseudo-vectors.
-    // FM_EMBED_API_BASE=none opts into the deterministic hash embedder
-    // (offline tests, air-gapped machines).
-    let embed_mode = std::env::var("FM_EMBED_API_BASE").unwrap_or_default();
-    let embed: Arc<dyn EmbeddingClient> = if matches!(embed_mode.trim(), "none" | "noop" | "off") {
-        tracing::info!("embeddings: deterministic noop (FM_EMBED_API_BASE={embed_mode})");
-        Arc::new(NoopEmbeddingClient::new(config.embedding.dimensions))
-    } else {
-        tracing::info!(
-            "embeddings: http {} model={} dims={}",
-            config.embedding.api_base,
-            config.embedding.model,
-            config.embedding.dimensions
-        );
-        Arc::new(HttpEmbeddingClient::with_api_key(
-            &config.embedding.api_base,
-            &config.embedding.model,
-            config.embedding.dimensions,
-            config.embedding.cache_size,
-            config.embedding.api_key.clone(),
-        ))
-    };
+    // Curated/raw memory rows currently lack the immutable route, adapter,
+    // model, and dimension generation metadata required for safe provider
+    // rotation.  Fail closed and retain exact/FTS recall.  Document vectors
+    // use the fingerprinted Python generation schema and Open Clank's managed
+    // ``embeddings.create`` operation instead.
+    tracing::info!("embeddings: disabled for unfingerprinted curated-memory rows");
+    let embed: Arc<dyn EmbeddingClient> =
+        Arc::new(DisabledEmbeddingClient::new(config.embedding.dimensions));
     let provider = Arc::new(NativeProvider::new(store.clone(), embed, config));
 
     let server = FrankenmemoryServer::new(provider, store);

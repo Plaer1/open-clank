@@ -69,7 +69,7 @@ def _capture_openai_payload(
         )
 
     monkeypatch.setattr(llm_core.httpx, "post", fake_post)
-    result = llm_core.llm_call(
+    result = llm_core._legacy_llm_call(
         url,
         model,
         [{"role": "user", "content": "Say OK"}],

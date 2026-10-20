@@ -34,6 +34,14 @@ async function _checkUnprobed() {
   const isBlind = state._blindMode;
   let ok = 0, fail = 0;
   try {
+  let catalog = { items: [] };
+  try {
+    const response = await fetch(`${state.API_BASE}/api/models`, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Provider catalog unavailable');
+    catalog = await response.json();
+  } catch (_) {
+    catalog = { items: [] };
+  }
   for (const m of unprobed) {
     try {
       const _imageModelPrefixes = ['dall-e', 'gpt-image', 'chatgpt-image', 'stable-diffusion', 'sdxl', 'flux', 'midjourney'];
@@ -42,20 +50,18 @@ async function _checkUnprobed() {
         ok++;
         continue;
       }
-      const res = await fetch(`${state.API_BASE}/api/probe-selected`, {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ models: [{ endpoint_id: m.endpointId || '', model: m.model, endpoint: m.endpoint || '' }] }),
-      });
-      const data = await res.json();
-      const result = (data.results || [])[0];
-      if (result && result.status === 'ok') {
+      const available = (catalog.items || []).some(item =>
+        item.endpoint_id === (m.endpointId || '')
+        && ((item.models || []).includes(m.model)
+          || (item.catalog || []).some(entry => entry.model_id === m.model))
+      );
+      if (available) {
         state._probed.add(m.model);
         ok++;
       } else {
         fail++;
         const name = isBlind ? 'a model' : (m.name || m.model.split('/').pop());
-        if (uiModule) uiModule.showToast(`${name} failed: ${result?.error || 'unknown'}`, 5000);
+        if (uiModule) uiModule.showToast(`${name} is no longer in the managed provider catalog`, 5000);
       }
     } catch (e) {
       fail++;

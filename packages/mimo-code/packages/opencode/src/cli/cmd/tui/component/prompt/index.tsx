@@ -1,4 +1,4 @@
-import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes } from "@opentui/core"
+import { BoxRenderable, RGBA, TextareaRenderable, MouseEvent, PasteEvent, decodePasteBytes, TextAttributes } from "@opentui/core"
 import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
 import "opentui-spinner/solid"
 import path from "path"
@@ -16,15 +16,18 @@ import { MessageID, PartID } from "@/session/schema"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
-import { assign, expandPlaceholders } from "./part"
+import { assign, expandPlaceholders, resolvePromptCommand } from "./part"
 import { usePromptStash } from "./stash"
+import { clampStatusMessage } from "./footer"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useCommandDialog } from "../dialog-command"
 import { useLanguage } from "@tui/context/language"
 import { useRenderer, type JSX } from "@opentui/solid"
 import * as Editor from "@tui/util/editor"
+import * as Model from "@tui/util/model"
 import * as Voice from "@tui/util/voice"
+import * as VoiceEdit from "@tui/util/voice-edit"
 import { useExit } from "../../context/exit"
 import * as Clipboard from "../../util/clipboard"
 import type { AssistantMessage, FilePart, UserMessage } from "@mimo-ai/sdk/v2"
@@ -32,12 +35,16 @@ import { TuiEvent } from "../../event"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util"
 import { formatDuration } from "@/util/format"
+import { SessionRetry } from "@/session/retry"
 import { createColors, createFrames } from "../../ui/spinner.ts"
 import { useDialog } from "@tui/ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
+import { DialogPrompt } from "../../ui/dialog-prompt"
 import { useToast } from "../../ui/toast"
+import { createPress } from "../../ui/press"
 import { useKV } from "../../context/kv"
+import { useVisualMode } from "../../context/visual"
 import { createFadeIn } from "../../util/signal"
 import { useTextareaKeybindings } from "../textarea-keybindings"
 import { DialogSkill } from "../dialog-skill"
@@ -45,6 +52,11 @@ import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-worksp
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { DialogAgreement, FREE_AGREEMENT_KEY, FREE_MODEL_IDS } from "../dialog-agreement"
 import { useArgs } from "@tui/context/args"
+import {
+  isFreeApiModel,
+  isFreeApiSunset,
+  shouldBlockFreeApiRequest,
+} from "@tui/util/free-api-sunset"
 
 export type PromptProps = {
   sessionID?: string
@@ -93,10 +105,8 @@ let stashed: { prompt: PromptInfo; cursor: number } | undefined
 let activeVoice: {
   handle: Voice.StreamingHandle
   pending: number
-  appendText: (text: string) => void
-  setText: (text: string) => void
-  getPlainText: () => string
-  switchAgent: (name: string) => void
+  applyFromBase: (base: { value: string; range: VoiceEdit.EditorRange | null }, target: VoiceEdit.VoiceTextTarget) => void
+  getSnapshot: () => { value: string; range: VoiceEdit.EditorRange | null }
   submit: () => Promise<unknown>
   setState: (type: "listening" | "speaking" | "processing" | "finishing" | "idle") => void
   showError: (msg: string) => void
@@ -104,6 +114,7 @@ let activeVoice: {
 
 export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
+  let pickedSkill: string | undefined
   let anchor: BoxRenderable
   let autocomplete: AutocompleteRef
 
@@ -120,11 +131,13 @@ export function Prompt(props: PromptProps) {
   const history = usePromptHistory()
   const stash = usePromptStash()
   const command = useCommandDialog()
-  const t = useLanguage().t
+  const language = useLanguage()
+  const t = language.t
   const renderer = useRenderer()
   const { theme, syntax } = useTheme()
   const kv = useKV()
-  const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
+  const visual = useVisualMode()
+  const animationsEnabled = visual.motion
   const voiceEnabled = createMemo(() => kv.get("voice_enabled", false))
   const voiceSendEnabled = createMemo(() => kv.get("voice_send_command", false))
   const voiceControlEnabled = createMemo(() => kv.get("voice_control_enabled", false))
@@ -152,45 +165,76 @@ export function Prompt(props: PromptProps) {
     setVoiceElapsed(0)
   }
 
-  function voiceAppendText(text: string) {
+  /** Natural selection: highlight [start,end) and park the caret at end. */
+  function voicePlaceRange(value: string, range: VoiceEdit.EditorRange) {
     if (!input || input.isDestroyed) return
-    const current = store.prompt.input
-    if (current.length > 0 && /[.?!]$/.test(current) && text.length > 0 && text[0] !== " ") {
-      input.insertText(" " + text)
-      setStore("prompt", "input", current + " " + text)
+    VoiceEdit.placeNaturalSelection(input, value, range)
+  }
+
+  function voiceRewriteBuffer(text: string, caretIndex: number, selection?: VoiceEdit.EditorRange) {
+    if (!input || input.isDestroyed) return
+    // Full rewrite drops mention/paste extmarks — clear them with the buffer.
+    input.extmarks.clear()
+    setStore("extmarkToPartIndex", new Map())
+    setStore("prompt", {
+      input: text,
+      parts: [],
+    })
+    input.clear()
+    input.insertText(text)
+    if (selection && selection.start !== selection.end) {
+      voicePlaceRange(text, selection)
     } else {
-      input.insertText(text)
-      setStore("prompt", "input", current + text)
+      input.clearSelection()
+      input.cursorOffset = VoiceEdit.widthCaretFor(text, caretIndex)
     }
     setTimeout(() => {
       if (!input || input.isDestroyed) return
       input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
       renderer.requestRender()
     }, 0)
   }
 
-  function voiceSetText(text: string) {
+  /**
+   * Apply a voice target against a frozen base snapshot (value + range from
+   * request time). Insert on an unchanged buffer uses a surgical splice so
+   * paste/file extmarks survive; set/set_with_cursor (or a changed buffer)
+   * do a full rewrite.
+   */
+  function voiceApplyFromBase(
+    base: { value: string; range: VoiceEdit.EditorRange | null },
+    target: VoiceEdit.VoiceTextTarget,
+  ) {
     if (!input || input.isDestroyed) return
-    input.clear()
-    input.insertText(text)
-    setStore("prompt", "input", text)
-    setTimeout(() => {
-      if (!input || input.isDestroyed) return
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
-    }, 0)
+    if (target.kind === "insert" && input.plainText === base.value) {
+      const range = base.range ?? { start: base.value.length, end: base.value.length }
+      const w = VoiceEdit.widthSelectionFor(base.value, range)
+      if (range.start === range.end) {
+        input.clearSelection()
+        input.cursorOffset = w.start
+      } else {
+        input.setSelection(w.start, w.end)
+      }
+      input.insertText(target.text)
+      setStore("prompt", "input", input.plainText)
+      setTimeout(() => {
+        if (!input || input.isDestroyed) return
+        input.getLayoutNode().markDirty()
+        renderer.requestRender()
+      }, 0)
+      return
+    }
+    const range = base.range ?? { start: base.value.length, end: base.value.length }
+    const result = VoiceEdit.applyVoiceTarget(base.value, range, target)
+    voiceRewriteBuffer(result.text, result.caret, result.selection)
   }
 
-  function voiceGetPlainText() {
-    return store.prompt.input
-  }
-
-  function voiceSwitchAgent(name: string) {
-    const match = local.agent.list().find((x) => x.name.toLowerCase() === name.toLowerCase())
-    if (match) local.agent.set(match.name)
-    else toast.show({ message: t("tui.voice.error.unknown_agent", { name: name }), variant: "error", duration: 3000 })
+  function voiceGetSnapshot(): { value: string; range: VoiceEdit.EditorRange | null } {
+    if (!input || input.isDestroyed) return { value: store.prompt.input, range: null }
+    const value = input.plainText
+    // Unfocused caret may be a stale 0 — treat as no caret and fall back to full string.
+    if (!input.focused) return { value, range: null }
+    return { value, range: VoiceEdit.getEditorRange(input) }
   }
 
   function voiceSetState(type: "idle" | "listening" | "speaking" | "processing" | "finishing") {
@@ -201,10 +245,8 @@ export function Prompt(props: PromptProps) {
 
   // Wire module-level callbacks to current component instance
   if (activeVoice) {
-    activeVoice.appendText = voiceAppendText
-    activeVoice.setText = voiceSetText
-    activeVoice.getPlainText = voiceGetPlainText
-    activeVoice.switchAgent = voiceSwitchAgent
+    activeVoice.applyFromBase = voiceApplyFromBase
+    activeVoice.getSnapshot = voiceGetSnapshot
     activeVoice.submit = () => submit()
     activeVoice.setState = voiceSetState
     activeVoice.showError = (msg) => toast.show({ message: msg, variant: "error", duration: 3000 })
@@ -228,16 +270,17 @@ export function Prompt(props: PromptProps) {
       return
     }
     if (state === "finishing") return
-    // Start streaming — only validate the active mode's provider
+    // Start streaming — resolve both providers so /voice-control can switch mid-recording.
     const voiceConfig = sync.data.config.voice
     const resolved = Voice.resolveVoiceConfig(voiceConfig)
-    const activeConfig = voiceControlEnabled() ? resolved.control : resolved.asr
-    const creds = Voice.resolveCredentials(sync.data.provider, activeConfig)
-    if ("error" in creds) {
-      const vars = { provider: creds.providerID, model: creds.model }
+    const asrCreds = Voice.resolveCredentials(sync.data.provider, resolved.asr)
+    const controlCreds = Voice.resolveCredentials(sync.data.provider, resolved.control)
+    const initialCreds = voiceControlEnabled() ? controlCreds : asrCreds
+    if ("error" in initialCreds) {
+      const vars = { provider: initialCreds.providerID, model: initialCreds.model }
       const msg = !voiceConfig ? t("tui.voice.error.no_auth")
-        : creds.error === "not_found" ? t("tui.voice.error.provider_not_found", vars)
-        : creds.error === "no_url" ? t("tui.voice.error.no_url", vars)
+        : initialCreds.error === "not_found" ? t("tui.voice.error.provider_not_found", vars)
+        : initialCreds.error === "no_url" ? t("tui.voice.error.no_url", vars)
         : t("tui.voice.error.no_auth_provider", vars)
       toast.show({ message: msg, variant: "error" })
       return
@@ -250,10 +293,8 @@ export function Prompt(props: PromptProps) {
     const av: NonNullable<typeof activeVoice> = {
       handle: undefined!,
       pending: 0,
-      appendText: voiceAppendText,
-      setText: voiceSetText,
-      getPlainText: voiceGetPlainText,
-      switchAgent: voiceSwitchAgent,
+      applyFromBase: voiceApplyFromBase,
+      getSnapshot: voiceGetSnapshot,
       submit: () => submit(),
       setState: voiceSetState,
       showError: (msg) => toast.show({ message: msg, variant: "error", duration: 3000 }),
@@ -262,42 +303,59 @@ export function Prompt(props: PromptProps) {
     let voiceControlChain: Promise<void> = Promise.resolve()
 
     const handle = Voice.startStreaming({
+      // VAD breath window is fixed for this recording (1.2s control / 0.8s ASR).
+      // Mode switches mid-recording still apply to processing/model choice below.
+      minSilenceS: voiceControlEnabled() ? 1.2 : undefined,
       onSegment: (segment) => {
         av.pending++
         av.setState("processing")
+        const useControl = voiceControlEnabled()
+        const creds = useControl ? controlCreds : asrCreds
+        if ("error" in creds) {
+          av.showError(t("tui.voice.error.no_auth_provider", { provider: creds.providerID, model: creds.model }))
+          av.pending--
+          if (activeVoice === av && voiceState() !== "speaking")
+            av.setState(av.pending > 0 ? "processing" : "listening")
+          if (!activeVoice && av.pending <= 0) av.setState("idle")
+          return
+        }
 
-        if (voiceControlEnabled()) {
+        if (useControl) {
           voiceControlChain = voiceControlChain.then(async () => {
             try {
               if (!activeVoice) return
               av.setState("processing")
-              const currentText = av.getPlainText()
-              const currentAgent = local.agent.current()?.name ?? ""
-              const availableAgents = local.agent.list().map((x) => x.name)
+              const snap = av.getSnapshot()
+              const contextText = VoiceEdit.controlContextText(snap.value, snap.range)
 
               const ctrl = await Voice.processVoiceControl({
                 audio: segment.audio,
                 apiKey: creds.apiKey,
                 baseUrl: creds.baseUrl,
                 model: resolved.control.model,
-                currentText,
-                currentAgent,
-                availableAgents,
+                contextText,
                 sendEnabled: voiceSendEnabled(),
               })
 
-              if (ctrl) {
-                for (const action of ctrl.actions) {
-                  if (action.action === "edit") av.setText(action.text)
-                  else if (action.action === "send") {
-                    if (voiceSendEnabled() && av.getPlainText().trim()) await av.submit()
-                    else if (!av.getPlainText().trim()) av.showError(t("tui.voice.error.empty_send"))
-                  } else if (action.action === "agent") {
-                    av.switchAgent(action.agent)
+              if (ctrl.ok) {
+                // Drop stale mutations: user edited the prompt while the model was thinking.
+                const now = av.getSnapshot()
+                if (now.value === snap.value) {
+                  for (const action of ctrl.actions) {
+                    if (action.action === "insert") av.applyFromBase(snap, { kind: "insert", text: action.text })
+                    else if (action.action === "set") av.applyFromBase(snap, { kind: "set", text: action.text })
+                    else if (action.action === "set_with_cursor") av.applyFromBase(snap, { kind: "set_with_cursor", placement: action.placement })
+                    else if (action.action === "send") {
+                      const after = av.getSnapshot().value
+                      if (voiceSendEnabled() && after.trim()) await av.submit()
+                      else if (!after.trim()) av.showError(t("tui.voice.error.empty_send"))
+                    }
                   }
+                } else {
+                  av.showError(t("tui.voice.error.stale"))
                 }
               } else {
-                av.showError(t("tui.voice.error.network"))
+                av.showError(ctrl.reason === "protocol" ? t("tui.voice.error.protocol") : t("tui.voice.error.network"))
               }
             } finally {
               av.pending--
@@ -307,6 +365,7 @@ export function Prompt(props: PromptProps) {
             }
           }).catch(() => {})
         } else {
+          const asrSnap = av.getSnapshot()
           Voice.transcribeAudio({
             audio: segment.audio,
             apiKey: creds.apiKey,
@@ -314,10 +373,16 @@ export function Prompt(props: PromptProps) {
             model: resolved.asr.model,
           }).then((text) => {
             if (text) {
-              if (voiceSendEnabled() && Voice.SEND_RE.test(text.replace(/[\s。.!！？?，,]+$/g, "").trim())) {
-                av.submit()
+              // ASR has no send command — always dictate, including「发送」/"send it".
+              // Unchanged buffer → apply from request snapshot (caret/selection).
+              // Buffer changed mid-transcription → dictate at the end, never a live caret.
+              const now = av.getSnapshot()
+              if (now.value === asrSnap.value) {
+                const range = asrSnap.range ?? { start: asrSnap.value.length, end: asrSnap.value.length }
+                av.applyFromBase(asrSnap, VoiceEdit.asrInsertTarget(asrSnap.value, range, text))
               } else {
-                av.appendText(text.trim())
+                const endRange = { start: now.value.length, end: now.value.length }
+                av.applyFromBase({ value: now.value, range: endRange }, VoiceEdit.asrInsertTarget(now.value, endRange, text))
               }
             } else {
               av.showError(t("tui.voice.error.network"))
@@ -356,6 +421,8 @@ export function Prompt(props: PromptProps) {
     activeVoice = av
     setVoiceState("listening")
   }
+
+  const voicePress = createPress(() => void voiceToggle())
 
   const list = createMemo(() => props.placeholders?.normal ?? [])
   const shell = createMemo(() => props.placeholders?.shell ?? [])
@@ -461,19 +528,29 @@ export function Prompt(props: PromptProps) {
   const usage = createMemo(() => {
     if (!props.sessionID) return
     const msg = sync.data.message[props.sessionID]?.["main"] ?? []
+    // Resolve the window from the last measured assistant turn's model, matching
+    // the record `computeContextUsage` reads for the token count.
     const last = msg.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
     if (!last) return
-
-    const tokens =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    if (tokens <= 0) return
-
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
-    const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-    const cost = msg.reduce((sum, item) => sum + (item.role === "assistant" ? item.cost : 0), 0)
+    const win = Model.contextWindow(sync.data.config, model)
+    // A /rebuild boundary is a message carrying a `checkpoint` part (stored in
+    // sync.data.part, keyed by message id). Its `coveredUpTo` is the watermark it
+    // collapsed up to; computeContextUsage uses that (not message order) to decide
+    // the measured turn is stale and report pending until the next assistant turn.
+    const result = Model.computeContextUsage({
+      messages: msg,
+      window: win,
+      checkpointCoverage: (id) =>
+        (sync.data.part[id] ?? []).find((p) => p.type === "checkpoint")?.coveredUpTo,
+    })
+    if (!result) return
     return {
-      context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
-      cost: cost > 0 ? money.format(cost) : undefined,
+      // computeContextUsage owns the pending placeholder (it renders `—/<win>`
+      // so the footer stops asserting the pre-rebuild fill while keeping the
+      // frame), so `context` is the final string in every case — render it as-is.
+      context: result.context,
+      cost: result.cost > 0 ? money.format(result.cost) : undefined,
     }
   })
 
@@ -498,12 +575,25 @@ export function Prompt(props: PromptProps) {
     on(
       () => props.sessionID,
       () => {
+        pickedSkill = undefined
         setGhost("")
         setStore("placeholder", randomIndex(list().length))
       },
       { defer: true },
     ),
   )
+
+  createEffect(() => {
+    const text = store.prompt.input
+    if (!pickedSkill) return
+    const prefix = `/${pickedSkill}`
+    if (text !== prefix && !text.startsWith(prefix + " ") && !text.startsWith(prefix + "\n")) pickedSkill = undefined
+  })
+
+  // Derive sticky mode from whether session has messages
+  createEffect(() => {
+    local.agent.setSessionHasMessages(!!lastUserMessage())
+  })
 
   // Initialize agent/model/variant from last user message when session changes
   let syncedSessionID: string | undefined
@@ -513,7 +603,6 @@ export function Prompt(props: PromptProps) {
 
     if (sessionID !== syncedSessionID) {
       if (!sessionID || !msg) return
-
       syncedSessionID = sessionID
 
       // Only set agent if it's a primary agent (not a subagent)
@@ -696,6 +785,7 @@ export function Prompt(props: PromptProps) {
           dialog.replace(() => (
             <DialogSkill
               onSelect={(skill) => {
+                pickedSkill = skill
                 input.setText(`/${skill} `)
                 setStore("prompt", {
                   input: `/${skill} `,
@@ -772,7 +862,7 @@ export function Prompt(props: PromptProps) {
           toast.show({
             message: next ? t("tui.voice.control.enabled") : t("tui.voice.control.disabled"),
             variant: "info",
-            duration: 3000,
+            duration: 4500,
           })
         },
       },
@@ -1024,10 +1114,34 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
+    const clientSlashSubmission =
+      store.mode !== "shell" && trimmed.startsWith("/") && command.slashes().some((slash) => slash.display === trimmed)
+    const modelClientSlash = ["/btw", "/compact", "/summarize"].includes(trimmed)
+    const freeApiSunset = isFreeApiSunset()
+    const sunsetFreeApi = freeApiSunset && isFreeApiModel(selectedModel)
+    if (
+      shouldBlockFreeApiRequest(selectedModel, {
+        sunset: freeApiSunset,
+        localOnly: clientSlashSubmission && !modelClientSlash,
+        shell: store.mode === "shell",
+      })
+    ) {
+      void DialogAlert.show(
+        dialog,
+        t("tui.dialog.free_api_sunset.title"),
+        t("tui.dialog.free_api_sunset.message"),
+      )
+      return false
+    }
+
     // Free models require a one-time acknowledgment of the terms and privacy
     // policy. Gate submission until the user accepts; the flag is stored in KV.
     const isFreeModel = FREE_MODEL_IDS.has(selectedModel.modelID)
-    if (isFreeModel && !kv.get(FREE_AGREEMENT_KEY)) {
+    if (
+      isFreeModel &&
+      !kv.get(FREE_AGREEMENT_KEY) &&
+      !(sunsetFreeApi && ((clientSlashSubmission && !modelClientSlash) || store.mode === "shell"))
+    ) {
       submitLock = true
       DialogAgreement.show(dialog, {
         onConfirm: () => {
@@ -1073,6 +1187,23 @@ export function Prompt(props: PromptProps) {
     try {
 
     let sessionID = props.sessionID
+    // In orchestrator mode the single global root session was already resolved
+    // (find-or-create) on mode entry and stashed. Submitting from the home
+    // composer must land the first message INTO that root rather than creating a
+    // duplicate root session. Only applies when the composer has no bound
+    // sessionID (home view) and the current agent is orchestrator.
+    if (sessionID == null && agent.name === "orchestrator") {
+      const stashed = local.orchestrator.sessionID()
+      if (stashed) {
+        sessionID = stashed
+      } else {
+        // Root not resolved yet (mode-entry find-or-create still in flight).
+        // Do NOT fall through to session.create — that would spawn a duplicate
+        // orchestrator root. Ask the user to retry in a moment instead.
+        toast.show({ message: "Orchestrator session is still initializing, try again", variant: "warning" })
+        return false
+      }
+    }
     if (sessionID == null) {
       const res = await sdk.client.session.create({ workspace: props.workspaceID })
 
@@ -1116,6 +1247,7 @@ export function Prompt(props: PromptProps) {
     const clientSlash = inputText.startsWith("/")
       ? command.slashes().find((s) => s.display === inputText.trim())
       : undefined
+    const serverSlash = resolvePromptCommand(inputText, sync.data.command, t, pickedSkill)
 
     if (store.mode === "shell") {
       void sdk.client.session.shell({
@@ -1131,42 +1263,47 @@ export function Prompt(props: PromptProps) {
     } else if (inputText.startsWith("/btw ")) {
       // Inline side-question form: `/btw <question>` on the prompt line. Client
       // slashes match the exact `/btw` token and drop args, so handle the
-      // arg-bearing form here. READ-ONLY + EPHEMERAL: render the answer in a
-      // dismissible dialog, never inject it into the conversation.
+      // arg-bearing form here. Show a busy/spinner dialog immediately for
+      // instant feedback across the blocking fork-query, then swap in the
+      // answer. READ-ONLY + EPHEMERAL: render the answer in a dismissible
+      // dialog, never inject it into the conversation.
       const question = inputText.slice("/btw ".length).trim()
       if (question)
-        void sdk.client.session
-          .ask({ sessionID, question })
-          .then((res) => DialogAlert.show(dialog, "/btw", res.data?.answer ?? "(no answer)"))
-          .catch((err) => {
-            toast.show({
-              message: err instanceof Error ? err.message : "Failed to ask side question",
-              variant: "error",
-            })
-          })
+        void DialogPrompt.busy(
+          dialog,
+          "/btw",
+          question,
+          (active) =>
+            sdk.client.session
+              .ask({
+                sessionID,
+                question,
+                providerID: selectedModel.providerID,
+                modelID: selectedModel.modelID,
+              })
+              .then((res) => {
+                if (!active()) return
+                return DialogAlert.show(dialog, "/btw", res.data?.answer ?? "(no answer)")
+              })
+              .catch((err) => {
+                if (!active()) return
+                dialog.clear()
+                toast.show({
+                  message: err instanceof Error ? err.message : "Failed to ask side question",
+                  variant: "error",
+                })
+              }),
+          { busyText: t("tui.command.session.ask.busy") },
+        )
     } else if (clientSlash) {
       clientSlash.onSelect?.()
-    } else if (
-      inputText.startsWith("/") &&
-      iife(() => {
-        const firstLine = inputText.split("\n")[0]
-        const command = firstLine.split(" ")[0].slice(1)
-        return sync.data.command.some((x) => x.name === command)
-      })
-    ) {
-      // Parse command from first line, preserve multi-line content in arguments
-      const firstLineEnd = inputText.indexOf("\n")
-      const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
-      const [command, ...firstLineArgs] = firstLine.split(" ")
-      const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
-      const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
-
+    } else if (serverSlash) {
       void sdk.client.session.command({
         sessionID,
-        command: command.slice(1),
-        arguments: args,
+        ...serverSlash,
         agent: agent.name,
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
+        titleLocale: language.intl(),
         messageID,
         variant,
         parts: nonTextParts
@@ -1184,6 +1321,7 @@ export function Prompt(props: PromptProps) {
           messageID,
           agent: agent.name,
           model: selectedModel,
+          titleLocale: language.intl(),
           variant,
           parts: [
             {
@@ -1523,6 +1661,7 @@ export function Prompt(props: PromptProps) {
         fileStyleId={fileStyleId}
         agentStyleId={agentStyleId}
         promptPartTypeId={() => promptPartTypeId}
+        onSubmit={() => void submit()}
       />
       <box ref={(r) => (anchor = r)} visible={props.visible !== false}>
         <box
@@ -1700,7 +1839,11 @@ export function Prompt(props: PromptProps) {
                   {(agent) => (
                     <>
                       <text fg={fadeColor(highlight(), agentMetaAlpha())}>
-                        {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
+                        {store.mode === "shell"
+                          ? "Shell"
+                          : agent().name === "compose"
+                            ? `${Locale.titlecase(agent().name)} (legacy)`
+                            : Locale.titlecase(agent().name)}
                       </text>
                       <Show when={store.mode === "normal"}>
                         <box flexDirection="row" gap={1}>
@@ -1743,22 +1886,22 @@ export function Prompt(props: PromptProps) {
                 <Show when={voiceEnabled()}>
                   <Switch>
                     <Match when={voiceState() === "idle"}>
-                      <text fg={theme.textMuted} selectable={false} onMouseUp={() => voiceToggle()}>
+                      <text fg={theme.textMuted} selectable={false} {...voicePress.props}>
                         {"[ 🎙  Voice ]"}
                       </text>
                     </Match>
                     <Match when={voiceState() === "listening"}>
-                      <text fg={theme.primary} selectable={false} onMouseUp={() => voiceToggle()}>
+                      <text fg={theme.primary} selectable={false} {...voicePress.props}>
                         {"[ 🎙  -:-- ]"}
                       </text>
                     </Match>
                     <Match when={voiceState() === "speaking"}>
-                      <text fg={theme.primary} selectable={false} onMouseUp={() => voiceToggle()}>
+                      <text fg={theme.primary} selectable={false} {...voicePress.props}>
                         {`[ 🎙  ${Math.floor(voiceElapsed() / 60)}:${String(voiceElapsed() % 60).padStart(2, "0")} ]`}
                       </text>
                     </Match>
                     <Match when={voiceState() === "processing"}>
-                      <text fg={theme.primary} selectable={false} onMouseUp={() => voiceToggle()}>
+                      <text fg={theme.primary} selectable={false} {...voicePress.props}>
                         {"[ 🎙  .... ]"}
                       </text>
                     </Match>
@@ -1807,18 +1950,20 @@ export function Prompt(props: PromptProps) {
             >
               <box flexShrink={0} flexDirection="row" gap={1}>
                 <box marginLeft={1}>
-                  <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
+                  <Show when={visual.motion()} fallback={<text fg={theme.textMuted}>⋯</text>}>
                     <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
                   </Show>
                 </box>
                 {(() => {
                   const busyMessage = createMemo(() => {
                     const s = status()
-                    return s.type === "busy" ? s.message : undefined
+                    return s.type === "busy" ? clampStatusMessage(s.message) : undefined
                   })
                   return (
                     <Show when={busyMessage()}>
-                      <text fg={theme.textMuted}>{busyMessage()}</text>
+                      <text fg={theme.textMuted} wrapMode="none" flexShrink={1}>
+                        {busyMessage()}
+                      </text>
                     </Show>
                   )
                 })()}
@@ -1861,20 +2006,33 @@ export function Prompt(props: PromptProps) {
                       }
                     }
 
-                    const retryText = () => {
+                    // A rate-limit gets a clean, distinct label instead of the
+                    // raw provider message; other errors show the truncated
+                    // clean message. The attempt/countdown is a SEPARATE styled
+                    // status segment, not concatenated into the message string,
+                    // so it renders as structure rather than raw text. See T30.
+                    const isRateLimit = createMemo(() => {
+                      const r = retry()
+                      return r ? SessionRetry.isRateLimitMessage(r.message) : false
+                    })
+                    const label = createMemo(() => (isRateLimit() ? "Rate limited" : message()))
+                    const statusText = createMemo(() => {
                       const r = retry()
                       if (!r) return ""
-                      const baseMessage = message()
-                      const truncatedHint = isTruncated() ? " (click to expand)" : ""
                       const duration = formatDuration(seconds())
-                      const retryInfo = ` [retrying ${duration ? `in ${duration} ` : ""}attempt #${r.attempt}]`
-                      return baseMessage + truncatedHint + retryInfo
-                    }
+                      return `attempt #${r.attempt}${duration ? ` · retrying in ${duration}` : " · retrying"}`
+                    })
 
                     return (
                       <Show when={retry()}>
-                        <box onMouseUp={handleMessageClick}>
-                          <text fg={theme.error}>{retryText()}</text>
+                        <box flexDirection="row" gap={1} onMouseUp={handleMessageClick}>
+                          <text fg={isRateLimit() ? theme.warning : theme.error} attributes={TextAttributes.BOLD}>
+                            {label()}
+                          </text>
+                          <Show when={isTruncated()}>
+                            <text fg={theme.textMuted}>(click to expand)</text>
+                          </Show>
+                          <text fg={theme.textMuted}>{statusText()}</text>
                         </box>
                       </Show>
                     )
@@ -1896,7 +2054,10 @@ export function Prompt(props: PromptProps) {
                   <box gap={2} flexDirection="row">
                     <Show when={usage()}>
                       {(item) => (
-                        <text fg={theme.textMuted} wrapMode="none">
+                        // flexShrink=0: the context counter is the one number the
+                        // footer must never clip (`52.4K/96` instead of
+                        // `52.4K/960K`); the hints beside it can give way first.
+                        <text fg={theme.textMuted} wrapMode="none" flexShrink={0}>
                           {[item().context, item().cost].filter(Boolean).join(" · ")}
                         </text>
                       )}

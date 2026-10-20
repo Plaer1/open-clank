@@ -1,0 +1,555 @@
+{
+  "id": "batch-056",
+  "group": "settings",
+  "surface": "settings",
+  "entry_count": 40,
+  "character_count": 5017,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.value.assigned.location.value.agent.access.is.a.separate.narrower",
+      "source": "{0} assigned Location{1}. Agent access is a separate, narrower policy.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7002"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.compatibility.assignment.value.policy.generation.value",
+      "source": "{0} compatibility assignment{1} · policy generation {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6811"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.compatibility.root.value",
+      "source": "{0} compatibility root{1}.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7048"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.durable.agent.permission.value.human.sharing.is.separate",
+      "source": "{0} durable agent permission{1}; human sharing is separate.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6448"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.email.account",
+      "source": "{0} Email Account",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5021"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.grant.value",
+      "source": "{0} grant{1}",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6404"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.measurement.value.retained.versions",
+      "source": "{0} measurement; {1} retained versions",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:67"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.people.assignment.value.policy.generation.value",
+      "source": "{0} People assignment{1} · policy generation {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6762"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.registered.location.value.a.location.grants.no.people.or",
+      "source": "{0} registered Location{1}. A Location grants no People or Agent access by itself.",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7001"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.reset.value.durable.agent.permission.value.value",
+      "source": "{0}: reset {1} durable agent permission{2}{3}.",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6511"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.enabled",
+      "source": "{0}/{1} enabled",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:779",
+        "static/js/admin.js:824",
+        "static/js/settings.js:5723",
+        "static/js/settings.js:5729"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.tools",
+      "source": "{0}/{1} tools",
+      "placeholders": [
+        "0",
+        "1"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:4250"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.value.compatibility.policy.value",
+      "source": "{0} · {1} · {2} · compatibility policy {3}",
+      "placeholders": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6783"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.value.value.compatibility.root",
+      "source": "{0} · {1} · {2} · compatibility root",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:7020"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.will.revoke.value.agent.permission.value.shared.locations.and",
+      "source": "{0} will revoke {1} agent permission{2}. Shared locations and human access remain unchanged.",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:6490"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.vaultwarden.password.vault",
+      "source": "Vaultwarden (Password Vault)",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5481"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.verify.enable",
+      "source": "Verify & Enable",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2594"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.web.search.and.deep.research.tools.will.be.unavailable",
+      "source": "Web search and deep research tools will be unavailable.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:1358"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.8fd5ad24",
+      "source": "webhook",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2899",
+        "static/js/settings.js:2975",
+        "static/js/tasks.js:1238"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.add.an.integration.first",
+      "source": "Webhook (add an Integration first)",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2856",
+        "static/js/settings.js:3075"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.webhook.added",
+      "source": "Webhook added",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1378"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.works.with.any.caldav.server.radicale.nextcloud.etc.1.enter",
+      "source": "Works with any CalDAV server (Radicale, Nextcloud, etc.). 1. Enter your CalDAV server URL (e.g. http://localhost:5232) 2. Enter your username and password 3. Click Add Server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:457"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.works.with.any.imap.smtp.email.provider.1.pick.your",
+      "source": "Works with any IMAP/SMTP email provider. 1. Pick your provider from the dropdown (or choose Custom) 2. Enter your email address and password (or app password) 3. Click Add Server",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:455"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.workspace.limit.must.be.greater.than.zero",
+      "source": "Workspace limit must be greater than zero.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/historySettings.js:239"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.x.auth.token",
+      "source": "X-Auth-Token",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3922",
+        "static/js/settings.js:4428"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.x2713.2fa.enabled",
+      "source": "&#x2713; 2FA Enabled!",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2613"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.x2713.enabled",
+      "source": "&#x2713; Enabled",
+      "placeholders": [],
+      "kind": "js-template-html-text",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:2545"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yahoo",
+      "source": "Yahoo",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:449",
+        "static/js/settings.js:3517",
+        "static/js/settings.js:4995"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yahoo.needs.an.app.password",
+      "source": "Yahoo needs an App Password",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5096"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yes.delete.remaining.data",
+      "source": "Yes, delete remaining data",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1542"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yes.delete.this.category",
+      "source": "Yes, delete this category",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:1542"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.yes.your.full.email.address.goes.here.too.e.g",
+      "source": "Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5046"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.your.imap.server.e.g.imap.gmail.com.imap.migadu",
+      "source": "Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3538",
+        "static/js/settings.js:5044"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.name",
+      "source": "Your Name",
+      "placeholders": [],
+      "kind": "js-template-html-attribute",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3531",
+        "static/js/settings.js:5037"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.name.as.it.appears.in.the.from.field.of",
+      "source": "Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3531",
+        "static/js/settings.js:5037"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.outgoing.mail.server.e.g.smtp.gmail.com.leave",
+      "source": "Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5050"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.outgoing.mail.server.e.g.smtp.gmail.com.smtp",
+      "source": "Your outgoing-mail server, e.g. smtp.gmail.com, smtp.migadu.com. Leave blank to make this account read-only.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3544"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.your.smtp.password.often.the.same.as.your.imap.password",
+      "source": "Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:3549"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.your.smtp.password.often.the.same.as.your.imap.password.a9924df7",
+      "source": "Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with this password form.",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/settings.js:5055"
+      ],
+      "context": "",
+      "complexity": "prose"
+    },
+    {
+      "key": "ui.zoho",
+      "source": "Zoho",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/admin.js:451"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

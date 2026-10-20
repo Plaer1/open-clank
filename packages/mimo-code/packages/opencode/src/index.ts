@@ -6,7 +6,6 @@ import { Log } from "./util"
 import { ConsoleCommand } from "./cli/cmd/account"
 import { ProvidersCommand } from "./cli/cmd/providers"
 import { AgentCommand } from "./cli/cmd/agent"
-import { UpgradeCommand } from "./cli/cmd/upgrade"
 import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
@@ -33,15 +32,13 @@ import { SessionCommand } from "./cli/cmd/session"
 import { DbCommand } from "./cli/cmd/db"
 import path from "path"
 import { readdirSync, unlinkSync } from "fs"
-import { Global } from "./global"
-import { JsonMigration } from "./storage"
-import { Database } from "./storage"
-import { ClaudeImport } from "./session/claude-import"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
-import { drizzle } from "drizzle-orm/bun-sqlite"
 import { ensureProcessMetadata } from "./util/mimo-process"
+import { OpenClankDriverCommand, runOpenClankDriver } from "./cli/cmd/openclank-driver"
+import { LlmServerCommand } from "./cli/cmd/llm-server"
+import { ModelsDev } from "./provider/models"
 
 const processMetadata = ensureProcessMetadata("main")
 
@@ -58,15 +55,40 @@ process.on("uncaughtException", (e) => {
 })
 
 const args = hideBin(process.argv)
+const CLI_EXIT = Symbol("CLI_EXIT")
+
+// Rust launches this child over one inherited full-duplex descriptor. Keep it
+// out of the normal CLI middleware: no database migration, HTTP server, or
+// provider credential environment is needed before the host activates it.
+if (args[0] === "openclank-driver") {
+  const allowed = new Set(["--protocol-major", "--protocol-minor", "--control-fd"])
+  const values = new Map<string, string>()
+  for (let index = 1; index < args.length; index += 2) {
+    const flag = args[index]
+    const value = args[index + 1]
+    if (!flag || !allowed.has(flag) || !value || value.startsWith("--") || values.has(flag)) {
+      throw new Error("invalid openclank-driver arguments")
+    }
+    values.set(flag, value)
+  }
+  if (values.size !== 3 || values.get("--protocol-major") !== "1" || values.get("--protocol-minor") !== "0") {
+    throw new Error("unsupported direct-driver protocol")
+  }
+  const controlFd = Number(values.get("--control-fd"))
+  runOpenClankDriver(controlFd)
+  process.exit(0)
+}
+
+ModelsDev.startRefresh()
 
 function show(out: string) {
   const text = out.trimStart()
   if (!text.startsWith("mimo ")) {
     process.stderr.write(UI.logo() + EOL + EOL)
-    process.stderr.write(text)
+    process.stderr.write(UI.withTrailingEOL(text))
     return
   }
-  process.stderr.write(out)
+  process.stderr.write(UI.withTrailingEOL(out))
 }
 
 const cli = yargs(args)
@@ -118,55 +140,6 @@ const cli = yargs(args)
       run_id: processMetadata.runID,
     })
 
-    const marker = path.join(Global.Path.data, "mimocode.db")
-    if (!(await Filesystem.exists(marker))) {
-      const tty = process.stderr.isTTY
-      process.stderr.write("Performing one time database migration, may take a few minutes..." + EOL)
-      const width = 36
-      const orange = "\x1b[38;5;214m"
-      const muted = "\x1b[0;2m"
-      const reset = "\x1b[0m"
-      let last = -1
-      if (tty) process.stderr.write("\x1b[?25l")
-      try {
-        await JsonMigration.run(drizzle({ client: Database.Client().$client }), {
-          progress: (event) => {
-            const percent = Math.floor((event.current / event.total) * 100)
-            if (percent === last && event.current !== event.total) return
-            last = percent
-            if (tty) {
-              const fill = Math.round((percent / 100) * width)
-              const bar = `${"■".repeat(fill)}${"･".repeat(width - fill)}`
-              process.stderr.write(
-                `\r${orange}${bar} ${percent.toString().padStart(3)}%${reset} ${muted}${event.label.padEnd(12)} ${event.current}/${event.total}${reset}`,
-              )
-              if (event.current === event.total) process.stderr.write("\n")
-            } else {
-              process.stderr.write(`sqlite-migration:${percent}${EOL}`)
-            }
-          },
-        })
-      } finally {
-        if (tty) process.stderr.write("\x1b[?25h")
-        else {
-          process.stderr.write(`sqlite-migration:done${EOL}`)
-        }
-      }
-      process.stderr.write("Database migration complete." + EOL)
-    }
-
-    // Idempotently import Claude Code sessions into SQLite. Runs once per process
-    // tree (the env guard is inherited by spawned children) and is best-effort:
-    // a failure here must never block command startup.
-    if (!process.env.MIMOCODE_DISABLE_CLAUDE_IMPORT && !process.env.MIMOCODE_CLAUDE_IMPORTED) {
-      process.env.MIMOCODE_CLAUDE_IMPORTED = "1"
-      try {
-        await ClaudeImport.run()
-      } catch (e) {
-        Log.Default.warn("claude-import failed", { e: errorMessage(e) })
-      }
-    }
-
     // Clean up stale .old_* files left by Windows in-place upgrades
     if (process.platform === "win32") {
       try {
@@ -182,6 +155,7 @@ const cli = yargs(args)
   .usage("")
   .completion("completion", "generate shell completion script")
   .command(AcpCommand)
+  .command(OpenClankDriverCommand)
   .command(McpCommand)
   .command(TuiThreadCommand)
   .command(AttachCommand)
@@ -191,7 +165,6 @@ const cli = yargs(args)
   .command(ConsoleCommand)
   .command(ProvidersCommand)
   .command(AgentCommand)
-  .command(UpgradeCommand)
   .command(UninstallCommand)
   .command(ServeCommand)
   // Web command temporarily disabled
@@ -205,6 +178,7 @@ const cli = yargs(args)
   .command(SessionCommand)
   .command(PluginCommand)
   .command(DbCommand)
+  .command(LlmServerCommand)
   .fail((msg, err) => {
     if (
       msg?.startsWith("Unknown argument") ||
@@ -215,7 +189,8 @@ const cli = yargs(args)
       cli.showHelp(show)
     }
     if (err) throw err
-    process.exit(1)
+    void Log.exit(1)
+    throw CLI_EXIT
   })
   .strict()
 
@@ -230,40 +205,42 @@ try {
     await cli.parse()
   }
 } catch (e) {
-  let data: Record<string, any> = {}
-  if (e instanceof NamedError) {
-    const obj = e.toObject()
-    Object.assign(data, {
-      ...obj.data,
-    })
-  }
+  if (e !== CLI_EXIT) {
+    let data: Record<string, any> = {}
+    if (e instanceof NamedError) {
+      const obj = e.toObject()
+      Object.assign(data, {
+        ...obj.data,
+      })
+    }
 
-  if (e instanceof Error) {
-    Object.assign(data, {
-      name: e.name,
-      message: e.message,
-      cause: e.cause?.toString(),
-      stack: e.stack,
-    })
-  }
+    if (e instanceof Error) {
+      Object.assign(data, {
+        name: e.name,
+        message: e.message,
+        cause: e.cause?.toString(),
+        stack: e.stack,
+      })
+    }
 
-  if (e instanceof ResolveMessage) {
-    Object.assign(data, {
-      name: e.name,
-      message: e.message,
-      code: e.code,
-      specifier: e.specifier,
-      referrer: e.referrer,
-      position: e.position,
-      importKind: e.importKind,
-    })
-  }
-  Log.Default.error("fatal", data)
-  const formatted = FormatError(e)
-  if (formatted) UI.error(formatted)
-  if (formatted === undefined) {
-    UI.error("Unexpected error, check log file at " + Log.file() + " for more details" + EOL)
-    process.stderr.write(errorMessage(e) + EOL)
+    if (e instanceof ResolveMessage) {
+      Object.assign(data, {
+        name: e.name,
+        message: e.message,
+        code: e.code,
+        specifier: e.specifier,
+        referrer: e.referrer,
+        position: e.position,
+        importKind: e.importKind,
+      })
+    }
+    Log.Default.error("fatal", data)
+    const formatted = FormatError(e)
+    if (formatted) UI.error(formatted)
+    if (formatted === undefined) {
+      UI.error("Unexpected error, check log file at " + Log.file() + " for more details" + EOL)
+      process.stderr.write(errorMessage(e) + EOL)
+    }
   }
   process.exitCode = 1
 } finally {
@@ -271,5 +248,6 @@ try {
   // Most notably, some docker-container-based MCP servers don't handle such signals unless
   // run using `docker run --init`.
   // Explicitly exit to avoid any hanging subprocesses.
+  await Log.shutdown()
   process.exit()
 }

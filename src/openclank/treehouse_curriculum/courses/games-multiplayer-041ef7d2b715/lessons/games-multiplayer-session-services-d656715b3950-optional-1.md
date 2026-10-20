@@ -1,0 +1,1 @@
+Check every player against a candidate region before relaxing any rule.

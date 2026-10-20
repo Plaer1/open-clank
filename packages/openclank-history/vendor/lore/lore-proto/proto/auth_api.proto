@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package epic_urc;
+
+service UrcAuthApi {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {};
+  rpc StartAuthSession(StartAuthSessionRequest)
+      returns (StartAuthSessionResponse) {};
+  rpc GetAuthSession(GetAuthSessionRequest) returns (GetAuthSessionResponse) {};
+  rpc RefreshAuthSession(RefreshAuthSessionRequest)
+      returns (RefreshAuthSessionResponse) {};
+  rpc VerifyUser(VerifyUserRequest)
+      returns (VerifyUserResponse) {};
+
+  // For external authentication token login
+  rpc ExchangeExternalTokenForUserToken(ExchangeExternalTokenForUserTokenRequest) returns (ExchangeExternalTokenForUserTokenResponse) {};
+
+  // For API key login
+  rpc ExchangeAPIKeyForUserToken(ExchangeAPIKeyForUserTokenRequest) returns (ExchangeAPIKeyForUserTokenResponse) {};
+
+  // For token exchange
+  rpc ExchangeUserTokenForMultiresourceToken(
+      ExchangeUserTokenForMultiresourceTokenRequest)
+      returns (ExchangeUserTokenForMultiresourceTokenResponse) {};
+
+  // For permission checks
+  rpc CheckUserPermission(CheckUserPermissionRequest)
+      returns (CheckUserPermissionResponse) {};
+  rpc LookupUserPermissions(LookupUserPermissionsRequest)
+      returns (LookupUserPermissionsResponse) {};
+
+  // User metadata
+  rpc GetUserInfo(GetUserInfoRequest) returns (GetUserInfoResponse) {};
+  rpc GetUserId(GetUserIdRequest) returns (GetUserIdResponse) {};
+  rpc GetProviderUserId(GetProviderUserIdRequest) returns (GetProviderUserIdResponse) {};
+}
+
+message TargetUser {
+  oneof user {
+    string user_token = 1;
+  }
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse { string status = 1; }
+
+message StartAuthSessionRequest { string client_state = 1; }
+
+message StartAuthSessionResponse {
+  string session_code = 1;
+  string login_url = 2;
+}
+
+message GetAuthSessionRequest {
+  string session_code = 1;
+  string client_state = 2;
+}
+
+message GetAuthSessionResponse { optional UserToken user_token = 1; }
+
+message RefreshAuthSessionRequest {}
+
+message RefreshAuthSessionResponse { optional UserToken user_token = 1; }
+
+// Verify the target is compliant with the given Product Name as registered in `ucs-auth-api` config
+message VerifyCompliance {
+  string product_name = 1;
+}
+message VerifyRequirement {
+  reserved 1; // deprecated token
+  oneof requirement {
+    VerifyCompliance compliance = 2;
+  };
+}
+
+message VerifyUserRequest {
+  TargetUser target_user = 1;
+  repeated VerifyRequirement requirements = 2;
+}
+message VerifyUserResponse {
+  UserInfo user_info = 1;
+}
+
+message ExchangeExternalTokenForUserTokenRequest { string external_token = 1; string token_type = 2; }
+
+message ExchangeExternalTokenForUserTokenResponse { optional UserToken user_token = 1; }
+
+message ExchangeAPIKeyForUserTokenRequest { string api_key = 1; }
+
+message ExchangeAPIKeyForUserTokenResponse { optional UserToken user_token = 1; }
+
+message UserToken {
+  string user_token = 1;
+  int64 expires_at = 2; // Epoch
+  string user_id = 3;   // URC user ID
+  string user_name = 4; // Display name
+}
+
+message ResourcePermission {
+  string resource_id = 1;
+  repeated string permission = 2;
+}
+
+message ExchangeUserTokenForMultiresourceTokenRequest {
+  repeated string resource_id = 1;
+}
+
+message ExchangeUserTokenForMultiresourceTokenResponse { UserToken token = 1; }
+
+message CheckUserPermissionRequest {
+  repeated string resource_id = 1;
+  optional TargetUser target_user = 2;
+}
+
+message CheckUserPermissionResponse {
+  repeated ResourcePermission allowed_resource_permission = 1;
+  repeated ResourcePermission denied_resource_permission = 2;
+}
+
+message LookupUserPermissionsRequest {
+  string resource_filter = 1;
+  optional string context_filter = 2;
+  optional int32 page_size = 3;
+  optional string page_token = 4;
+}
+
+message LookupUserPermissionsResponse {
+  repeated ResourcePermission resource_permission = 1;
+  optional string next_page_token = 2;
+}
+
+message GetUserInfoRequest {
+  string resource_id = 1;
+  repeated string user_id = 2;
+}
+
+message UserInfo {
+  string user_id = 1;
+  string display_name = 2;
+}
+
+message GetUserInfoResponse {
+  repeated UserInfo user_info = 1;
+}
+
+message GetUserIdRequest {
+  string resource_id = 1;
+  string user_display_name = 2;
+}
+
+message GetUserIdResponse {
+  UserInfo user_info = 1;
+}
+
+message GetProviderUserIdRequest {
+  string user_id = 1;
+}
+
+message GetProviderUserIdResponse {
+  string user_id = 1;
+  string provider_user_id = 2;
+}

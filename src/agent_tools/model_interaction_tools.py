@@ -6,11 +6,9 @@ of the tool -> registry migration (#3629): the implementations were moved here
 out of ``src.ai_interaction`` so dispatch flows through the registry instead of
 the elif chain / dispatch_ai_tool in tool_execution.py.
 
-Shared helpers that still live in ``src.ai_interaction`` and are used by tools
-not yet migrated (``_resolve_model``, ``AI_CHAT_TIMEOUT``) are imported lazily
-inside the functions to avoid an import cycle at module load.
+Model selection and completion run through the normalized provider control
+plane; this module never resolves provider transport or credentials itself.
 """
-import asyncio
 import logging
 from typing import Dict, Optional
 
@@ -27,15 +25,20 @@ _TEACHER_SYSTEM_PROMPT = (
 )
 
 
-async def chat_with_model(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def chat_with_model(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+) -> Dict:
     """Send a message to a specific model and return its response.
 
     Content format:
       Line 1: model_name (or model_name@endpoint_name)
       Line 2+: the message to send
     """
-    from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
-    from src.llm_core import llm_call_async
+    from src.openclank.chat_routing import resolve_chat_model_spec
+    from src.openclank.modality_facade import complete_text
 
     lines = content.strip().split("\n", 1)
     if not lines or not lines[0].strip():
@@ -47,37 +50,42 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
         return {"error": "No message provided (line 2+ is the message)"}
 
     try:
-        url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        route = resolve_chat_model_spec(owner=owner, model_spec=model_spec)
     except ValueError as e:
         return {"error": str(e)}
 
     try:
-        response = await llm_call_async(
-            url, model,
-            [{"role": "user", "content": message}],
-            headers=headers,
-            timeout=AI_CHAT_TIMEOUT,
-            owner=owner,
-            session_id=session_id,
+        response = await complete_text(
+            owner=owner or "local-installation",
+            purpose="utility",
+            messages=[{"role": "user", "content": message}],
+            model_route_id=route.model_route_id,
+            grant_id=route.provider_grant_id,
+            root_operation_id=root_operation_id,
         )
         # Truncate very long responses
         if len(response) > 10000:
             response = response[:10000] + "\n... (truncated)"
-        return {"model": model, "response": response}
+        return {"model": route.provider_model_id, "response": response}
     except Exception as e:
         logger.error(f"chat_with_model failed: {e}")
         return {"error": f"Failed to get response from {model_spec}: {e}"}
 
 
-async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+async def ask_teacher(
+    content: str,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    root_operation_id: Optional[str] = None,
+) -> Dict:
     """Ask a more capable model for help.
 
     Content format:
       Line 1: model_name (or 'auto')
       Line 2+: the problem description
     """
-    from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
-    from src.llm_core import llm_call_async
+    from src.openclank.chat_routing import resolve_chat_model_spec
+    from src.openclank.modality_facade import complete_text
     from src.settings import get_user_setting
 
     lines = content.strip().split("\n", 1)
@@ -93,104 +101,70 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
             return {"error": "No teacher model configured. Specify a model name or set teacher_model in settings."}
 
     try:
-        url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
+        route = resolve_chat_model_spec(owner=owner, model_spec=model_spec)
     except ValueError as e:
         return {"error": str(e)}
 
     try:
-        response = await llm_call_async(
-            url, model,
-            [
+        response = await complete_text(
+            owner=owner or "local-installation",
+            purpose="utility",
+            messages=[
                 {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Problem:\n{problem}"},
             ],
-            headers=headers,
-            timeout=AI_CHAT_TIMEOUT,
-            owner=owner,
-            session_id=session_id,
+            model_route_id=route.model_route_id,
+            grant_id=route.provider_grant_id,
+            root_operation_id=root_operation_id,
         )
         if len(response) > 8000:
             response = response[:8000] + "\n... (truncated)"
-        return {"model": model, "response": response, "teacher": True}
+        return {
+            "model": route.provider_model_id,
+            "response": response,
+            "teacher": True,
+        }
     except Exception as e:
         logger.error(f"ask_teacher failed: {e}")
         return {"error": f"Teacher call failed ({model_spec}): {e}"}
 
 
 async def list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
-    """List all available models across configured endpoints.
+    """List all available models in the normalized provider catalog.
 
     Content = optional filter keyword.
     """
-    import json
-    import httpx
-    from src.database import SessionLocal, ModelEndpoint
-    from src.llm_core import _detect_provider, ANTHROPIC_MODELS
-    from src.auth_helpers import owner_filter
-    from src.endpoint_resolver import resolve_endpoint_runtime, build_headers, build_models_url
+    from src.openclank.chat_routing import list_chat_routes
 
     keyword = content.strip().lower() if content.strip() else None
 
-    db = SessionLocal()
     try:
-        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-        query = owner_filter(query, ModelEndpoint, owner or "", include_shared=False)
-        endpoints = query.all()
-        if not endpoints:
-            return {"results": "No enabled model endpoints configured."}
-
+        own, shared = list_chat_routes(owner)
+        routes = [*own, *shared]
         result_lines = []
-        total_models = 0
-
-        for ep in endpoints:
-            try:
-                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-            except Exception:
+        for route in routes:
+            if keyword and not any(
+                keyword in value.casefold()
+                for value in (
+                    route.provider_model_id,
+                    route.display_name,
+                    route.connection_label,
+                )
+            ):
                 continue
-            provider = _detect_provider(base)
-            headers = build_headers(api_key, base)
-
-            model_ids = []
-            if provider == "anthropic":
-                model_ids = list(ANTHROPIC_MODELS)
-            else:
-                try:
-                    models_url = build_models_url(base)
-                    if models_url:
-                        r = httpx.get(models_url, headers=headers, timeout=5)
-                        r.raise_for_status()
-                        data = r.json()
-                        model_ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-                        if not model_ids:
-                            model_ids = [
-                                m.get("name") or m.get("model")
-                                for m in (data.get("models") or [])
-                                if m.get("name") or m.get("model")
-                            ]
-                    else:
-                        model_ids = json.loads(ep.cached_models or "[]")
-                except Exception:
-                    model_ids = ["(endpoint offline)"]
-
-            if keyword:
-                model_ids = [m for m in model_ids if keyword in m.lower() or keyword in (ep.name or "").lower()]
-
-            if model_ids:
-                result_lines.append(f"\n**{ep.name or base}** ({provider}):")
-                for mid in model_ids:
-                    result_lines.append(f"  - `{mid}`")
-                    total_models += 1
+            result_lines.append(
+                f"- `{route.model_route_id}` — {route.display_name} "
+                f"({route.connection_label})"
+            )
 
         if not result_lines:
             return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."}
 
-        header = f"Available models ({total_models} total):"
+        header = f"Available models ({len(result_lines)} total):\n"
         return {"results": header + "\n".join(result_lines)}
     except Exception as e:
         logger.error(f"list_models failed: {e}")
         return {"error": str(e)}
-    finally:
-        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -199,12 +173,22 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
 
 class ChatWithModelTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
-        return await chat_with_model(content, ctx.get("session_id"), owner=ctx.get("owner"))
+        return await chat_with_model(
+            content,
+            ctx.get("session_id"),
+            owner=ctx.get("owner"),
+            root_operation_id=ctx.get("root_operation_id"),
+        )
 
 
 class AskTeacherTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
-        return await ask_teacher(content, ctx.get("session_id"), owner=ctx.get("owner"))
+        return await ask_teacher(
+            content,
+            ctx.get("session_id"),
+            owner=ctx.get("owner"),
+            root_operation_id=ctx.get("root_operation_id"),
+        )
 
 
 class ListModelsTool:

@@ -1,0 +1,1 @@
+Show 3+2+1+0=6, n a nonnegative integer, and decreasing distance to zero.

@@ -1,0 +1,229 @@
+{
+  "id": "batch-048",
+  "group": "memory",
+  "surface": "memory",
+  "entry_count": 16,
+  "character_count": 1509,
+  "complexity": "mixed",
+  "instruction": "UI label/message batch: concise, consistent terminology; preserve placeholders and locked brand tokens.",
+  "entries": [
+    {
+      "key": "ui.unassociated.question",
+      "source": "unassociated question",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3509"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unavailable.2c9c1f79",
+      "source": "Unavailable",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2211"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.mcp.error",
+      "source": "unknown MCP error",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/frankenmemory_provider.py:434"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unknown.vector.generation",
+      "source": "unknown vector generation",
+      "placeholders": [],
+      "kind": "server-string",
+      "status": "live",
+      "locations": [
+        "src/frankenmemory_rag.py:1185"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.unpinned.rag.only",
+      "source": "Unpinned — RAG only",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2919"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.upload.bb73aaaf",
+      "source": "upload",
+      "placeholders": [],
+      "kind": "mixed",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3278",
+        "static/js/memory.js:3361",
+        "static/js/slashCommands.js:3563"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.all.e6e5adc9",
+      "source": "{0}: all",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:2255"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.already.existed",
+      "source": "; {0} already existed",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.imported.suggestion.value.waiting.for.review.value",
+      "source": "{0} imported suggestion{1} waiting for review{2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3236"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.is.now.the.memory.model.retrying.import",
+      "source": "{0} is now the Memory model. Retrying import…",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:3098"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.profile.question.value.added.value",
+      "source": "{0} profile question{1} added{2}.",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:391"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.profile.question.value.ready.value.need.attention",
+      "source": "{0} profile question{1} ready; {2} need attention.",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:385"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.value.trust.value.seen.value",
+      "source": "{0} · trust {1} · seen {2}",
+      "placeholders": [
+        "0",
+        "1",
+        "2"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:1889"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.via.value",
+      "source": "(via {0})",
+      "placeholders": [
+        "0"
+      ],
+      "kind": "js-template",
+      "status": "live",
+      "locations": [
+        "static/js/util/memoryTrust.js:90"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.what.name.should.i.use.for.my.handler",
+      "source": "What name should I use for my Handler?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:339"
+      ],
+      "context": "",
+      "complexity": "label"
+    },
+    {
+      "key": "ui.which.side.should.my.handler.prefer.for.mobile.controls.left",
+      "source": "Which side should my Handler prefer for mobile controls: left, right, or system default?",
+      "placeholders": [],
+      "kind": "js-string",
+      "status": "live",
+      "locations": [
+        "static/js/memory.js:352"
+      ],
+      "context": "",
+      "complexity": "label"
+    }
+  ]
+}

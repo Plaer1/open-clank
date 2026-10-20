@@ -6,15 +6,29 @@ import json
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, Form, HTTPException, Response, Request
+import httpx
 import logging
 
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
-from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
-from src.auth_helpers import effective_user, _auth_disabled, owner_filter
+from core.database import Session as DbSession, SessionLocal, Document, FilesImageResource, utcnow_naive
+from src.auth_helpers import effective_user, owner_filter
+from src.generated_images import gallery_owner_key
+from src.session_image_cleanup import retire_session_image_refs, session_image_refs
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
+from src.openclank.chat_routing import (
+    ChatRouteUnavailable,
+    MANAGED_ENGINE_PUBLIC_URL,
+    resolve_chat_route,
+)
+from src.openclank.chat_lifecycle import ChatLifecycleError, ChatLifecycleService
+from src.openclank.file_policy import FilePolicyRepository
+from src.openclank.workspace_policy_service import (
+    WorkspacePolicyServiceError,
+    resolve_owned_workspace,
+)
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -28,6 +42,7 @@ def _sanitize_export_filename(name: str) -> str:
 # model must never surface in the session list / sidebar — otherwise a blind
 # comparison can be de-anonymized before the user votes (issue #1285).
 COMPARE_SESSION_PREFIX = "[CMP] "
+_UNVERIFIED_OWNER = object()
 
 
 def _public_model(name: str, model: str) -> str:
@@ -37,7 +52,9 @@ def _public_model(name: str, model: str) -> str:
     costs the sidebar nothing. See issue #1285."""
     if (name or "").startswith(COMPARE_SESSION_PREFIX):
         return ""
-    return model
+    from src.openclank.mimo_projection import public_native_model_id
+
+    return public_native_model_id(model)
 
 
 def _content_to_text(content) -> str:
@@ -94,34 +111,36 @@ def _reject_compact_during_active_run(session_id: str) -> None:
         raise HTTPException(409, "Session has an active run; try compacting after it finishes")
 
 
-async def _prepare_context_mutation(request: Request, session_id: str) -> None:
-    """Reject live mutations and purge stale MiMo execution projections."""
+async def _prepare_context_mutation(request: Request, session_id: str, *, session_owner=None,
+                                    verified_owner=_UNVERIFIED_OWNER):
+    """Reject live mutations and purge stale Open Clank agent execution projections."""
     _reject_compact_during_active_run(session_id)
+    # Resolve the persisted owner before purging.  In auth-disabled mode the
+    # request has no effective user, but the stored session owner remains the
+    # authority for projection cleanup.
+    stored_owner = (
+        _verify_session_owner(request, session_id)
+        if verified_owner is _UNVERIFIED_OWNER else verified_owner
+    ) or session_owner
     from src.openclank.transcript_projection import purge_execution_projection
 
     try:
         await purge_execution_projection(
             getattr(request.app.state, "mimo_supervisor", None),
             session_id,
-            owner=effective_user(request) or None,
+            owner=stored_owner or effective_user(request) or None,
         )
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
+    return stored_owner
 
 
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
-    """Verify the current user owns the session, honoring single-user modes.
-
-    Authenticated requests must match the stored DB or in-memory owner. When
-    auth is disabled and no user is present, treat the app as single-user mode:
-    verify that the session exists, but do not compare its stored owner. This
-    keeps QA/dev instances with AUTH_ENABLED=false from rejecting owner-stamped
-    rows created while auth was previously enabled.
-    """
+    """Verify a middleware-authenticated owner matches the stored session."""
     user = effective_user(request)
-    if not user and not _auth_disabled():
+    if not getattr(request.state, "authenticated", False) or not user:
         raise HTTPException(401, "Authentication required")
     db = SessionLocal()
     try:
@@ -131,7 +150,7 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
     if row is not None:
         if user and row.owner != user:
             raise HTTPException(404, f"Session {session_id} not found")
-        return
+        return row.owner
     # No DB row — allow the caller to act on an in-memory ghost they own.
     # Incognito sessions deliberately exist only in this process, so route
     # callers do not all need to thread the manager through manually.
@@ -144,58 +163,27 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
     if session_manager is not None:
         ghost = getattr(session_manager, "sessions", {}).get(session_id)
         if ghost is not None and (not user or getattr(ghost, "owner", None) == user):
-            return
+            return getattr(ghost, "owner", None)
     raise HTTPException(404, f"Session {session_id} not found")
+
+
+def _validated_session_workspace(request: Request, owner: str, workspace_id: str):
+    """Resolve a stable chat Workspace through current Agent authority."""
+    auth_manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
+    try:
+        return resolve_owned_workspace(
+            FilePolicyRepository(),
+            workspace_id=workspace_id,
+            owner_username=owner,
+            auth_manager=auth_manager,
+            purpose="agent_workspace",
+        )
+    except WorkspacePolicyServiceError as error:
+        raise HTTPException(403, "Workspace is unavailable") from error
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["sessions"])
-
-def _current_user_is_admin(request: Request, user: str | None) -> bool:
-    if not user:
-        return False
-    auth_mgr = getattr(request.app.state, "auth_manager", None)
-    is_admin = getattr(auth_mgr, "is_admin", None)
-    if not callable(is_admin):
-        return False
-    try:
-        return bool(is_admin(user))
-    except Exception:
-        return False
-
-
-def _reject_raw_endpoint_url_for_non_admin(
-    request: Request,
-    user: str | None,
-    endpoint_id: str | None,
-    endpoint_url: str | None,
-) -> None:
-    """Require registered endpoints for signed-in non-admin session changes."""
-    if endpoint_id and endpoint_id.strip():
-        return
-    if not endpoint_url:
-        return
-    # Raw URLs make the server dial whatever host the request supplies. For
-    # non-admin users, require a saved endpoint row so normal owner scoping and
-    # endpoint validation have already happened.
-    if user and not _current_user_is_admin(request, user):
-        raise HTTPException(403, "Choose a registered model endpoint")
-
-
-def _persist_session_headers(session_id: str, headers: dict | None) -> None:
-    """Persist endpoint auth headers for DB-backed session metadata."""
-    db = SessionLocal()
-    try:
-        db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
-        if db_session:
-            db_session.headers = headers or {}
-            db_session.updated_at = utcnow_naive()
-            db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
 
 
 _HIDDEN_SYSTEM_SESSION_NAMES = {
@@ -209,27 +197,6 @@ _HIDDEN_SYSTEM_SESSION_NAMES = {
 }
 
 
-def _pick_endpoint_for_sort(owner=None):
-    """Pick model endpoint for auto-sort LLM call — uses utility endpoint setting, falls back to default."""
-    from src.endpoint_resolver import resolve_endpoint
-    # Try utility endpoint first (what the user configured for background tasks)
-    url, model, headers = resolve_endpoint("utility", owner=owner)
-    if url and model:
-        return url, model, headers
-    # Fall back to task endpoint
-    try:
-        from src.task_endpoint import resolve_task_endpoint
-        url, model, headers = resolve_task_endpoint(owner=owner)
-        if url and model:
-            return url, model, headers
-    except Exception:
-        pass
-    # Fall back to default
-    url, model, headers = resolve_endpoint("default", owner=owner)
-    if url and model:
-        return url, model, headers
-    return None, None, None
-
 def setup_session_routes(
     session_manager: SessionManager,
     config: dict,
@@ -242,10 +209,28 @@ def setup_session_routes(
     SESSION_MODEL_VALIDATION_TIMEOUT = min(float(REQUEST_TIMEOUT or 20), 3.0)
     OPENAI_API_KEY = config.get("OPENAI_API_KEY")
     SESSIONS_FILE = config.get("SESSIONS_FILE")
+
+    async def _set_chat_archived(request: Request, sid: str, archived: bool):
+        _verify_session_owner(request, sid, session_manager)
+        owner = effective_user(request)
+        service = ChatLifecycleService(
+            session_manager=session_manager,
+            mimo_supervisor=getattr(request.app.state, "mimo_supervisor", None),
+        )
+        try:
+            await service.set_archived(owner=owner, session_id=sid, archived=archived)
+        except ChatLifecycleError as exc:
+            if exc.code == "active_run":
+                raise HTTPException(409, str(exc)) from exc
+            if exc.code == "projection_busy":
+                raise HTTPException(503, str(exc)) from exc
+            raise HTTPException(404, f"Session {sid} not found") from exc
+        return {"status": "archived" if archived else "unarchived"}
     
     @router.get("/sessions")
     def list_sessions(request: Request):
         user = effective_user(request)
+        active_incognito_id = str(request.query_params.get("active_incognito_id") or "").strip()
         # Lazy purge: incognito sessions are ephemeral by design — wipe leftovers
         # from the DB and session_manager so they vanish on the next page refresh.
         # BUT: skip sessions that were created within the last 10 minutes.
@@ -266,6 +251,8 @@ def setup_session_routes(
                     DbSession.created_at < _cutoff,
                 ).all()
                 for _g in _ghosts:
+                    if active_incognito_id and _g.id == active_incognito_id:
+                        continue
                     _purge_db.query(_DbMsg).filter(_DbMsg.session_id == _g.id).delete()
                     _purge_db.delete(_g)
                     if hasattr(session_manager, "delete_session"):
@@ -292,7 +279,8 @@ def setup_session_routes(
             mode_map = {}
             msg_count_map = {}
             persona_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.persona).filter(DbSession.archived == False)
+            workspace_map = {}
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.persona, DbSession.workspace_id).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
@@ -310,6 +298,7 @@ def setup_session_routes(
                 )
                 mode_map[row.id] = row.mode
                 msg_count_map[row.id] = row.message_count or 0
+                workspace_map[row.id] = row.workspace_id
                 try:
                     persona_map[row.id] = json.loads(row.persona) if row.persona else None
                 except Exception:
@@ -325,13 +314,22 @@ def setup_session_routes(
                     Document, user)
                 .distinct().all()
             )
-            img_session_ids = set(
-                r[0] for r in owner_filter(
-                    db.query(GalleryImage.session_id)
-                    .filter(GalleryImage.session_id != None),
-                    GalleryImage, user)
-                .distinct().all()
-            )
+            img_session_ids = {
+                str(session_id)
+                for (provenance,) in owner_filter(
+                    db.query(FilesImageResource.provenance).filter(
+                        FilesImageResource.kind == "image",
+                        FilesImageResource.is_active.is_(True),
+                    ),
+                    FilesImageResource,
+                    user,
+                ).all()
+                for session_id in (
+                    list((provenance or {}).get("session_ids", []))
+                    + [str((provenance or {}).get("session_id") or "")]
+                )
+                if session_id
+            }
         finally:
             db.close()
 
@@ -347,6 +345,7 @@ def setup_session_routes(
                      "has_images": s.id in img_session_ids,
                      "mode": mode_map.get(s.id),
                      "message_count": msg_count_map.get(s.id, 0),
+                     "workspace_id": workspace_map.get(s.id),
                      "persona": persona_map.get(s.id)}
                     for s in user_sessions.values()
                     if not s.archived
@@ -366,106 +365,49 @@ def setup_session_routes(
         incognito: str = Form(None),
         api_key: str = Form(""),
         endpoint_id: str = Form(""),
+        workspace_id: str = Form(""),
     ):
-        skip_val = str(skip_validation).lower() == "true"
         user = effective_user(request)
-        endpoint_api_key = ""
-        endpoint_base_url = ""
-        _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
-        if endpoint_id.strip() == "mimo":
-            # Virtual endpoint: models served by the mimo agent brain over
-            # ACP, not an HTTP endpoint row. Validate against mimo's own
-            # catalog and skip the /v1/models probe entirely.
-            _sup = getattr(request.app.state, "mimo_supervisor", None)
-            _catalog = _sup.available_models(owner=user) if _sup else []
-            if not _catalog:
-                raise HTTPException(503, "mimo is not running (no model catalog)")
-            _ids = [m.get("modelId", "") for m in _catalog]
-            if not model:
-                raise HTTPException(400, "model is required for the mimo endpoint")
-            if model not in _ids:
-                raise HTTPException(400, f"Model not in mimo catalog ({len(_ids)} models). Pick from /api/models.")
-            endpoint_url = "mimo://acp"
-            endpoint_id = "mimo"
-            skip_val = True
-        if endpoint_id and endpoint_id.strip():
-            from core.database import ModelEndpoint
-            from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_chat_url, normalize_base
-            _db = SessionLocal()
-            try:
-                q = _db.query(ModelEndpoint).filter(
-                    ModelEndpoint.id == endpoint_id.strip(),
-                    ModelEndpoint.is_enabled == True,
-                )
-                q = owner_filter(q, ModelEndpoint, user or "", include_shared=False)
-                endpoint_row = q.first()
-                if not endpoint_row:
-                    raise HTTPException(400, "Model endpoint no longer exists")
-                endpoint_base_url = endpoint_row.base_url or ""
-                endpoint_api_key = endpoint_row.api_key or ""
-                endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
-            finally:
-                _db.close()
-
-        if not endpoint_url and not skip_val:
-            raise HTTPException(400, "endpoint_url is required (choose from /api/models)")
-
-        model_to_use = model
+        workspace_value = (
+            str(workspace_id or "").strip()
+            if isinstance(workspace_id, str)
+            else ""
+        )
+        if workspace_value:
+            _validated_session_workspace(request, user, workspace_value)
         request_api_key = api_key.strip() if api_key else ""
-        effective_api_key = request_api_key or endpoint_api_key
-        validation_headers = None
-        if effective_api_key:
-            from src.endpoint_resolver import build_headers
-            validation_headers = build_headers(effective_api_key, endpoint_base_url or endpoint_url)
+        if request_api_key:
+            raise HTTPException(
+                400,
+                "Provider credentials must be added through the Providers interface",
+            )
 
-        if skip_val:
-            # skip_validation = trust the caller and do NOT probe /v1/models.
-            # Used for custom endpoints AND for bare placeholder sessions with no
-            # model at all (e.g. an email reply draft just needs a session to live
-            # in). Probing here was 400-ing those with "Cannot reach /v1/models".
-            pass
-        elif not model_to_use:
-            from src.llm_core import list_model_ids
-            ids = list_model_ids(
-                endpoint_url,
-                timeout=SESSION_MODEL_VALIDATION_TIMEOUT,
-                headers=validation_headers,
-                owner=user,
-                endpoint_id=endpoint_id.strip() if endpoint_id else None,
-            )
-            if not ids:
-                raise HTTPException(400, "Cannot reach /v1/models")
-            # Default to the first CHAT model — endpoints often list embedding/
-            # tts/whisper models first (e.g. text-embedding-ada-002), which
-            # can't hold a conversation.
-            _NON_CHAT = ("text-embedding", "embedding", "tts-", "whisper",
-                         "text-moderation", "moderation-", "dall-e", "rerank")
-            chat_ids = [m for m in ids if not any(p in m.lower() for p in _NON_CHAT)]
-            model_to_use = (chat_ids or ids)[0]
+        # Empty skip-validation sessions are non-executing placeholders used by
+        # email/document workflows. Every executable session must select one
+        # exact normalized provider route from /api/models.
+        placeholder = (
+            str(skip_validation).lower() == "true"
+            and not str(endpoint_id or "").strip()
+            and not str(model or "").strip()
+            and not str(endpoint_url or "").strip()
+        )
+        selected_route = None
+        if placeholder:
+            endpoint_url = ""
+            endpoint_id = ""
+            model_to_use = ""
         else:
-            from src.llm_core import list_model_ids
-            import os as _os
-            req_base = _os.path.basename(model_to_use.rstrip("/"))
-            avail = list_model_ids(
-                endpoint_url,
-                timeout=SESSION_MODEL_VALIDATION_TIMEOUT,
-                headers=validation_headers,
-                owner=user,
-                endpoint_id=endpoint_id.strip() if endpoint_id else None,
-            )
-            if not avail:
-                raise HTTPException(400, "Cannot reach /v1/models")
-            if model_to_use not in avail:
-                found = None
-                for a in avail:
-                    if _os.path.basename(a.rstrip("/")) == req_base:
-                        found = a
-                        break
-                if not found:
-                    raise HTTPException(400,
-                                        f"Model not found at server. Available: {', '.join(avail)}")
-                model_to_use = found
+            try:
+                selected_route = resolve_chat_route(
+                    owner=user,
+                    endpoint_id=endpoint_id,
+                    model_id=model,
+                )
+            except ChatRouteUnavailable as exc:
+                raise HTTPException(400, str(exc)) from exc
+            endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+            endpoint_id = selected_route.public_endpoint_id
+            model_to_use = selected_route.provider_model_id
 
         auth_manager = getattr(request.app.state, "auth_manager", None)
         get_privileges = getattr(auth_manager, "get_privileges", None)
@@ -473,7 +415,12 @@ def setup_session_routes(
         allowed = set((privileges or {}).get("allowed_models") or [])
         restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
         if (privileges or {}).get("block_all_models") or (
-            restricted and model_to_use not in allowed
+            restricted
+            and model_to_use not in allowed
+            and (
+                selected_route is None
+                or selected_route.model_route_id not in allowed
+            )
         ):
             raise HTTPException(403, f"Your account is not allowed to use model {model_to_use!r}")
         
@@ -489,9 +436,13 @@ def setup_session_routes(
                 endpoint_url=endpoint_url or "",
                 model=model_to_use,
                 endpoint_id=endpoint_id.strip() or None,
+                provider_model_route_id=(
+                    selected_route.model_route_id if selected_route else None
+                ),
                 rag=False,
                 owner=user,
                 incognito=True,
+                workspace_id=workspace_value or None,
             )
             session_manager.sessions[sid] = session
         else:
@@ -503,18 +454,16 @@ def setup_session_routes(
                 rag=str(rag).lower() == "true" if rag else False,
                 owner=user,
                 endpoint_id=endpoint_id.strip() or None,
+                provider_model_route_id=(
+                    selected_route.model_route_id if selected_route else None
+                ),
+                workspace_id=workspace_value or None,
             )
-        # Set auth headers for custom API-key endpoints
-        resolved_key = request_api_key
-        resolved_base = endpoint_url
-        if not resolved_key and endpoint_api_key:
-            resolved_key = endpoint_api_key
-            resolved_base = endpoint_base_url
-        if resolved_key:
-            from src.endpoint_resolver import build_headers
-            session.headers = build_headers(resolved_key, resolved_base)
-            if not is_incognito:
-                _persist_session_headers(sid, session.headers)
+        # Managed provider credentials are leased inside the engine. Session
+        # metadata is always secret-free.
+        session.headers = {}
+        from src.openclank.code_index_lifecycle import session_workspace_index_event
+        await session_workspace_index_event(request, session)
         # Fire webhook (sync-safe)
         if webhook_manager and not is_incognito:
             webhook_manager.fire_and_forget("session.created", {
@@ -528,8 +477,11 @@ def setup_session_routes(
             id=sid,
             name=session.name,
             model=model_to_use,
+            endpoint_url=endpoint_url or "",
+            endpoint_id=endpoint_id.strip() or None,
             rag=False if is_incognito else (str(rag).lower() == "true" if rag else False),
-            archived=False
+            archived=False,
+            workspace_id=workspace_value or None,
         )    
     @router.patch("/session/{sid}")
     async def rename_session(
@@ -537,6 +489,7 @@ def setup_session_routes(
         name: str = Form(None), folder: str = Form(None),
         model: str = Form(None), endpoint_url: str = Form(None),
         endpoint_id: str = Form(None),
+        workspace_id: str = Form(None),
     ):
         _verify_session_owner(request, sid)
         try:
@@ -544,6 +497,35 @@ def setup_session_routes(
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
         result = {"id": sid}
+        workspace_supplied = isinstance(workspace_id, str)
+        prior_workspace = getattr(session, "workspace_id", None)
+        if workspace_supplied:
+            workspace_value = workspace_id.strip()
+            if workspace_value:
+                _validated_session_workspace(
+                    request,
+                    effective_user(request),
+                    workspace_value,
+                )
+            await _prepare_context_mutation(request, sid)
+            from src.openclank.code_index_lifecycle import session_workspace_index_event
+            if prior_workspace and workspace_value != prior_workspace:
+                await session_workspace_index_event(
+                    request, session, action="release", workspace_id=prior_workspace,
+                )
+            if not session_manager.update_session_workspace(
+                sid,
+                workspace_value or None,
+            ):
+                raise HTTPException(404, f"Session {sid} not found")
+            result["workspace_id"] = workspace_value or None
+            if workspace_value:
+                await session_workspace_index_event(request, session)
+            if workspace_value and workspace_value != prior_workspace:
+                from src.openclank.achievement_producers import record_activity
+                record_activity(request, "chat.workspace.rebound", str(uuid.uuid4()), {
+                    "sessionId": sid, "newWorkspaceId": workspace_value, "sessionIdPreserved": True,
+                }, workspace_id=workspace_value)
         if name is not None:
             session_manager.update_session_name(sid, name)
             result["name"] = name
@@ -560,58 +542,32 @@ def setup_session_routes(
             finally:
                 db.close()
         # Switch model/endpoint mid-session
-        if model is not None and endpoint_url is not None:
+        if model is not None and (endpoint_id is not None or endpoint_url is not None):
             user = effective_user(request)
-            _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
-            endpoint_api_key = ""
-            endpoint_base_url = ""
-            if endpoint_id == "mimo":
-                # Virtual endpoint served by the mimo agent brain over ACP —
-                # no ModelEndpoint row. Validate against mimo's catalog.
-                _sup = getattr(request.app.state, "mimo_supervisor", None)
-                _catalog = _sup.available_models(owner=user) if _sup else []
-                if not _catalog:
-                    raise HTTPException(503, "mimo is not running (no model catalog)")
-                if model not in [m.get("modelId", "") for m in _catalog]:
-                    raise HTTPException(400, f"Model not in mimo catalog ({len(_catalog)} models). Pick from /api/models.")
-                endpoint_url = "mimo://acp"
-                endpoint_id = "mimo"
-            elif endpoint_id:
-                from core.database import ModelEndpoint
-                from src.auth_helpers import owner_filter
-                from src.endpoint_resolver import build_chat_url, normalize_base
-                _db = SessionLocal()
-                try:
-                    q = _db.query(ModelEndpoint).filter(
-                        ModelEndpoint.id == endpoint_id,
-                        ModelEndpoint.is_enabled == True,
-                    )
-                    q = owner_filter(q, ModelEndpoint, user or "", include_shared=False)
-                    ep = q.first()
-                    if not ep:
-                        raise HTTPException(400, "Model endpoint no longer exists")
-                    endpoint_base_url = ep.base_url or ""
-                    endpoint_api_key = ep.api_key or ""
-                    endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
-                finally:
-                    _db.close()
+            try:
+                selected_route = resolve_chat_route(
+                    owner=user,
+                    endpoint_id=endpoint_id,
+                    model_id=model,
+                )
+            except ChatRouteUnavailable as exc:
+                raise HTTPException(400, str(exc)) from exc
+            endpoint_url = MANAGED_ENGINE_PUBLIC_URL
+            endpoint_id = selected_route.public_endpoint_id
+            model = selected_route.provider_model_id
             auth_manager = getattr(request.app.state, "auth_manager", None)
             get_privileges = getattr(auth_manager, "get_privileges", None)
             privileges = get_privileges(user) if get_privileges and user else {}
             allowed = set((privileges or {}).get("allowed_models") or [])
             restricted = bool((privileges or {}).get("allowed_models_restricted")) or bool(allowed)
-            if (privileges or {}).get("block_all_models") or (restricted and model not in allowed):
+            if (privileges or {}).get("block_all_models") or (
+                restricted
+                and model not in allowed
+                and selected_route.model_route_id not in allowed
+            ):
                 raise HTTPException(403, f"Your account is not allowed to use model {model!r}")
             await _prepare_context_mutation(request, sid)
-            session.model = model
-            session.endpoint_url = endpoint_url
-            session.endpoint_id = endpoint_id or None
-            # Update auth headers from the endpoint's stored API key
-            if endpoint_api_key:
-                from src.endpoint_resolver import build_headers
-                session.headers = build_headers(endpoint_api_key, endpoint_base_url)
-            else:
-                session.headers = {}
+            next_headers = {}
             # Persist to DB
             db = SessionLocal()
             try:
@@ -620,11 +576,19 @@ def setup_session_routes(
                     db_session.model = model
                     db_session.endpoint_url = endpoint_url
                     db_session.endpoint_id = endpoint_id or None
-                    db_session.headers = session.headers or {}
+                    db_session.provider_model_route_id = selected_route.model_route_id
+                    db_session.headers = next_headers
                     db_session.updated_at = utcnow_naive()
                     db.commit()
             finally:
                 db.close()
+            # Publish the new in-memory route only after persistence succeeds.
+            # A failed commit must leave the active session on its old route.
+            session.model = model
+            session.endpoint_url = endpoint_url
+            session.endpoint_id = endpoint_id or None
+            session.provider_model_route_id = selected_route.model_route_id
+            session.headers = next_headers
             result["model"] = model
             result["endpoint_url"] = endpoint_url
             result["endpoint_id"] = endpoint_id or None
@@ -632,32 +596,292 @@ def setup_session_routes(
 
     @router.get("/session/{sid}/mimo-state")
     async def get_mimo_state(request: Request, sid: str, refresh: bool = False):
-        """Return the owner-scoped negotiated MiMo control-plane snapshot."""
+        """Return the owner-scoped negotiated Open Clank agent control-plane snapshot."""
         _verify_session_owner(request, sid)
         try:
-            session = session_manager.get_session(sid)
+            session = session_manager.get_session(sid, allow_pending_history=True)
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
-        if session.endpoint_url != "mimo://acp":
-            return {"available": False, "reason": "Session does not use MiMo"}
+        if not getattr(session, "provider_model_route_id", None):
+            return {"available": False, "native_route_selected": False, "reason": "Session does not use Open Clank agent"}
 
         owner = effective_user(request) or getattr(session, "owner", None)
         if not owner:
-            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+            raise HTTPException(403, "Open Clank agent sessions require an authenticated owner")
         from src.openclank.transcript_projection import get_mimo_state as _get_state
 
         state = _get_state(sid, owner=owner)
-        if refresh or not state.get("config_options"):
+        if refresh:
             supervisor = getattr(request.app.state, "mimo_supervisor", None)
             if supervisor is None:
-                raise HTTPException(503, "mimo ACP is unavailable")
+                raise HTTPException(503, "Open Clank engine is unavailable")
             try:
                 state = await supervisor.negotiate_session(
                     sid, owner=owner
                 )
             except RuntimeError as exc:
                 raise HTTPException(503, str(exc)) from exc
-        return {"available": True, **state}
+        if not state:
+            return {"available": False, "native_route_selected": True, "reason": "SESSION_NOT_READY", "retryable": True}
+        return {"available": True, "native_route_selected": True, **state}
+
+    @router.post("/session/{sid}/plan/approve")
+    async def approve_plan(request: Request, sid: str):
+        """CAS-approve the exact server-persisted plan revision for this session."""
+        _verify_session_owner(request, sid, session_manager)
+        owner = effective_user(request)
+        if not owner:
+            raise HTTPException(403, "Plan approval requires an authenticated owner")
+        try:
+            body = await request.json()
+            revision = int(body.get("revision"))
+            digest = str(body.get("digest") or "")
+        except (TypeError, ValueError, AttributeError, json.JSONDecodeError) as exc:
+            raise HTTPException(400, "revision and digest are required") from exc
+        if revision <= 0 or len(digest) != 64:
+            raise HTTPException(400, "revision and digest are required")
+        from src.plan_approval import approve_plan as _approve_plan
+
+        try:
+            plan_state = _approve_plan(sid, owner, revision=revision, digest=digest)
+        except KeyError as exc:
+            raise HTTPException(404, "Session plan is unavailable") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"ok": True, "plan_state": plan_state}
+
+    @router.post("/session/{sid}/plan/draft")
+    async def save_plan_draft(request: Request, sid: str):
+        """Persist a displayed draft; this endpoint never grants execution."""
+        _verify_session_owner(request, sid, session_manager)
+        owner = effective_user(request)
+        if not owner:
+            raise HTTPException(403, "Plan drafts require an authenticated owner")
+        try:
+            body = await request.json()
+            plan = str(body.get("plan") or "")
+        except (TypeError, AttributeError, json.JSONDecodeError) as exc:
+            raise HTTPException(400, "plan is required") from exc
+        from src.plan_approval import save_plan_draft as _save_plan_draft
+
+        try:
+            plan_state = _save_plan_draft(sid, owner, plan)
+        except KeyError as exc:
+            raise HTTPException(404, "Session plan is unavailable") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "plan_state": plan_state}
+
+    @router.post("/session/{sid}/plan/clear")
+    async def clear_plan(request: Request, sid: str):
+        """Clear server draft/approval state without deleting materialized files."""
+        _verify_session_owner(request, sid, session_manager)
+        owner = effective_user(request)
+        if not owner:
+            raise HTTPException(403, "Plan clearing requires an authenticated owner")
+        from src.plan_approval import clear_plan as _clear_plan
+
+        try:
+            plan_state = _clear_plan(sid, owner)
+        except KeyError as exc:
+            raise HTTPException(404, "Session plan is unavailable") from exc
+        return {"ok": True, "plan_state": plan_state}
+
+    async def _goal_proxy(
+        request: Request,
+        sid: str,
+        method: str,
+        *,
+        suffix: str = "goal",
+        payload: dict | None = None,
+        timeout: float = 20.0,
+    ):
+        _verify_session_owner(request, sid, session_manager)
+        try:
+            session = session_manager.get_session(sid)
+        except KeyError:
+            raise HTTPException(404, f"Session {sid} not found")
+        if not getattr(session, "provider_model_route_id", None):
+            raise HTTPException(400, "Goals are available on Open Clank agent sessions")
+        owner = effective_user(request) or getattr(session, "owner", None)
+        if not owner:
+            raise HTTPException(403, "Open Clank agent goals require an owner")
+        supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        request_session = getattr(supervisor, "session_http_request", None)
+        if not callable(request_session):
+            raise HTTPException(503, "Open Clank agent is unavailable")
+        try:
+            response = await request_session(
+                sid,
+                method,
+                suffix,
+                owner=owner,
+                payload=payload,
+                timeout=timeout,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from src.openclank.agent_supervisor import AgentSupervisorAdmissionError
+
+            if isinstance(exc, AgentSupervisorAdmissionError):
+                raise HTTPException(exc.status, str(exc)) from exc
+            if isinstance(exc, (RuntimeError, httpx.HTTPError)):
+                raise HTTPException(503, str(exc)) from exc
+            raise
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise HTTPException(502, "Open Clank agent returned an invalid response") from exc
+        if response.status_code >= 400:
+            detail = body.get("error") if isinstance(body, dict) else None
+            if isinstance(detail, dict):
+                detail = detail.get("message")
+            if not detail and isinstance(body, dict):
+                data = body.get("data")
+                detail = data.get("message") if isinstance(data, dict) else body.get("message")
+            raise HTTPException(
+                response.status_code if response.status_code < 600 else 502,
+                str(detail or "Open Clank agent goal request failed")[:500],
+            )
+        return body
+
+    @router.post("/session/{sid}/mimo-operation")
+    async def native_session_operation(request: Request, sid: str):
+        """Bounded native operations under canonical host session ownership."""
+        _verify_session_owner(request, sid, session_manager)
+        body = await request.json()
+        if not isinstance(body, dict): raise HTTPException(400, "Operation must be an object")
+        operation = body.get("operation")
+        allowed_keys = {
+            "commands-refresh": {"operation", "reload_skills"},
+            "compact": {"operation"}, "btw": {"operation", "question"},
+            "recovery": {"operation"}, "recover": {"operation", "assistantMessageID"},
+            "timeline": {"operation"}, "undo": {"operation", "host_message_id", "expected_transcript_revision"},
+            "redo": {"operation", "expected_transcript_revision"}, "history-reconcile": {"operation", "expected_transcript_revision"},
+            "fork": {"operation", "expected_transcript_revision", "host_message_id", "title"},
+            "fork-reconcile": {"operation", "expected_transcript_revision", "child_session_id"},
+        }
+        if operation not in allowed_keys: raise HTTPException(400, "Unsupported native session operation")
+        if set(body) - allowed_keys[operation]: raise HTTPException(400, "Unsupported operation fields")
+        if operation in {"timeline", "undo", "redo", "history-reconcile", "fork", "fork-reconcile"}:
+            session = session_manager.get_session(sid, allow_pending_history=True)
+        else:
+            session = session_manager.get_session(sid)
+        if not session.provider_model_route_id: raise HTTPException(409, "Session does not use Open Clank agent")
+        owner = effective_user(request)
+        if operation == "commands-refresh":
+            reload_skills = body.get("reload_skills", False)
+            if type(reload_skills) is not bool: raise HTTPException(400, "reload_skills must be boolean")
+            control = getattr(getattr(request.app.state, "mimo_supervisor", None), "ready_refresh_commands", None)
+            if not callable(control): raise HTTPException(503, "Ready command refresh is unavailable")
+            from src.openclank.mimo_supervisor import SupervisorAdmissionError
+            try: result = await control(owner, session_id=sid, reload_skills=reload_skills)
+            except SupervisorAdmissionError as exc: raise HTTPException(exc.status, {"code": exc.code, "message": "Catalog target is not ready", "retryable": exc.retryable}) from exc
+            return {"operation": operation, "result": result}
+        if operation in {"fork", "fork-reconcile"}:
+            _reject_compact_during_active_run(sid)
+            from src.openclank.session_fork import ForkOperationError
+            control = getattr(getattr(request.app.state, "mimo_supervisor", None), "session_fork_operation", None)
+            if not callable(control): raise HTTPException(503, "Native fork controls are unavailable")
+            try:
+                result = await control(sid, owner=owner, operation=operation, payload=body, manager=session_manager)
+            except ForkOperationError as exc:
+                raise HTTPException(exc.status, {"code": exc.code, "message": str(exc), "candidate_id": exc.candidate_id}) from exc
+            except Exception as exc:
+                from src.openclank.agent_supervisor import AgentSupervisorAdmissionError
+                if isinstance(exc, AgentSupervisorAdmissionError): raise HTTPException(exc.status, {"code": exc.code, "message": "Native fork owner is unavailable", "retryable": exc.retryable}) from exc
+                raise
+            return {"operation": operation, "result": result}
+        if operation in {"timeline", "undo", "redo", "history-reconcile"}:
+            if operation != "timeline": _reject_compact_during_active_run(sid)
+            from src.openclank.session_operations import HistoryOperationError
+            control = getattr(getattr(request.app.state, "mimo_supervisor", None), "session_history_operation", None)
+            if not callable(control): raise HTTPException(503, "Native history controls are unavailable")
+            try:
+                result = await control(sid, owner=owner, operation=operation, payload=body)
+            except HistoryOperationError as exc:
+                raise HTTPException(exc.status, {"code": exc.code, "message": str(exc), "choices": exc.choices}) from exc
+            except Exception as exc:
+                from src.openclank.agent_supervisor import AgentSupervisorAdmissionError
+                if isinstance(exc, AgentSupervisorAdmissionError): raise HTTPException(exc.status, {"code": exc.code, "message": "Native history owner is unavailable", "retryable": exc.retryable}) from exc
+                raise
+            draft = result.get("restore_draft") if isinstance(result, dict) else None
+            if isinstance(draft, dict):
+                refs = draft.get("attachment_refs") or []
+                resolver = getattr(upload_handler, "resolve_upload", None)
+                missing = []
+                for ref in refs:
+                    identifier = ref.get("attachment_id")
+                    try: available = callable(resolver) and resolver(identifier, owner=owner, allow_admin=False)
+                    except (ValueError, PermissionError, OSError): available = None
+                    if not available: missing.append(identifier)
+                draft["available"] = not missing
+                draft["unavailable_attachment_ids"] = missing
+                if missing: draft["reason"] = "OWNER_UPLOAD_UNAVAILABLE"
+            return {"operation": operation, "result": result}
+        if operation == "recovery":
+            return {"operation": operation, "result": await _goal_proxy(request, sid, "GET", suffix="recovery")}
+        if operation in {"compact", "recover"}: _reject_compact_during_active_run(sid)
+        if operation == "recover":
+            candidate_id = body.get("assistantMessageID")
+            if not isinstance(candidate_id, str) or not re.fullmatch(r"msg_[A-Za-z0-9]+", candidate_id):
+                raise HTTPException(400, "assistantMessageID must identify an interrupted candidate")
+            candidates = await _goal_proxy(request, sid, "GET", suffix="recovery")
+            if not isinstance(candidates, list) or not any(item.get("assistantMessageID") == candidate_id for item in candidates if isinstance(item, dict)):
+                raise HTTPException(409, "Interrupted candidate is no longer recoverable")
+            result = await _goal_proxy(request, sid, "POST", suffix=f"turn/{candidate_id}/resume")
+        else:
+            route = resolve_chat_route(owner=owner, endpoint_id=session.endpoint_id, model_route_id=session.provider_model_route_id)
+            payload = {"providerID": route.connection_id, "modelID": route.provider_model_id}
+            if operation == "compact":
+                payload["auto"] = False
+                suffix = "summarize"
+            else:
+                question = body.get("question")
+                if not isinstance(question, str) or not question.strip(): raise HTTPException(400, "A side question is required")
+                payload["question"] = question
+                suffix = "ask"
+            result = await _goal_proxy(request, sid, "POST", suffix=suffix, payload=payload, timeout=120.0)
+        return {"operation": operation, "result": result}
+
+    @router.get("/session/{sid}/goal")
+    async def get_session_goal(request: Request, sid: str):
+        return await _goal_proxy(request, sid, "GET")
+
+    @router.post("/session/{sid}/goal")
+    async def update_session_goal(request: Request, sid: str, payload: dict):
+        if payload.get("action") != "verify":
+            return await _goal_proxy(
+                request,
+                sid,
+                "POST",
+                payload=payload,
+            )
+
+        target = payload.get("target")
+        goal_id = target.get("goalID") if isinstance(target, dict) else None
+        revision = target.get("expectedRevision") if isinstance(target, dict) else None
+        if (
+            not isinstance(goal_id, str)
+            or not goal_id
+            or not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise HTTPException(400, "verify requires the current goal ID and revision")
+        await _goal_proxy(
+            request,
+            sid,
+            "POST",
+            suffix="command",
+            payload={
+                "command": "goal",
+                "arguments": f"verify {goal_id} {revision}",
+            },
+            timeout=240.0,
+        )
+        return await _goal_proxy(request, sid, "GET")
 
     @router.put("/session/{sid}/persona")
     async def set_session_persona(request: Request, sid: str):
@@ -714,25 +938,32 @@ def setup_session_routes(
 
     @router.patch("/session/{sid}/mimo-config")
     async def set_mimo_config(request: Request, sid: str):
-        """Validate, acknowledge, and persist one negotiated MiMo option."""
+        """Validate, acknowledge, and persist one negotiated Open Clank agent option."""
         _verify_session_owner(request, sid)
         try:
             session = session_manager.get_session(sid)
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
-        if session.endpoint_url != "mimo://acp":
-            raise HTTPException(409, "Session does not use MiMo")
+        if not getattr(session, "provider_model_route_id", None):
+            raise HTTPException(409, "Session does not use Open Clank agent")
         owner = effective_user(request) or getattr(session, "owner", None)
         if not owner:
-            raise HTTPException(403, "MiMo sessions require an authenticated owner")
+            raise HTTPException(403, "Open Clank agent sessions require an authenticated owner")
         body = await request.json()
         config_id = str(body.get("config_id") or "").strip()
         value = body.get("value")
         if not config_id or not isinstance(value, str):
             raise HTTPException(400, "config_id and string value are required")
+        if config_id == "agent_profile":
+            _reject_compact_during_active_run(sid)
+        if config_id == "model":
+            raise HTTPException(
+                409,
+                "Change models through the model picker so the stable provider route is preserved",
+            )
         supervisor = getattr(request.app.state, "mimo_supervisor", None)
         if supervisor is None:
-            raise HTTPException(503, "mimo ACP is unavailable")
+            raise HTTPException(503, "Open Clank engine is unavailable")
         try:
             state = await supervisor.set_session_config(
                 sid,
@@ -750,16 +981,6 @@ def setup_session_routes(
             if isinstance(exc, RPCError):
                 raise HTTPException(409, str(exc)) from exc
             raise
-        if config_id == "model":
-            db = SessionLocal()
-            try:
-                row = db.query(DbSession).filter(DbSession.id == sid).first()
-                if row is not None:
-                    row.model = value
-                    db.commit()
-                session.model = value
-            finally:
-                db.close()
         return {"status": "ok", **state}
     
     @router.post("/session/{sid}/inject_messages")
@@ -782,6 +1003,7 @@ def setup_session_routes(
                     owner,
                     message.get("content"),
                     message.get("metadata"),
+                    session_id=sid,
                 )
                 if missing_id:
                     raise HTTPException(
@@ -802,41 +1024,44 @@ def setup_session_routes(
 
     @router.post("/sessions/bulk-delete")
     async def bulk_delete_sessions(request: Request):
-        """Delete multiple sessions (for compare cleanup via sendBeacon)."""
-        from core.database import ChatMessage as _CM
+        """Beacon cleanup uses the same owned, observable erasure path."""
         try:
             body = await request.json()
             ids = body.get("ids", [])
         except Exception:
             ids = []
+        if not isinstance(ids, list) or len(ids) > 500:
+            raise HTTPException(422, "ids must be a bounded list")
         deleted_count = 0
         for sid in ids:
             try:
-                _verify_session_owner(request, sid, session_manager)
-                
-                # Enforce "starred" protection consistent with single-session delete
-                db = SessionLocal()
-                try:
-                    db_sess = db.query(DbSession).filter(DbSession.id == sid).first()
-                    if db_sess and db_sess.is_important:
-                        continue
-                finally:
-                    db.close()
-
-                await _prepare_context_mutation(request, sid)
-                if session_manager.delete_session(sid):
-                    deleted_count += 1
-            except HTTPException:
+                await delete_session(request, str(sid))
+                deleted_count += 1
+            except HTTPException as exc:
+                if exc.status_code == 403 and isinstance(exc.detail, dict) and exc.detail.get("error") == "SESSION_STARRED":
+                    continue
                 raise
-            except Exception:
-                logger.exception("Bulk session delete failed for %s", sid)
-                raise HTTPException(500, f"Failed to delete session {sid}")
         return {"deleted": deleted_count}
+
+    @router.get("/session/{sid}/delete-impact")
+    def session_delete_impact(request: Request, sid: str):
+        owner = _verify_session_owner(request, sid, session_manager)
+        from src.openclank.session_deletion import deletion_impact
+        db = SessionLocal()
+        try:
+            result = deletion_impact(db, owner=owner, session_id=sid, upload_handler=upload_handler)
+            row = db.query(DbSession).filter(DbSession.id == sid).first()
+            result["protected"] = bool(row and row.is_important)
+            return result
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        finally:
+            db.close()
 
     @router.delete("/session/{sid}")
     async def delete_session(request: Request, sid: str):
         """Permanently delete a session and all its messages."""
-        _verify_session_owner(request, sid, session_manager)
+        owner = _verify_session_owner(request, sid, session_manager)
         try:
             # Block deletion of starred/favorited sessions
             db = SessionLocal()
@@ -850,16 +1075,15 @@ def setup_session_routes(
             finally:
                 db.close()
 
-            await _prepare_context_mutation(request, sid)
-            # Delete the session and all its messages
-            if session_manager.delete_session(sid):
-                return {"status": "deleted"}
-            else:
-                raise HTTPException(404, "Session not found")
+            service = ChatLifecycleService(session_manager=session_manager,
+                mimo_supervisor=getattr(request.app.state, "mimo_supervisor", None),
+                memory_provider=getattr(request.app.state, "memory_provider", None))
+            try:
+                return await service.erase(owner=owner, session_id=sid)
+            except ChatLifecycleError as exc:
+                status = 409 if exc.code == "active_run" else 503
+                raise HTTPException(status, {"error": "SESSION_DELETE_INCOMPLETE", "message": str(exc), "retryable": exc.code == "erasure_pending"}) from exc
         except HTTPException:
-            raise
-        except HTTPException:
-            db.rollback()
             raise
         except Exception as e:
             logger.error(f"Error deleting session {sid}: {e}")
@@ -873,112 +1097,64 @@ def setup_session_routes(
     
     @router.delete("/sessions/all")
     async def delete_all_sessions(request: Request):
-        """Admin only: permanently delete ALL sessions and their messages."""
+        """Admin deletion uses the same scoped erasure for every conversation."""
         from core.middleware import require_admin
         require_admin(request)
-
         db = SessionLocal()
         try:
-            from core.database import ChatMessage as DbChatMessage
-            session_ids = {row[0] for row in db.query(DbSession.id).all()}
-            from src.openclank.transcript_projection import (
-                list_projections,
-                purge_execution_projection,
-            )
-            supervisor = getattr(request.app.state, "mimo_supervisor", None)
-            session_ids.update(
-                row["odysseus_session_id"] for row in list_projections()
-            )
-            bridge = getattr(supervisor, "bridge", None) if supervisor else None
-            if bridge is not None:
-                session_ids.update(bridge.mapped_sessions())
-            for session_id in session_ids:
-                try:
-                    await purge_execution_projection(supervisor, session_id)
-                except RuntimeError as exc:
-                    raise HTTPException(503, str(exc)) from exc
-            count = db.query(DbSession).count()
-            db.query(DbChatMessage).delete()
-            db.query(DbSession).delete()
-            db.commit()
-            session_manager.sessions.clear()
-            logger.info(f"Admin deleted all {count} sessions")
-            return {"status": "deleted", "count": count}
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error deleting all sessions: {e}")
-            raise HTTPException(500, "Failed to delete sessions")
+            rows = db.query(DbSession.id, DbSession.owner).all()
         finally:
             db.close()
+        identities = {str(row.id): str(row.owner or "") for row in rows}
+        identities.update({str(sid): str(getattr(session, "owner", "") or "") for sid, session in session_manager.sessions.items()})
+        # Engine-only projections remain part of the administrator's all
+        # operation. Their persisted owner is authoritative; an unowned
+        # bridge mapping cannot be erased under a guessed account.
+        from src.openclank.transcript_projection import list_projections, purge_execution_projection
+        supervisor = getattr(request.app.state, "mimo_supervisor", None)
+        projections = {str(row["odysseus_session_id"]): row for row in list_projections()}
+        bridge = getattr(supervisor, "bridge", None) if supervisor else None
+        mapped = bridge.mapped_sessions() if bridge is not None else {}
+        unknown = set(mapped) - set(identities) - set(projections)
+        if unknown:
+            raise HTTPException(409, "Engine mapping has no authoritative account identity; explicit reconciliation required")
+        deleted = []
+        for sid, projection in projections.items():
+            if sid in identities:
+                continue
+            owner = str(projection.get("owner") or "")
+            if not owner:
+                raise HTTPException(409, "Engine projection has no account identity; explicit conversion required")
+            _reject_compact_during_active_run(sid)
+            try:
+                await purge_execution_projection(supervisor, sid, owner=owner)
+            except Exception as exc:
+                raise HTTPException(503, {"error": "SESSION_DELETE_INCOMPLETE", "message": "Engine projection deletion incomplete", "deleted": deleted, "failed_session_id": sid}) from exc
+            deleted.append(sid)
+        for sid, owner in identities.items():
+            if not owner:
+                raise HTTPException(409, "Conversation has no account identity; explicit conversion required")
+            _reject_compact_during_active_run(sid)
+            supervisor = getattr(request.app.state, "mimo_supervisor", None)
+            service = ChatLifecycleService(session_manager=session_manager,
+                mimo_supervisor=supervisor,
+                memory_provider=getattr(request.app.state, "memory_provider", None))
+            try:
+                await service.erase(owner=owner, session_id=sid, allow_protected=True)
+            except ChatLifecycleError as exc:
+                raise HTTPException(503, {"error": "SESSION_DELETE_INCOMPLETE", "message": str(exc), "deleted": deleted, "failed_session_id": sid}) from exc
+            deleted.append(sid)
+        return {"status": "deleted", "count": len(deleted)}
 
     @router.post("/session/{sid}/archive")
     async def archive_session(request: Request, sid: str):
         """Archive a session, keeping its data but removing it from active sessions."""
-        _verify_session_owner(request, sid)
-        try:
-            # First check if session exists
-            session_manager.get_session(sid)
-            await _prepare_context_mutation(request, sid)
-            
-            # Archive the session
-            db = SessionLocal()
-            try:
-                db_session = db.query(DbSession).filter(DbSession.id == sid).first()
-                if db_session:
-                    db_session.archived = True
-                    db_session.updated_at = utcnow_naive()
-                    db.commit()
-                    
-                    # Update in memory if it exists
-                    if sid in session_manager.sessions:
-                        session_manager.sessions[sid].archived = True
-                        
-                    logger.info(f"Archived session {sid}")
-                    return {"status": "archived"}
-                else:
-                    raise HTTPException(404, f"Session {sid} not found")
-                    
-            except HTTPException:
-                raise
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Error archiving session {sid}: {e}")
-                raise HTTPException(500, "Failed to archive session")
-            finally:
-                db.close()
-
-        except KeyError:
-            raise HTTPException(404, f"Session '{sid}' not found")
+        return await _set_chat_archived(request, sid, True)
     
     @router.post("/session/{sid}/unarchive")
-    def unarchive_session(request: Request, sid: str):
+    async def unarchive_session(request: Request, sid: str):
         """Restore an archived session back to the active session list."""
-        _verify_session_owner(request, sid)
-        db = SessionLocal()
-        try:
-            db_session = db.query(DbSession).filter(DbSession.id == sid).first()
-            if not db_session:
-                raise HTTPException(404, f"Session {sid} not found")
-            db_session.archived = False
-            db_session.updated_at = utcnow_naive()
-            db.commit()
-            # Reload into session manager so it appears in the active list
-            try:
-                if sid in session_manager.sessions:
-                    session_manager.sessions[sid].archived = False
-                else:
-                    session_manager._load_session_from_db(sid)
-            except Exception:
-                pass  # Non-fatal — session will load on next access
-            return {"status": "unarchived"}
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error unarchiving session {sid}: {e}")
-            raise HTTPException(500, "Failed to unarchive session")
-        finally:
-            db.close()
+        return await _set_chat_archived(request, sid, False)
 
     @router.get("/sessions/archived")
     def list_archived_sessions(request: Request, search: str = "", offset: int = 0, limit: int = 20, sort: str = "recent", model: str = ""):
@@ -1019,20 +1195,12 @@ def setup_session_routes(
                     "created_at": s.created_at.isoformat() if s.created_at else None,
                     "updated_at": s.updated_at.isoformat() if s.updated_at else None,
                     "is_important": s.is_important,
+                    "workspace_id": s.workspace_id,
                 })
             return {"sessions": sessions, "total": total}
         finally:
             db.close()
 
-    @router.get("/history/{sid}")
-    def get_history(request: Request, sid: str):
-        _verify_session_owner(request, sid)
-        try:
-            session = session_manager.get_session(sid)
-        except KeyError:
-            raise HTTPException(404, f"Session {sid} not found")
-        return {"history": [msg.to_dict() for msg in session.history]}
-    
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
         """Export conversation history as a downloadable file.
@@ -1044,6 +1212,10 @@ def setup_session_routes(
             session = session_manager.get_session(sid)
         except KeyError:
             raise HTTPException(404, f"Session {sid} not found")
+        except Exception as exc:
+            from src.openclank.session_operations import HistoryOperationError
+            if isinstance(exc, HistoryOperationError): raise HTTPException(409, {"code": exc.code, "message": "Resolve pending history before exporting"}) from exc
+            raise
 
         safe_name = re.sub(r'[^\w\-_]', '_', session.name)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1193,90 +1365,8 @@ def setup_session_routes(
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
 
-    @router.post("/session/{session_id}/compact")
-    async def compact_session(request: Request, session_id: str):
-        """Summarize older messages into one compacted history entry."""
-        _verify_session_owner(request, session_id)
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            raise HTTPException(404, f"Session {session_id} not found")
-        await _prepare_context_mutation(request, session_id)
-
-        history = list(session.history or [])
-        if len(history) < 6:
-            raise HTTPException(400, "Not enough messages to compact")
-
-        # Keep a small recent tail verbatim. The prior half-chat/20-message
-        # tail made manual compaction look like it did nothing on normal chats.
-        recent_keep = min(8, max(4, len(history) // 4))
-        older = history[:-recent_keep]
-        recent = history[-recent_keep:]
-        if not older:
-            raise HTTPException(400, "Nothing old enough to compact")
-
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
-        from src.endpoint_resolver import resolve_endpoint
-        from src.llm_core import llm_call_async
-
-        owner = getattr(session, "owner", None) or effective_user(request)
-        url, model, headers = resolve_endpoint("utility", owner=owner)
-        if not url or not model:
-            url, model, headers = session.endpoint_url, session.model, session.headers
-        if not url or not model:
-            raise HTTPException(400, "No model configured for compaction")
-
-        prior_compactions = sum(
-            1 for m in history
-            if _message_metadata(m).get("compacted") or "[Conversation summary" in _message_text(m)
-        )
-        prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace(
-            "{count}", str(len(older))
-        ).replace(
-            "{n}", str(prior_compactions + 1)
-        )
-        convo_text = "\n".join(
-            f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
-            for m in older
-        )
-        try:
-            summary = await llm_call_async(
-                url,
-                model,
-                [{"role": "system", "content": prompt}, {"role": "user", "content": convo_text}],
-                temperature=0.2,
-                max_tokens=1024,
-                headers=headers,
-                timeout=60,
-                owner=owner,
-                session_id=session_id,
-            )
-        except Exception as e:
-            logger.error("Manual compaction failed: %s", e)
-            raise HTTPException(500, "Compaction failed")
-
-        summary_msg = ChatMessage(
-            role="system",
-            content=f"[Conversation summary]\n{summary}",
-            metadata={
-                "compacted": True,
-                "summarized_count": len(older),
-                "timestamp": utcnow_naive().isoformat(),
-            },
-        )
-        new_history = [summary_msg] + recent
-        if not session_manager.replace_messages(session_id, new_history):
-            raise HTTPException(500, "Failed to save compacted history")
-
-        return {
-            "ok": True,
-            "summarized": len(older),
-            "kept": len(recent),
-            "message_count": len(new_history),
-        }
-
     @router.post("/sessions/auto-sort")
-    def auto_sort_sessions(request: Request, skip_llm: bool = False):
+    async def auto_sort_sessions(request: Request, skip_llm: bool = False):
         """Use AI to categorize all sessions into folders.
 
         Phase 1 deletes empty/throwaway sessions and Phase 2 asks the LLM
@@ -1284,9 +1374,11 @@ def setup_session_routes(
         after Phase 1 — used by the "Tidy (no AI)" UI affordance so
         users can clean junk without spending tokens.
         """
-        from src.llm_core import llm_call
+        from src.openclank.modality_facade import complete_text
         user = effective_user(request)
-        single_user_mode = not user and _auth_disabled()
+        if not user:
+            raise HTTPException(401, "Authentication required")
+        single_user_mode = False
         user_sessions = session_manager.get_sessions_for_user(user)
 
         # Delete empty and throwaway sessions before sorting
@@ -1429,14 +1521,6 @@ def setup_session_routes(
                 }
             return {"status": "skipped", "reason": "No unfiled sessions to sort"}
 
-        # Pick an endpoint — prefer admin-configured task endpoint
-        from src.task_endpoint import resolve_task_endpoint
-        url, model, headers = resolve_task_endpoint(owner=user)
-        if not url:
-            url, model, headers = _pick_endpoint_for_sort(owner=user)
-        if not url:
-            raise HTTPException(503, "No available model endpoint for auto-sort")
-
         # Build prompt
         names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
         prompt = (
@@ -1452,12 +1536,22 @@ def setup_session_routes(
         )
 
         try:
-            logger.info(f"Auto-sort: using model={model} at {url}")
             # 16384 (was 4096): with many chats the folder JSON is large, and a
             # reasoning model spends tokens thinking first — 4096 truncated the
             # JSON mid-output, so it never parsed ("invalid JSON for auto-sort").
-            raw = llm_call(url, model, [{"role": "user", "content": prompt}],
-                           temperature=0.3, max_tokens=16384, headers=headers, timeout=120)
+            import hashlib
+
+            raw = await complete_text(
+                owner=user or "local-installation",
+                purpose="utility",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_output_tokens=16384,
+                idempotency_key=(
+                    "auto-sort-sessions-"
+                    + hashlib.sha256(names_text.encode("utf-8")).hexdigest()[:32]
+                ),
+            )
             logger.info(f"Auto-sort raw response ({len(raw)} chars): {raw[:300]}")
             # Extract JSON from response — handle markdown fences, leading text,
             # reasoning-model <think> blocks, and trailing commas.

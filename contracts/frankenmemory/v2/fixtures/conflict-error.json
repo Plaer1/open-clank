@@ -1,0 +1,12 @@
+{
+  "contract_version": "frankenmemory.v2",
+  "operation": "knowledge.update",
+  "scope": {"owner_id": "owner-e", "workspace_id": "workspace-main", "project_id": null},
+  "payload": {"error": {
+    "code": "revision_conflict",
+    "message": "The knowledge block changed; review the current head and proposal.",
+    "retryable": false,
+    "current": {"revision": 3},
+    "proposal": {"expected_revision": 2}
+  }}
+}

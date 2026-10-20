@@ -1,0 +1,1 @@
+Locking only the final write leaves the earlier stale read unprotected.

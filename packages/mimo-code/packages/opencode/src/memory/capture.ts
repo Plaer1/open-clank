@@ -55,7 +55,9 @@ export const layer: Layer.Layer<CaptureService, never, Bus.Service | Config.Serv
   }),
 )
 
-export const defaultLayer = layer.pipe(
-  Layer.provide(Bus.defaultLayer),
-  Layer.provide(Config.defaultLayer),
+export const defaultLayer = Layer.suspend(() =>
+  layer.pipe(
+    Layer.provide(Bus.defaultLayer),
+    Layer.provide(Config.defaultLayer),
+  ),
 )

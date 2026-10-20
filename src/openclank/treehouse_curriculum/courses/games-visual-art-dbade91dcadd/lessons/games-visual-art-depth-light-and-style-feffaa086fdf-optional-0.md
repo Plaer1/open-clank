@@ -1,0 +1,1 @@
+The answer distinguishes projection from cues and gives a concrete tradeoff such as measuring tile distances versus conveying distance.

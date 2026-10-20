@@ -1,0 +1,1 @@
+Ask what evidence exists for the pixel now; history is not ground truth.

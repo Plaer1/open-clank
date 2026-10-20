@@ -485,8 +485,13 @@ def test_spinoff_uses_single_disk_lookup_for_completed_result(tmp_path, monkeypa
         fake_find_owned,
     )
     monkeypatch.setattr(
-        "routes.research.research_routes.resolve_endpoint",
-        lambda *_args, **_kwargs: ("http://endpoint/v1", "model", {}),
+        "routes.research.research_routes.managed_route_summary",
+        lambda **_kwargs: {
+            "connection_id": "pcn-chat",
+            "model_route_id": "pmr-chat",
+            "model_id": "model",
+            "model_name": "Model",
+        },
     )
 
     handler = _research_handler()
@@ -542,8 +547,13 @@ def test_spinoff_reads_saved_query_for_done_active_task(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "routes.research.research_routes.resolve_endpoint",
-        lambda *_args, **_kwargs: ("http://endpoint/v1", "model", {}),
+        "routes.research.research_routes.managed_route_summary",
+        lambda **_kwargs: {
+            "connection_id": "pcn-chat",
+            "model_route_id": "pmr-chat",
+            "model_id": "model",
+            "model_name": "Model",
+        },
     )
 
     handler = _research_handler()
