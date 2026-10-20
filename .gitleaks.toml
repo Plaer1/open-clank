@@ -345,3 +345,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ["(^|/)static/i18n/zh\\-Hans\\.json$"]
 regexes = ["(?m)^\\s*\"ui\\.key\\.binding\":\\ \"Key\\ binding\",\\s*$"]
+
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Exact achievement composition motif identifier, not an authentication key"
+condition = "AND"
+regexTarget = "line"
+paths = ["(^|/)static/icons/treehouse-achievements/kit/composition\\.json$"]
+regexes = ["(?m)^\\s*\"key\":\\s*\"k1ec9ef342b87\",\\s*$"]

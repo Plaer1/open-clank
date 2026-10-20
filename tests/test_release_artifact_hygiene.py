@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -67,7 +68,17 @@ def test_gitleaks_config_keeps_allowlists_structural_and_path_scoped():
     translation = config["allowlists"][0]
     assert translation["condition"] == "AND"
     assert translation["regexTarget"] == "line"
-    assert translation["paths"] == [r"(^|/)static/i18n/[^/]+\.json$"]
+    assert translation["paths"] == [
+        r"(^|/)static/i18n/(freeze/(context|strings|batches/batch-[0-9]{3})|ledger|provenance)\.json$"
+    ]
+    path_pattern = re.compile(translation["paths"][0])
+    for path in ("freeze/context", "freeze/strings", "freeze/batches/batch-017", "ledger", "provenance"):
+        assert path_pattern.search(f"static/i18n/{path}.json")
+    for path in ("en", "unreviewed", "freeze/batches/batch-anything"):
+        assert not path_pattern.search(f"static/i18n/{path}.json")
+    value_pattern = re.compile(translation["regexes"][0])
+    assert value_pattern.search('  "key": "ui.key.binding",')
+    assert not value_pattern.search('  "key": "unrelated-value",')
     assert all(".*" not in expression for expression in translation["regexes"])
 
 

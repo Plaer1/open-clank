@@ -92,9 +92,7 @@ def prohibited_artifact(relative_path: str, *, image_context: bool) -> bool:
         return True
     # These namespaces contain private recovery/study/user state even when a
     # force-add or a future ignore exception accidentally admits their paths.
-    if any(part in {".clanker", ".references", ".archive", ".obsidian", ".mimocode"} for part in path.parts):
-        return True
-    if ".clankers" in path.parts and "robonotes" in path.parts:
+    if any(part in {".clanker", ".clankers", ".references", ".archive", ".obsidian", ".mimocode"} for part in path.parts):
         return True
     if fnmatchcase(name, "history-credentials*.json") or fnmatchcase(
         name, ".history-credentials*.tmp"
