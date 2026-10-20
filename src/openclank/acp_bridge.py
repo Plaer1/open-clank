@@ -598,6 +598,7 @@ class ACPBridge:
         self._session_workspace_adapter = callback
 
     async def cleanup_session(self, mimo_session_id: str) -> None:
+        await self.question_handler.reject_session(mimo_session_id)
         await self.terminal_manager.cleanup_session(mimo_session_id)
 
     @staticmethod
@@ -856,13 +857,19 @@ class ACPBridge:
     def negotiated_state(self, odysseus_session: str) -> dict:
         mimo_session = self._session_map.get(odysseus_session)
         if mimo_session and mimo_session in self._session_state:
-            return dict(self._session_state[mimo_session])
-        try:
-            from src.openclank.transcript_projection import get_mimo_state
+            state = dict(self._session_state[mimo_session])
+        else:
+            try:
+                from src.openclank.transcript_projection import get_mimo_state
 
-            return get_mimo_state(odysseus_session)
-        except KeyError:
-            return {}
+                state = dict(get_mimo_state(odysseus_session))
+            except KeyError:
+                return {}
+        pending = state.get("pending_question") or {}
+        req = self.question_handler.pending_requests.get(pending.get("request_id"))
+        if not req or req._future.done() or req.odysseus_session_id != odysseus_session or req.mimo_session_id != mimo_session:
+            state.pop("pending_question", None)
+        return state
 
     async def set_config_option(
         self,
@@ -934,7 +941,7 @@ class ACPBridge:
 
     async def _clear_question(self, req: "PendingQuestion") -> None:
         state = self._session_state.get(req.mimo_session_id)
-        if state is not None:
+        if state is not None and (state.get("pending_question") or {}).get("request_id") == req.request_id:
             result = req.result()
             first = req.questions[0] if req.questions else {}
             answers = result.get("answers") if isinstance(result, dict) else None
@@ -945,7 +952,7 @@ class ACPBridge:
                 and options
                 and selected == options[0].get("label")
             )
-            if approved and state.get("plan_state"):
+            if approved and state.get("plan_state") and state["plan_state"].get("revision") == req.plan_revision:
                 plan_state = state["plan_state"]
                 plan_state["approved_revision"] = req.plan_revision
                 plan_state["approved_digest"] = plan_state.get("digest")
@@ -3088,6 +3095,7 @@ class ACPBridge:
                 pass
             raise
         finally:
+            await self.question_handler.reject_session(mimo_session, turn_id=turn_id)
             self._turns.pop(mimo_session, None)
             self._queues.pop(mimo_session, None)
             await self._cancel_code_context_requests(mimo_session)
@@ -3791,7 +3799,7 @@ class PendingQuestion:
         return True
 
     def result(self) -> dict:
-        return self._future.result() if self._future.done() else {}
+        return self._future.result() if self._future.done() and not self._future.cancelled() else {}
 
 
 class QuestionHandler:
@@ -3809,6 +3817,14 @@ class QuestionHandler:
 
     def on_resolved(self, callback: Callable[[PendingQuestion], Coroutine[Any, Any, None]]) -> None:
         self._on_resolved = callback
+
+    async def reject_session(self, mimo_session_id: str, *, turn_id: str | None = None) -> None:
+        for req in list(self.pending_requests.values()):
+            if req.mimo_session_id != mimo_session_id or (turn_id is not None and req.turn_id != turn_id):
+                continue
+            req.resolve({"rejected": True})
+            if self._on_resolved:
+                await self._on_resolved(req)
 
     @staticmethod
     def _questions(value: Any) -> list[dict]:
@@ -3880,7 +3896,7 @@ class QuestionHandler:
             mimo_session_id=mimo_session,
             odysseus_session_id=odysseus_session,
             owner=owner,
-            turn_id=str(projection.get("active_turn_id") or ""),
+            turn_id=str(projection.get("active_turn_id") or context.get("root_operation_id") or ""),
             revision=int(projection.get("transcript_revision") or 0),
             plan_revision=int(context.get("plan_revision") or 0),
             questions=self._questions(params.get("questions")),
@@ -3908,9 +3924,20 @@ class QuestionHandler:
         answers: Optional[list[list[str]]] = None,
         rejected: bool = False,
     ) -> bool:
+        return self.resolve_result(request_id, owner=owner, session_id=session_id, answers=answers, rejected=rejected) == "accepted"
+
+    def resolve_result(
+        self,
+        request_id: str,
+        *,
+        owner: str,
+        session_id: str,
+        answers: Optional[list[list[str]]] = None,
+        rejected: bool = False,
+    ) -> str:
         req = self.pending_requests.get(request_id)
-        if req is None or req.owner != owner or req.odysseus_session_id != session_id:
-            return False
+        if req is None or req._future.done() or req.owner != owner or req.odysseus_session_id != session_id:
+            return "stale"
         context = self._context_resolver(req.mimo_session_id) if self._context_resolver else {}
         if not context.get("incognito"):
             from src.openclank.transcript_projection import get_projection
@@ -3923,26 +3950,28 @@ class QuestionHandler:
                 or int(projection.get("transcript_revision") or 0) != req.revision
                 or int(context.get("plan_revision") or 0) != req.plan_revision
             ):
-                return False
+                return "stale"
         if rejected:
-            return req.resolve({"rejected": True})
+            return "accepted" if req.resolve({"rejected": True}) else "stale"
         if not isinstance(answers, list) or len(answers) != len(req.questions):
-            return False
+            return "invalid_answer"
         clean: list[list[str]] = []
         for index, answer in enumerate(answers):
             if not isinstance(answer, list) or not answer:
-                return False
-            values = [str(value).strip()[:2_048] for value in answer if str(value).strip()]
+                return "invalid_answer"
+            if any(not isinstance(value, str) or len(value) > 2_048 for value in answer):
+                return "invalid_answer"
+            values = [value.strip() for value in answer if value.strip()]
             if not values:
-                return False
+                return "invalid_answer"
             question = req.questions[index]
             if not question["multiple"] and len(values) != 1:
-                return False
+                return "invalid_answer"
             allowed = {item["label"] for item in question["options"]}
             if not question["custom"] and any(value not in allowed for value in values):
-                return False
+                return "invalid_answer"
             clean.append(values)
-        return req.resolve({"answers": clean})
+        return "accepted" if req.resolve({"answers": clean}) else "stale"
 
 
 class PermissionRequest:

@@ -823,7 +823,7 @@ async def test_mimo_question_is_owner_revision_bound_and_single_use():
         answers=[["B"]],
     )
     from src.openclank.transcript_projection import delete_projection
-    delete_projection(session_id)
+    delete_projection(session_id, owner="alice")
     db = database.SessionLocal()
     try:
         db.query(database.Session).filter(database.Session.id == session_id).delete()
@@ -832,11 +832,14 @@ async def test_mimo_question_is_owner_revision_bound_and_single_use():
         db.close()
 
 
-async def test_plan_clarify_revise_approve_and_reconnect_state(tmp_path):
+async def test_plan_clarify_revise_approve_and_reconnect_state(tmp_path, monkeypatch):
     import asyncio
     from core import database
     from src.openclank.acp_bridge import ACPBridge, _TurnState
     from src.openclank.transcript_projection import canonical_snapshot, record_projection
+    import src.openclank.conversation_archive as archive_module
+    monkeypatch.setattr(archive_module, "_ARCHIVE", archive_module.ConversationArchive(
+        str(tmp_path / "archive.db"), owner_resolver=lambda owner: owner if owner == "alice" else None))
 
     class Client:
         initialize_result = {}
@@ -926,7 +929,8 @@ async def test_plan_clarify_revise_approve_and_reconnect_state(tmp_path):
     pending = await bridge._queues["ses-plan"].get()
     reconnected = ACPBridge(Client(), str(tmp_path), owner="alice").negotiated_state(session_id)
     assert reconnected["plan_state"]["revision"] == 2
-    assert reconnected["pending_question"]["plan_revision"] == 2
+    assert "pending_question" not in reconnected  # A fresh worker has no live callback.
+    assert bridge.negotiated_state(session_id)["pending_question"]["plan_revision"] == 2
     assert bridge.question_handler.resolve(
         pending["request"].request_id,
         owner="alice",
@@ -944,7 +948,7 @@ async def test_plan_clarify_revise_approve_and_reconnect_state(tmp_path):
     ))
 
     from src.openclank.transcript_projection import delete_projection
-    delete_projection(session_id)
+    delete_projection(session_id, owner="alice")
     db = database.SessionLocal()
     try:
         db.query(database.Session).filter(database.Session.id == session_id).delete()

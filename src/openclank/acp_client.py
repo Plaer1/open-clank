@@ -29,6 +29,7 @@ class ACPClient:
         self._reader_task: Optional[asyncio.Task] = None
         self._callback_tasks: set[asyncio.Task] = set()
         self._closed = False
+        self._cleanup_task: Optional[asyncio.Task] = None
         self._close_event = asyncio.Event()
         self.agent_info: Optional[dict] = None
         self.initialize_result: dict = {}
@@ -209,9 +210,15 @@ class ACPClient:
             raise
 
     async def close(self) -> None:
-        if self._closed:
-            return
+        self._start_cleanup()
+        await asyncio.shield(self._cleanup_task)
+
+    def _start_cleanup(self) -> None:
         self._closed = True
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._finish_close())
+
+    async def _finish_close(self) -> None:
         # Fail all pending futures
         for fut in self._pending.values():
             if not fut.done():
@@ -275,6 +282,7 @@ class ACPClient:
                         if not fut.done():
                             fut.set_exception(TransportError("child process EOF"))
                     self._pending.clear()
+                    self._start_cleanup()
                     self._close_event.set()
                     return
                 line_str = line.decode(errors="replace").strip()
@@ -295,6 +303,7 @@ class ACPClient:
                 if not fut.done():
                     fut.set_exception(TransportError(f"reader error: {e}"))
             self._pending.clear()
+            self._start_cleanup()
             self._close_event.set()
 
     async def _dispatch(self, msg: dict) -> None:

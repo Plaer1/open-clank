@@ -182,11 +182,12 @@ def _endpoint(router, path: str, method: str = "GET"):
 
 def _request(owner: str = "alice"):
     return SimpleNamespace(
-        state=SimpleNamespace(current_user=owner, api_token=False),
+        state=SimpleNamespace(current_user=owner, api_token=False, authenticated=True),
         app=SimpleNamespace(
             state=SimpleNamespace(
                 auth_manager=SimpleNamespace(
                     is_configured=True,
+                    users={owner: {}},
                     get_privileges=lambda _owner: {},
                     is_admin=lambda _owner: False,
                 ),
@@ -377,6 +378,106 @@ def test_session_target_and_reconciliation_preserve_route_and_grant(
     assert target.headers == {}
 
 
+@pytest.mark.parametrize("posted", [
+    {},
+    {"selected_model": "gpt-test"},
+    {"selected_endpoint_id": "pcn_alice_api"},
+    {"selected_model_route_id": "pmr_alice_chat"},
+    {"selected_model": "gpt-test", "selected_endpoint_id": "pcn_alice_api"},
+])
+def test_ordinary_send_and_matching_partial_keep_stable_route(monkeypatch, provider_topology, posted):
+    sess = SimpleNamespace(owner="alice", model="gpt-test", endpoint_id="pcn_alice_api",
+        provider_model_route_id="pmr_alice_chat", endpoint_url=normalized.MANAGED_ENGINE_PUBLIC_URL, headers={})
+    before = vars(sess).copy()
+    monkeypatch.setattr(chat_routes, "SessionLocal", lambda: pytest.fail("continuation must not write"))
+    assert chat_routes._reconcile_selected_route_from_request(_request(), sess, "chat", posted, owner="alice") is False
+    assert all(getattr(sess, key) == value for key, value in before.items())
+
+
+@pytest.mark.parametrize("posted", [
+    {"selected_model": "other-model"},
+    {"selected_endpoint_id": "pcn_other"},
+    {"selected_model_route_id": "pmr_other"},
+    {"selected_endpoint_url": "https://untrusted.test"},
+])
+def test_incomplete_conflicting_selection_never_guesses(monkeypatch, provider_topology, posted):
+    sess = SimpleNamespace(owner="alice", model="gpt-test", endpoint_id="pcn_alice_api",
+        provider_model_route_id="pmr_alice_chat", endpoint_url=normalized.MANAGED_ENGINE_PUBLIC_URL, headers={})
+    before = vars(sess).copy()
+    monkeypatch.setattr(chat_routes, "SessionLocal", lambda: pytest.fail("rejected selection must not write"))
+    with pytest.raises(HTTPException) as error:
+        chat_routes._reconcile_selected_route_from_request(_request(), sess, "chat", posted, owner="alice")
+    assert error.value.status_code == 400
+    assert error.value.detail["code"] in {"selection_incomplete", "selection_invalid"}
+    assert vars(sess) == before
+
+
+@pytest.mark.parametrize("failure", ["deleted", "forbidden", "revoked"])
+def test_partial_continuation_reauthorizes_route(provider_topology, failure):
+    shared = failure == "revoked"
+    sess = SimpleNamespace(owner="alice", model="shared-gpt" if shared else "gpt-test",
+        endpoint_id=f"share:{provider_topology.grant_id}" if shared else "pcn_alice_api",
+        provider_model_route_id="pmr_carol_chat" if shared else "pmr_alice_chat",
+        endpoint_url=normalized.MANAGED_ENGINE_PUBLIC_URL, headers={})
+    if failure == "deleted":
+        from core.provider_models import ProviderModelRoute
+        with normalized.SessionLocal() as db:
+            db.query(ProviderModelRoute).filter(ProviderModelRoute.id == "pmr_alice_chat").delete()
+            db.commit()
+    elif failure == "revoked":
+        grant = provider_topology.store.get_share_grant(owner="carol", grant_id=provider_topology.grant_id)
+        provider_topology.store.revoke_share_grant(owner="carol", grant_id=provider_topology.grant_id, expected_revision=grant.revision)
+    with pytest.raises(HTTPException) as error:
+        chat_routes._reconcile_selected_route_from_request(_request(), sess, "chat",
+            {"selected_model": sess.model}, owner="bob" if failure == "forbidden" else "alice")
+    assert error.value.status_code == 400
+    assert error.value.detail["code"] == "selection_invalid"
+
+
+def test_replacement_persistence_failure_does_not_publish(monkeypatch, provider_topology):
+    sess = SimpleNamespace(owner="alice", model="gpt-test", endpoint_id="pcn_alice_api",
+        provider_model_route_id="pmr_alice_chat", endpoint_url=normalized.MANAGED_ENGINE_PUBLIC_URL, headers={})
+    before = vars(sess).copy()
+    class Db:
+        def query(self, *_args): return self
+        def filter(self, *_args): return self
+        def first(self): return SimpleNamespace()
+        def commit(self): raise RuntimeError("synthetic persistence failure")
+        def close(self): pass
+    monkeypatch.setattr(chat_routes, "SessionLocal", Db)
+    with pytest.raises(RuntimeError, match="persistence failure"):
+        chat_routes._reconcile_selected_route_from_request(_request(), sess, "chat", {
+            "selected_model": "shared-gpt", "selected_endpoint_id": f"share:{provider_topology.grant_id}",
+        }, owner="alice")
+    assert vars(sess) == before
+
+
+@pytest.mark.parametrize("ephemeral", [True, False])
+def test_route_replacement_on_owned_incognito_ghost_or_deleted_persistent_chat(monkeypatch, provider_topology, ephemeral):
+    sess = SimpleNamespace(owner="alice", incognito=ephemeral, model="gpt-test", endpoint_id="pcn_alice_api",
+        provider_model_route_id="pmr_alice_chat", endpoint_url=normalized.MANAGED_ENGINE_PUBLIC_URL, headers={})
+    request = _request()
+    request.app.state.session_manager = SimpleNamespace(sessions={"chat": sess})
+    class Db:
+        def query(self, *_args): return self
+        def filter(self, *_args): return self
+        def first(self): return None
+        def close(self): pass
+    monkeypatch.setattr(chat_routes, "SessionLocal", Db)
+    def replace():
+        return chat_routes._reconcile_selected_route_from_request(request, sess, "chat", {
+            "selected_model": "shared-gpt", "selected_endpoint_id": f"share:{provider_topology.grant_id}",
+        }, owner="alice")
+    if ephemeral:
+        assert replace() is True
+        assert sess.provider_model_route_id == "pmr_carol_chat"
+    else:
+        with pytest.raises(HTTPException) as error:
+            replace()
+        assert error.value.status_code == 404
+        assert sess.provider_model_route_id == "pmr_alice_chat"
+
+
 def test_root_operation_identity_is_persisted_and_forwarded():
     captured = []
     sess = SimpleNamespace(add_message=captured.append)
@@ -421,7 +522,10 @@ def test_root_operation_identity_is_persisted_and_forwarded():
     assert envelope["authority_workspace_id"] == "workspace-a"
 
 
-def test_root_operation_identity_is_the_durable_user_message_id(monkeypatch):
+def test_root_operation_identity_is_the_durable_user_message_id(monkeypatch, tmp_path):
+    import src.openclank.conversation_archive as archive_module
+    archive = archive_module.ConversationArchive(str(tmp_path / "archive.db"), owner_resolver=lambda owner: owner if owner == "alice" else None)
+    monkeypatch.setattr(archive_module, "_ARCHIVE", archive)
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},

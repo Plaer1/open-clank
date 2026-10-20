@@ -917,15 +917,7 @@ function _initModelPickerDropdown() {
 
 async function _pick(m) {
     _defaultPendingSeq++;
-    try {
-      window.__odysseusLastPickedRoute = {
-        model: m.mid || '',
-        endpoint_url: m.url || '',
-        endpoint_id: m.endpointId || '',
-        display: m.display || m.mid || '',
-        picked_at: Date.now(),
-      };
-    } catch (_) {}
+    const previousSwitch = window.__odysseusModelSwitchPromise;
     let switchDone = null;
     const switchPromise = new Promise(resolve => { switchDone = resolve; });
     try { window.__odysseusModelSwitchPromise = switchPromise; } catch (_) {}
@@ -937,6 +929,14 @@ async function _pick(m) {
     };
     try {
       const currentSessionId = _deps.getCurrentSessionId();
+      const navToken = _deps.getSessionNavigationToken?.();
+      const stillCurrent = () => _deps.getCurrentSessionId() === currentSessionId &&
+        (navToken === undefined || _deps.getSessionNavigationToken?.() === navToken);
+      // Serialize persistence: the latest fence includes every earlier PATCH.
+      if (previousSwitch) {
+        await previousSwitch;
+        if (!stillCurrent()) return;
+      }
       const _pendingChat = _deps.getPendingChat();
       const _completePick = () => {
         if (m && m.mid) _pushRecent(m);
@@ -969,11 +969,7 @@ async function _pick(m) {
         return;
       }
     } else {
-      // Existing session with no model — PATCH it
-      const sessions = _deps.getSessions();
-      const s = sessions.find(x => x.id === currentSessionId);
-      if (s) { s.model = m.mid; s.endpoint_url = m.url; s.endpoint_id = m.endpointId || s.endpoint_id || ''; }
-      updateModelPicker();
+      // Publish the route only after the host acknowledges persistence.
       const fd = new FormData();
       fd.append('model', m.mid);
       fd.append('endpoint_url', m.url);
@@ -983,15 +979,20 @@ async function _pick(m) {
         let payload = {};
         try { payload = await res.json(); } catch (_) {}
         if (!res.ok) {
-          uiModule.showError(payload.detail || 'Failed to set model');
+          const detail = payload.detail;
+          uiModule.showError((typeof detail === 'string' ? detail : detail?.message) || 'Failed to set model');
           return;
         }
-        const sessions = _deps.getSessions();
-        const s = sessions.find(x => x.id === currentSessionId);
-        if (s) {
-          s.model = payload.model || m.mid;
-          s.endpoint_url = payload.endpoint_url || m.url;
-          s.endpoint_id = payload.endpoint_id || m.endpointId || '';
+        const route = {
+          model: payload.model || m.mid,
+          endpoint_url: payload.endpoint_url || m.url,
+          endpoint_id: payload.endpoint_id || m.endpointId || '',
+          provider_model_route_id: payload.provider_model_route_id || '',
+        };
+        if (_deps.acknowledgeSessionRoute) _deps.acknowledgeSessionRoute(currentSessionId, route);
+        else {
+          const session = _deps.getSessions().find(item => item.id === currentSessionId);
+          if (session) Object.assign(session, route);
         }
         // Header stays as session name — model info shown in picker only
       } catch (e) {
@@ -1001,7 +1002,7 @@ async function _pick(m) {
       }
     }
       // Persist and broadcast only after the selection actually succeeded.
-      _completePick();
+      if (stillCurrent() || !currentSessionId) _completePick();
     } finally {
       // Chat waits for this fence before POSTing. Every success and failure
       // path must release it or the composer deadlocks before the request.

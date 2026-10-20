@@ -369,6 +369,7 @@ import {
     const lastSelectedId = String(window.__odysseusLastSelectedSessionId || '').trim();
     const targetId = activeRowId || hashId || lastSelectedId;
     if (!targetId) return false;
+    const adoptionNav = sessionModule.getSessionNavigationToken();
     try {
       window.__odysseusComposerUserEdited = true;
       if (sessionModule.selectSession) {
@@ -376,7 +377,8 @@ import {
       } else if (sessionModule.setCurrentSessionId) {
         sessionModule.setCurrentSessionId(targetId);
       }
-      return !!(sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+      return sessionModule.getCurrentSessionId() === targetId &&
+        sessionModule.getSessionNavigationToken() === adoptionNav + 1;
     } catch (_) {
       return false;
     }
@@ -431,12 +433,6 @@ import {
     try {
       const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
       if (pending && pending.modelId) return pending.modelId;
-    } catch (_) {}
-    try {
-      const lastPicked = window.__odysseusLastPickedRoute || null;
-      if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
-        return lastPicked.model;
-      }
     } catch (_) {}
     if (routeSnapshot && routeSnapshot.model) return routeSnapshot.model;
     try {
@@ -592,12 +588,17 @@ import {
   let _staleStreamProbeInFlight = false;
   const STALE_LOCAL_STREAM_MS = 15000;
 
+  const _questionRevisions = new Map();
+  let _sessionStateRestoreSeq = 0;
+  const _bumpQuestionRevision = sid => _questionRevisions.set(sid, (_questionRevisions.get(sid) || 0) + 1);
   const _sessionStateKey = (kind, sessionId) => `odysseus-mimo-${kind}-${sessionId}`;
   function _storeSessionState(kind, sessionId, value) {
     if (!sessionId || !value) return;
+    if (kind === 'question') _bumpQuestionRevision(sessionId);
     try { sessionStorage.setItem(_sessionStateKey(kind, sessionId), JSON.stringify(value)); } catch (_) {}
   }
   function _clearSessionState(kind, sessionId) {
+    if (kind === 'question') _bumpQuestionRevision(sessionId);
     try { sessionStorage.removeItem(_sessionStateKey(kind, sessionId)); } catch (_) {}
   }
   function _readSessionState(kind, sessionId) {
@@ -633,23 +634,33 @@ import {
     if (sessionModule.getCurrentSessionId() === sid) _renderPlanDock(normalized);
   }
   async function restoreSessionState(sessionId) {
-    if (!sessionId) return;
+    if (!sessionId || sessionModule.getCurrentSessionId() !== sessionId) return;
+    const seq = ++_sessionStateRestoreSeq;
+    const navToken = sessionModule.getSessionNavigationToken();
+    const questionRevision = _questionRevisions.get(sessionId) || 0;
     _renderPlanDock(_readSessionState('plan', sessionId));
-    const question = _readSessionState('question', sessionId);
     const permission = _readSessionState('permission', sessionId);
-    if (question) chatRenderer.renderAskUserCard(question, { scroll: false, focus: false });
+    // A stored question is history, not proof of a live native callback.
     if (permission) chatRenderer.renderPermissionCard(permission, sessionId);
     try {
-      const response = await fetch(`${API_BASE}/session/${encodeURIComponent(sessionId)}/mimo-state`, {
+      const response = await fetch(`${API_BASE}/session/${encodeURIComponent(sessionId)}/mimo-state?refresh=true`, {
         credentials: 'same-origin',
       });
       if (!response.ok) return;
       const state = await response.json();
-      if (sessionModule.getCurrentSessionId() !== sessionId) return;
+      if (seq !== _sessionStateRestoreSeq || sessionModule.getCurrentSessionId() !== sessionId ||
+          sessionModule.getSessionNavigationToken() !== navToken) return;
       if (state.plan_state) _setStoredPlan(state.plan_state, sessionId);
+      // An older readback cannot erase a question received/resolved meanwhile.
+      if ((_questionRevisions.get(sessionId) || 0) !== questionRevision) return;
       if (state.pending_question) {
         _storeSessionState('question', sessionId, state.pending_question);
         chatRenderer.renderAskUserCard(state.pending_question, { scroll: false, focus: false });
+      } else {
+        _clearSessionState('question', sessionId);
+        document.querySelectorAll('.mimo-question-card').forEach(card => {
+          if (card.dataset.sessionId === sessionId && card.dataset.interactive !== 'false') card.remove();
+        });
       }
     } catch (_) {}
   }
@@ -757,7 +768,10 @@ import {
     emailInbox.init(documentModule);
     document.addEventListener('odysseus:interactive-resolved', (event) => {
       const detail = event.detail || {};
-      if (detail.sessionId && detail.kind) _clearSessionState(detail.kind, detail.sessionId);
+      if (!detail.sessionId || !detail.kind) return;
+      if (detail.kind === 'question' && detail.requestId &&
+          _readSessionState('question', detail.sessionId)?.request_id !== detail.requestId) return;
+      _clearSessionState(detail.kind, detail.sessionId);
     });
     // Wire the slash-command autocomplete popup on the chat composer. The
     // dispatcher already handles the typed command — this just surfaces the
@@ -1283,46 +1297,37 @@ import {
     const incognitoChkForSend = el('incognito-toggle');
     const isIncognitoForSend = !!(incognitoChkForSend && incognitoChkForSend.checked);
 
-    if (!isIncognitoForSend) {
-      await _adoptOpenedSessionBeforeAutoCreate();
+    if (!isIncognitoForSend && !sessionModule.getCurrentSessionId()) {
+      const adoptionNav = sessionModule.getSessionNavigationToken();
+      const adopted = await _adoptOpenedSessionBeforeAutoCreate();
+      if (!adopted && sessionModule.getSessionNavigationToken() !== adoptionNav) {
+        uiModule.showToast('Chat changed; the message was not sent.', 2400);
+        _releaseSendFlag(); return;
+      }
     }
 
-    const selectedRouteForSend = (() => {
-      try {
-        const lastPicked = window.__odysseusLastPickedRoute || null;
-        if (lastPicked && lastPicked.model && Date.now() - (lastPicked.picked_at || 0) < 10 * 60 * 1000) {
-          return {
-            model: lastPicked.model || '',
-            endpoint_url: lastPicked.endpoint_url || '',
-            endpoint_id: lastPicked.endpoint_id || '',
-            source: 'last-picked',
-          };
-        }
-        const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
-        if (pending && pending.modelId) {
-          return {
-            model: pending.modelId || '',
-            endpoint_url: pending.url || '',
-            endpoint_id: pending.endpointId || '',
-            source: pending.source || '',
-          };
-        }
-        return {
-          model: sessionModule.getCurrentModel ? (sessionModule.getCurrentModel() || '') : '',
-          endpoint_url: sessionModule.getCurrentEndpointUrl ? (sessionModule.getCurrentEndpointUrl() || '') : '',
-          endpoint_id: '',
-          source: '',
-        };
-      } catch (_) {
-        return { model: '', endpoint_url: '', endpoint_id: '', source: '' };
+    // A send belongs to this navigation, including while a picker PATCH waits.
+    let sendNavToken = sessionModule.getSessionNavigationToken();
+    const targetStillCurrent = () => sessionModule.getSessionNavigationToken() === sendNavToken;
+    const cancelMovedSend = () => {
+      uiModule.showToast('Chat changed; the message was not sent.', 2400);
+      _releaseSendFlag();
+    };
+    try {
+      // A second pick can replace the promise while the first one settles.
+      while (window.__odysseusModelSwitchPromise) {
+        await window.__odysseusModelSwitchPromise;
+        if (!targetStillCurrent()) { cancelMovedSend(); return; }
       }
-    })();
+    } catch (_) {}
+    if (!targetStillCurrent()) { cancelMovedSend(); return; }
 
     // Materialize pending session (deferred from model click) on first message
     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) {
       _sendPerf.mark('pending_session_begin');
       const ok = await sessionModule.materializePendingSession();
       _sendPerf.mark('pending_session_done');
+      if (!targetStillCurrent()) { cancelMovedSend(); return; }
       if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
     }
 
@@ -1333,6 +1338,7 @@ import {
         const pending = sessionModule.getPendingChat && sessionModule.getPendingChat();
         if (pending && pending.url && pending.modelId) {
           const ok = await sessionModule.materializePendingSession();
+          if (!targetStillCurrent()) { cancelMovedSend(); return; }
           if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
         }
       } catch (_) {}
@@ -1364,34 +1370,23 @@ import {
         } catch (_) {
           dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
         }
-        if (dc.endpoint_url && dc.model) {
+        if (!targetStillCurrent()) { cancelMovedSend(); return; }
+        if (dc && dc.endpoint_url && dc.model) {
           _sendPerf.mark('direct_chat_create_begin');
-          await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default');
+          sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id, 'default', { preserveComposer: true });
+          sendNavToken = sessionModule.getSessionNavigationToken();
           _sendPerf.mark('direct_chat_create_done');
           const ok = await sessionModule.materializePendingSession();
           _sendPerf.mark('direct_chat_materialize_done');
+          if (!targetStillCurrent()) { cancelMovedSend(); return; }
           if (!ok || !sessionModule.getCurrentSessionId()) { _releaseSendFlag(); return; }
         } else {
-          el('message').value = '';
-          if (uiModule.autoResize) uiModule.autoResize(el('message'));
-          addMessage('assistant',
-            'No chat session active. You can:\n\n' +
-            '- Open the model picker in the chat box and pick a model\n' +
-            '- Use the `+` button in the model picker to add a model endpoint\n' +
-            '- Use `/help` to see all available commands');
-          _releaseSendFlag();
-          return;
+          uiModule.showError('Choose a provider connection and model before sending.');
+          _releaseSendFlag(); return;
         }
-      } catch (e) {
-        el('message').value = '';
-        if (uiModule.autoResize) uiModule.autoResize(el('message'));
-        addMessage('assistant',
-          'No chat session active. You can:\n\n' +
-          '- Open the model picker in the chat box and pick a model\n' +
-          '- Use the `+` button in the model picker to add a model endpoint\n' +
-          '- Use `/help` to see all available commands');
-        _releaseSendFlag();
-        return;
+      } catch (error) {
+        if (targetStillCurrent()) uiModule.showError('Unable to start chat: ' + (error?.message || String(error)));
+        _releaseSendFlag(); return;
       }
     }
 
@@ -1415,12 +1410,8 @@ import {
     if (submitBtn) submitBtn.classList.remove('send-pending');
     _sendInFlight = false;
 
-    try {
-      const pendingSwitch = window.__odysseusModelSwitchPromise;
-      if (pendingSwitch && typeof pendingSwitch.then === 'function') {
-        await pendingSwitch;
-      }
-    } catch (_) {}
+    if (!targetStillCurrent()) { cancelMovedSend(); updateSubmitButton('idle', submitBtn); return; }
+    const selectedRouteForSend = sessionModule.getCurrentRoute();
 
     // Capture session ID for background stream detection
     const streamSessionId = sessionModule.getCurrentSessionId();
@@ -1452,6 +1443,16 @@ import {
     let _cancelThinkingTimer = () => {};
     let _removeThinkingSpinner = () => {};
     let abortCtrl = null;
+    let sentUserBubble = null;
+    let rejectedDraft = null;
+    let postConsumeDraft = null;
+    let admissionAccepted = false;
+    const recoverRejectedSend = () => {
+      if (!rejectedDraft || !postConsumeDraft) return;
+      restoreComposerDraft(rejectedDraft, { sid: streamSessionId, expected: postConsumeDraft });
+      sentUserBubble?.remove();
+      holder?.remove();
+    };
     const _isAgent = true;
     let streamingTTS = false;
     let timeoutId = null;
@@ -1534,11 +1535,13 @@ import {
       let _userMsgEl = null;
       if (!skipBubble) {
         _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
+        sentUserBubble = _userMsgEl;
       }
       _sendPerf.mark('user_bubble_visible');
       messageInput.value = '';
       messageInput.style.height = '';
       messageInput.dispatchEvent(new Event('input'));
+      postConsumeDraft = captureComposerDraftState();
       // Mobile: dismiss the on-screen keyboard after sending. iOS in
       // particular ignores a bare blur() in some cases (or some other
       // listener refocuses straight after), so we temporarily mark the
@@ -1572,7 +1575,7 @@ import {
       let ids = [];
       try {
         _sendPerf.mark('upload_begin');
-        ids = await fileHandlerModule.uploadPending({ sessionId: sessionModule.getCurrentSessionId() });
+        ids = await fileHandlerModule.uploadPending({ sessionId: streamSessionId });
         _sendPerf.mark('upload_done');
       } catch(e) {
         console.error('upload failed', e);
@@ -1597,6 +1600,9 @@ import {
         ids = ids.concat(_pendingRegenAttachments);
       }
       _pendingRegenAttachments = null;
+      rejectedDraft = { available: true, content_kind: 'text', raw_content: msg,
+        attachment_refs: ids.map(id => ({ type: 'attachment_ref', attachment_id: String(id) })) };
+      postConsumeDraft = { ...postConsumeDraft, attachments: null, pending: [] };
 
       // The optimistic user bubble was rendered before the upload assigned ids,
       // so image previews couldn't show (the renderer needs att.id). Now that
@@ -1717,6 +1723,7 @@ import {
       if (selectedRouteForSend.model) fd.append('selected_model', selectedRouteForSend.model);
       if (selectedRouteForSend.endpoint_url) fd.append('selected_endpoint_url', selectedRouteForSend.endpoint_url);
       if (selectedRouteForSend.endpoint_id) fd.append('selected_endpoint_id', selectedRouteForSend.endpoint_id);
+      if (selectedRouteForSend.model_route_id) fd.append('selected_model_route_id', selectedRouteForSend.model_route_id);
       if (ids.length) fd.append('attachments', JSON.stringify(ids));
       // The contextual-help claim is held only through final preflight and
       // transport. Its release boundary below covers provider flushes and
@@ -1959,7 +1966,7 @@ import {
         restoreAssistantContext(helpClaim);
         throw error;
       }
-      if (res.ok) commitAssistantContext(helpClaim);
+      if (res.ok) { admissionAccepted = true; commitAssistantContext(helpClaim); }
       const runId = res.headers.get('X-Agent-Run-ID') || '';
       if (runId) {
         const active = _activeStreams.get(streamSessionId);
@@ -1976,21 +1983,15 @@ import {
         // corrected retry; successful headers commit it exactly once.
         restoreAssistantContext(helpClaim);
         clearResponseTimeout();
-        if (res.status === 404) {
-          // Session was deleted (e.g. by AI) — reload and go to welcome
-          holder.remove();
-          if (sessionModule) await sessionModule.loadSessions();
-          return;
-        }
-        let errText = `Error ${res.status}`;
+        let errText = `Unable to send (${res.status}). Choose a provider connection and model, then retry.`;
         try {
-          const errBody = await res.text();
-          // Parse nested JSON error if present
-          const m = errBody.match(/"message"\s*:\s*"([^"]+)"/);
-          if (m) errText = m[1].replace(/\\"/g, '"');
-          else if (errBody.length < 200) errText = errBody;
-        } catch {}
-        typewriterInto(holder.querySelector('.body'), errText);
+          const data = await res.json();
+          const detail = data.detail || data.error || data;
+          const message = typeof detail === 'string' ? detail : detail?.message;
+          if (typeof message === 'string' && message.trim()) errText = message;
+        } catch (_) {}
+        recoverRejectedSend();
+        if (sessionModule.getCurrentSessionId() === streamSessionId) uiModule.showError(errText);
         enableResearchBtn();
         return;
       }
@@ -4070,6 +4071,11 @@ import {
 
           // Now clear the abort controller
           if (currentAbort === abortCtrl) currentAbort = null;
+        } else if (!admissionAccepted && rejectedDraft) {
+          recoverRejectedSend();
+          if (sessionModule.getCurrentSessionId() === streamSessionId) {
+            uiModule.showError('Unable to send: ' + (err?.message || String(err)));
+          }
         } else {
           console.error(err);
           // Stream died with a tool node still spinning. Its per-node tickers

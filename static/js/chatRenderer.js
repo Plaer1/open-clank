@@ -2130,6 +2130,10 @@ function _renderMimoQuestionCard(aq, renderOptions) {
 
   const card = document.createElement('form');
   card.className = 'ask-user-card mimo-question-card';
+  card.dataset.requestId = aq.request_id;
+  card.dataset.sessionId = aq.session_id;
+  card.dataset.interactive = renderOptions.interactive === false ? 'false' : 'true';
+  let sending = false;
   card.setAttribute('aria-label', 'Open Clank agent question');
   const status = document.createElement('div');
   status.className = 'settings-save-status';
@@ -2144,16 +2148,19 @@ function _renderMimoQuestionCard(aq, renderOptions) {
     let data = {};
     try { data = await response.json(); } catch (_) {}
     if (!response.ok) {
-      if (response.status === 404 || response.status === 409) {
+      const detail = data.detail || data.error;
+      const code = detail && typeof detail === 'object' ? detail.code : '';
+      if (code === 'question_stale') {
+        card.remove();
         document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
-          detail: { sessionId: aq.session_id, kind: 'question' },
+          detail: { sessionId: aq.session_id, kind: 'question', requestId: aq.request_id },
         }));
       }
-      throw new Error(data.detail || data.error || `Question reply failed (${response.status})`);
+      throw new Error((typeof detail === 'string' ? detail : detail?.message) || `Question reply failed (${response.status})`);
     }
     card.remove();
     document.dispatchEvent(new CustomEvent('odysseus:interactive-resolved', {
-      detail: { sessionId: aq.session_id, kind: 'question' },
+      detail: { sessionId: aq.session_id, kind: 'question', requestId: aq.request_id },
     }));
   };
 
@@ -2163,9 +2170,11 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   close.setAttribute('aria-label', 'Reject question');
   close.innerHTML = uiIcon('close', 16); close.setAttribute('aria-label', close.getAttribute('aria-label') || close.title || 'Close');
   close.addEventListener('click', async () => {
-    close.disabled = true;
+    if (sending || renderOptions.interactive === false) return;
+    sending = true; close.disabled = true; submit.disabled = true;
     try { await send({ rejected: true }); }
-    catch (error) { status.textContent = error.message; close.disabled = false; }
+    catch (error) { status.textContent = error.message; close.disabled = false; submit.disabled = false; }
+    finally { sending = false; }
   });
   card.appendChild(close);
 
@@ -2186,6 +2195,12 @@ function _renderMimoQuestionCard(aq, renderOptions) {
       input.value = String(option.label || option);
       input.dataset.questionIndex = String(questionIndex);
       input.dataset.optionIndex = String(optionIndex);
+      if (!question.multiple) input.addEventListener('change', () => {
+        if (input.checked) {
+          const custom = group.querySelector('[data-custom-question-index]');
+          if (custom) custom.value = '';
+        }
+      });
       row.appendChild(input);
       const label = document.createElement('span');
       label.className = 'ask-user-option-label';
@@ -2205,6 +2220,9 @@ function _renderMimoQuestionCard(aq, renderOptions) {
       custom.className = 'styled-prompt-input ask-user-other-input';
       custom.placeholder = 'Custom answer…';
       custom.dataset.customQuestionIndex = String(questionIndex);
+      if (!question.multiple) custom.addEventListener('input', () => {
+        if (custom.value.trim()) group.querySelectorAll('input[type=radio]').forEach(input => { input.checked = false; });
+      });
       group.appendChild(custom);
     }
     card.appendChild(group);
@@ -2218,10 +2236,12 @@ function _renderMimoQuestionCard(aq, renderOptions) {
   card.appendChild(status);
   card.addEventListener('submit', async (event) => {
     event.preventDefault();
+    if (sending || renderOptions.interactive === false) return;
     const answers = questions.map((question, index) => {
       const selected = Array.from(card.querySelectorAll(`input[name="mimo-question-${index}"]:checked`)).map((input) => input.value);
       const custom = card.querySelector(`[data-custom-question-index="${index}"]`);
       const customValue = custom ? custom.value.trim() : '';
+      if (customValue && !question.multiple) return [customValue];
       if (customValue) selected.push(customValue);
       return selected;
     });
@@ -2229,12 +2249,18 @@ function _renderMimoQuestionCard(aq, renderOptions) {
       status.textContent = 'Answer every question before continuing.';
       return;
     }
-    submit.disabled = true;
+    sending = true; submit.disabled = true; close.disabled = true;
     status.textContent = 'Sending…';
     try { await send({ answers }); }
-    catch (error) { status.textContent = error.message; submit.disabled = false; }
+    catch (error) { status.textContent = error.message; submit.disabled = false; close.disabled = false; }
+    finally { sending = false; }
   });
 
+  if (renderOptions.interactive === false) {
+    card.querySelectorAll('input,button').forEach(input => { input.disabled = true; });
+    close.hidden = true; submit.hidden = true;
+    status.textContent = 'Question from this chat’s history.';
+  }
   chatBox.appendChild(card);
   if (renderOptions.scroll !== false) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   if (renderOptions.focus !== false) card.focus();
@@ -2736,7 +2762,7 @@ export function addMessage(role, content, modelName, metadata) {
         // Session history is rendered oldest-to-newest.  A later user message
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
-        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+        renderAskUserCard(pendingAskUser, { focus: false, scroll: false, interactive: !pendingAskUser.request_id });
       }
       return lastWrap;
     }

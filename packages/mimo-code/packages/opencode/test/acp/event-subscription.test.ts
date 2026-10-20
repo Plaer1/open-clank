@@ -260,6 +260,52 @@ function createFakeAgent() {
 }
 
 describe("acp.agent event subscription", () => {
+  test("host Stop rejection releases the question queue for the next prompt and another chat", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({ directory: tmp.path, fn: async () => {
+      const { agent, sdk, connection, stop } = createFakeAgent()
+      const session = await agent.newSession({ cwd: tmp.path, mcpServers: [] }).then((x) => x.sessionId)
+      const other = await agent.newSession({ cwd: tmp.path, mcpServers: [] }).then((x) => x.sessionId)
+      const pending = new Map<string, (value: object) => void>()
+      const replies: string[] = []
+      const rejected: string[] = []
+      Object.assign(connection, { extMethod: (_method: string, params: { requestId: string }) =>
+        new Promise((resolve) => pending.set(params.requestId, resolve)) })
+      Object.assign(sdk, { question: {
+        reply: async (params: { requestID: string }) => { replies.push(params.requestID) },
+        reject: async (params: { requestID: string }) => { rejected.push(params.requestID) },
+      } })
+      Object.assign(sdk.session, { abort: async () => {
+        // The host turn-finally path acknowledges the old extension on Stop.
+        pending.get("old")?.({ rejected: true })
+      } })
+      const ask = (sessionID: string, id: string) => (agent as any).handleEvent({
+        type: "question.asked", properties: { sessionID, id, questions: [{
+          question: "Choose", options: [{ label: "A", description: "first" }],
+        }] },
+      })
+      try {
+        await ask(session, "old")
+        await ask(other, "other")
+        await Promise.resolve()
+        expect([...pending.keys()]).toEqual(["old", "other"])
+        await agent.cancel({ sessionId: session })
+        await ask(session, "new")
+        await Bun.sleep(0)
+        expect(pending.has("new")).toBe(true)
+        expect(rejected).toEqual(["old"])
+        pending.get("new")?.({ answers: [["A"]] })
+        pending.get("other")?.({ answers: [["A"]] })
+        await Promise.all([...(agent as any).questionQueues.values()])
+        expect(replies.sort()).toEqual(["new", "other"])
+        expect((agent as any).questionQueues.size).toBe(0)
+      } finally {
+        for (const settle of pending.values()) settle({ rejected: true })
+        stop()
+      }
+    } })
+  }, 30000)
+
   test("routes message.part.delta by the event sessionID (no cross-session pollution)", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({

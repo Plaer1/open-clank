@@ -991,19 +991,32 @@ def _reconcile_selected_route_from_request(
     selected_model = str(form_data.get("selected_model") or "").strip()
     selected_endpoint_id = str(form_data.get("selected_endpoint_id") or "").strip()
     selected_endpoint_url = str(form_data.get("selected_endpoint_url") or "").strip()
-    if not selected_model:
+    selected_route_id = str(form_data.get("selected_model_route_id") or "").strip()
+    if not any((selected_model, selected_endpoint_id, selected_endpoint_url, selected_route_id)):
         return False
 
     if selected_endpoint_url and selected_endpoint_url != MANAGED_ENGINE_PUBLIC_URL:
-        raise HTTPException(400, "Selected route did not come from the provider catalogue")
+        raise HTTPException(400, {"code": "selection_invalid", "message": "Selected route did not come from the provider catalogue"})
+    stored_route_id = getattr(sess, "provider_model_route_id", None)
+    matches_stored = bool(stored_route_id) and all(
+        not posted or posted == stored
+        for posted, stored in (
+            (selected_model, getattr(sess, "model", None)),
+            (selected_endpoint_id, getattr(sess, "endpoint_id", None)),
+            (selected_route_id, stored_route_id),
+        )
+    )
+    if not matches_stored and not (selected_model and selected_endpoint_id):
+        raise HTTPException(400, {"code": "selection_incomplete", "message": "Choose a provider connection and model before changing this chat's selection"})
     try:
         route = resolve_chat_route(
             owner=owner or getattr(sess, "owner", None),
-            endpoint_id=selected_endpoint_id,
-            model_id=selected_model,
+            endpoint_id=getattr(sess, "endpoint_id", None) if matches_stored else selected_endpoint_id,
+            model_id=getattr(sess, "model", None) if matches_stored else selected_model,
+            model_route_id=stored_route_id if matches_stored else selected_route_id or None,
         )
     except ChatRouteUnavailable as exc:
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(400, {"code": "selection_invalid", "message": str(exc)}) from exc
 
     if (
         route.model_route_id == getattr(sess, "provider_model_route_id", None)
@@ -1021,7 +1034,12 @@ def _reconcile_selected_route_from_request(
         if owner:
             db_query = db_query.filter(DBSession.owner == owner)
         db_session = db_query.first()
-        if db_session:
+        if db_session is None:
+            manager = getattr(getattr(request.app, "state", None), "session_manager", None)
+            ghost = getattr(manager, "sessions", {}).get(session_id)
+            if not (getattr(sess, "incognito", False) and ghost is sess and getattr(sess, "owner", None) == owner):
+                raise HTTPException(404, "Session not found")
+        else:
             db_session.model = route.provider_model_id
             db_session.endpoint_url = MANAGED_ENGINE_PUBLIC_URL
             db_session.endpoint_id = route.public_endpoint_id
@@ -2587,14 +2605,17 @@ def setup_chat_routes(
             handler = getattr(sup, "question_handler", None) if sup else None
         if handler is None:
             raise HTTPException(503, "question handler not available")
-        if not handler.resolve(
+        outcome = handler.resolve_result(
             request_id,
             owner=owner,
             session_id=session_id,
             answers=answers,
             rejected=rejected,
-        ):
-            raise HTTPException(409, "question is stale, invalid, or already answered")
+        )
+        if outcome == "invalid_answer":
+            raise HTTPException(422, {"code": "question_invalid_answer", "message": "Choose a valid answer for every question"})
+        if outcome != "accepted":
+            raise HTTPException(409, {"code": "question_stale", "message": "This question is no longer waiting for an answer"})
         return {"ok": True}
 
     @router.delete("/api/mimo/permission-grants/{grant_id}")

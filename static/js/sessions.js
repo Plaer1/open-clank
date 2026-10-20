@@ -16,6 +16,8 @@ const API_BASE = window.location.origin;
 let sessions = [];
 let currentSessionId = null;
 let _sessionNavToken = 0;
+const _sessionRouteRevisions = new Map();
+const _routeFields = ['model', 'endpoint_id', 'endpoint_url', 'provider_model_route_id'];
 let _skipAutoSelect = false;
 let _suppressNextSessionLoading = false;
 let _rootFreshChatApplied = false;
@@ -1709,6 +1711,7 @@ function _animateSessionRowsRemoving(ids, selector) {
 }
 
 export async function loadSessions() {
+  const routeRevisionsAtStart = new Map(_sessionRouteRevisions);
   try {
     // Delete incognito sessions left over from a previous page load
     await _cleanupIncognitoSessions();
@@ -1731,7 +1734,14 @@ export async function loadSessions() {
     const activeIncognito = _isIncognitoSession(currentSessionId)
       ? sessions.find(s => s.id === currentSessionId)
       : null;
+    const acknowledgedDuringFetch = sessions.filter(session =>
+      (_sessionRouteRevisions.get(session.id) || 0) !== (routeRevisionsAtStart.get(session.id) || 0));
     sessions = _normalizeSessionsList(fetched);
+    for (const acknowledged of acknowledgedDuringFetch) {
+      const row = sessions.find(session => session.id === acknowledged.id);
+      if (row) for (const field of _routeFields) row[field] = acknowledged[field];
+      else sessions.unshift(acknowledged);
+    }
     if (activeIncognito && !sessions.some(s => s.id === activeIncognito.id)) {
       sessions.unshift(activeIncognito);
     }
@@ -1817,7 +1827,9 @@ export async function loadSessions() {
           if (dc.endpoint_url && dc.model) {
             // Check if there's already an empty session with this model we can reuse
             const emptyDefault = activeSessions.find(s =>
-              s.model === dc.model && s.message_count === 0
+              s.model === dc.model && s.message_count === 0 &&
+              String(s.endpoint_id || '') === String(dc.endpoint_id || '') &&
+              String(s.endpoint_url || '') === String(dc.endpoint_url || '')
             );
             if (emptyDefault) {
               targetId = emptyDefault.id;
@@ -2254,7 +2266,7 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
 let _pendingChat = null; // { url, modelId, endpointId }
 let _pendingMaterializePromise = null;
 
-export function createDirectChat(url, modelId, endpointId, source = 'manual') {
+export function createDirectChat(url, modelId, endpointId, source = 'manual', options = {}) {
   _sessionNavToken++;
   // Detach any active stream so it doesn't interfere with the new chat
   if (window.chatModule && window.chatModule.detachCurrentStream) {
@@ -2312,7 +2324,7 @@ export function createDirectChat(url, modelId, endpointId, source = 'manual') {
   const msgInput = document.getElementById('message');
   if (msgInput) {
     msgInput.disabled = false;
-    _clearComposerUnlessStartupTyped(msgInput);
+    if (!options.preserveComposer) _clearComposerUnlessStartupTyped(msgInput);
     msgInput.focus();
   }
 }
@@ -2396,6 +2408,7 @@ export async function materializePendingSession() {
     const existingIndex = sessions.findIndex(item => item.id === materialized.id);
     if (existingIndex >= 0) sessions[existingIndex] = { ...sessions[existingIndex], ...materialized };
     else sessions.unshift(materialized);
+    _sessionRouteRevisions.set(materialized.id, (_sessionRouteRevisions.get(materialized.id) || 0) + 1);
     _pendingChat = null;
     currentSessionId = materialized.id;
     if (!isIncognito) {
@@ -2458,6 +2471,26 @@ export function setSessionWorkspaceId(sessionId, workspaceId) {
   const session = sessions.find((item) => item.id === sessionId);
   if (session) session.workspace_id = String(workspaceId || '') || null;
 }
+
+function acknowledgeSessionRoute(sessionId, route) {
+  const session = sessions.find(item => item.id === sessionId);
+  if (!session) return;
+  for (const field of _routeFields) session[field] = route[field] || '';
+  _sessionRouteRevisions.set(sessionId, (_sessionRouteRevisions.get(sessionId) || 0) + 1);
+}
+
+/** Execution identity comes only from the acknowledged session, never its label. */
+export function getCurrentRoute() {
+  const session = sessions.find(item => item.id === currentSessionId);
+  return session ? {
+    model: session.model || '',
+    endpoint_url: session.endpoint_url || '',
+    endpoint_id: session.endpoint_id || '',
+    model_route_id: session.provider_model_route_id || '',
+  } : { model: '', endpoint_url: '', endpoint_id: '', model_route_id: '' };
+}
+
+export function getSessionNavigationToken() { return _sessionNavToken; }
 
 export function getCurrentModel() {
   const sess = sessions.find(x => x.id === currentSessionId);
@@ -2866,6 +2899,8 @@ function _initAllDropdowns() {
     getSessions: () => sessions,
     getPendingChat: () => _pendingChat,
     setPendingChat: (v) => { _pendingChat = v; },
+    getSessionNavigationToken,
+    acknowledgeSessionRoute,
     createDirectChat,
   });
   _initDropdownDismiss();
@@ -3737,6 +3772,8 @@ const sessionModule = {
   getSessions,
   setSessionWorkspaceId,
   getCurrentModel,
+  getCurrentRoute,
+  getSessionNavigationToken,
   getCurrentEndpointUrl,
   setCurrentSessionId,
   initDragSort,
