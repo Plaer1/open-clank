@@ -10,12 +10,35 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import sys
+import time
 import urllib.request
 
 TOOL_VERSION = '7.1.0'
 TOOL_SHA256 = '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
 TOOL_URL = 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe'
 SOURCE = Path(__file__).with_name('windows-installer.iss')
+
+
+# Full seal/start allowance plus both sequential Engine smoke deadlines.
+PAYLOAD_VERIFY_TIMEOUT = 180 + 2 * 120
+
+
+def run_payload_verifier(command, output_path, **kwargs):
+    event = {'event': 'payload-verifier', 'command': command,
+             'output_path': str(output_path), 'timeout_seconds': PAYLOAD_VERIFY_TIMEOUT}
+    print(json.dumps(dict(event, phase='start')), file=sys.stderr, flush=True)
+    started = time.monotonic()
+    failure = None
+    try:
+        return subprocess.run(command, check=True, timeout=PAYLOAD_VERIFY_TIMEOUT, **kwargs)
+    except BaseException as error:
+        failure = type(error).__name__
+        raise
+    finally:
+        print(json.dumps(dict(event, phase='end', elapsed_seconds=round(time.monotonic() - started, 3),
+                              outcome='failed' if failure else 'passed', error_type=failure)),
+              file=sys.stderr, flush=True)
 
 
 def digest(path):
@@ -74,8 +97,8 @@ def build(bundle, target, output, tools, qualification):
     for path in bundle.rglob('*'):
         if path.is_symlink() or path.name == 'emoji-assets.pack' or path.name.startswith('emoji-assets.pack.part-'):
             raise RuntimeError('Installer refuses symlinks or bundled external artwork')
-    subprocess.run([str(bundle / 'openclank.exe'), 'engine', 'verify', '--json'],
-                   check=True, timeout=180, stdout=subprocess.DEVNULL)
+    run_payload_verifier([str(bundle / 'openclank.exe'), 'engine', 'verify', '--json'],
+                         os.devnull, stdout=subprocess.DEVNULL)
     output.mkdir(parents=True)
     compiler = install_compiler(tools)
     subprocess.run([str(compiler), '--no-signing', '--no-ide-signtools', '/DTarget=' + target,

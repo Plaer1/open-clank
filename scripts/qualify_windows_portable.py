@@ -25,6 +25,27 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+# Full seal/start allowance plus both sequential Engine smoke deadlines.
+PAYLOAD_VERIFY_TIMEOUT = 180 + 2 * 120
+
+
+def run_payload_verifier(command, output_path, **kwargs):
+    event = {'event': 'payload-verifier', 'command': command,
+             'output_path': str(output_path), 'timeout_seconds': PAYLOAD_VERIFY_TIMEOUT}
+    print(json.dumps(dict(event, phase='start')), file=sys.stderr, flush=True)
+    started = time.monotonic()
+    failure = None
+    try:
+        return subprocess.run(command, check=True, timeout=PAYLOAD_VERIFY_TIMEOUT, **kwargs)
+    except BaseException as error:
+        failure = type(error).__name__
+        raise
+    finally:
+        print(json.dumps(dict(event, phase='end', elapsed_seconds=round(time.monotonic() - started, 3),
+                              outcome='failed' if failure else 'passed', error_type=failure)),
+              file=sys.stderr, flush=True)
+
+
 def fixture_png():
     """Small nonsquare content fixture; a square fallback icon cannot pass."""
     width, height = 96, 48
@@ -112,8 +133,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
 
     try:
         with (work / 'payload-verify.json').open('wb') as verification:
-            subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
-                           cwd=work, check=True, timeout=180, stdout=verification)
+            run_payload_verifier([str(executable), 'engine', 'verify', '--json'], verification.name,
+                                 env=environment, cwd=work, stdout=verification)
         checks.append('checksummed-payload-engine-and-six-helper-PE-verification')
         runtime = bundle / '_internal/python/python.exe'
         subprocess.run([str(runtime), '-I', '-c',
@@ -123,8 +144,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                        cwd=work, check=True, timeout=30, stdout=subprocess.DEVNULL)
         checks.append('standalone-private-python-I-c-and-m-without-PATH-python')
         with (work / 'payload-verify-after-python.json').open('wb') as verification:
-            subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
-                           cwd=work, check=True, timeout=180, stdout=verification)
+            run_payload_verifier([str(executable), 'engine', 'verify', '--json'], verification.name,
+                                 env=environment, cwd=work, stdout=verification)
         checks.append('sealed-payload-unchanged-after-private-python-probes')
         if parts is not None:
             subprocess.run([str(executable), 'assets', 'assemble', '--parts', str(parts)],
@@ -215,8 +236,8 @@ def qualify(bundle, target, output, parts=None, emoji_pack=None):
                        capture_output=True, timeout=30)
         process.wait(timeout=30)
         with (work / 'payload-verify-after-journey.json').open('wb') as verification:
-            subprocess.run([str(executable), 'engine', 'verify', '--json'], env=environment,
-                           cwd=work, check=True, timeout=180, stdout=verification)
+            run_payload_verifier([str(executable), 'engine', 'verify', '--json'], verification.name,
+                                 env=environment, cwd=work, stdout=verification)
         checks.append('sealed-payload-unchanged-after-journey-and-owned-server-stop')
         receipt['qualification'] = 'packaged-startup-auth-files-editor-passed'
     finally:
