@@ -17,16 +17,19 @@ if sys.platform == "win32":
 
 
 def register_static_mime_types() -> None:
-    """Force stable JS module MIME types across platforms.
+    """Force stable JS module and ZIP download MIME types across platforms.
 
     Some native Windows setups inherit stale/incorrect registry mappings for
     ``.js``/``.mjs``, which can make Starlette serve ES modules with a non-JS
     ``Content-Type`` and cause the UI to load but fail on click. Re-register the
     standard MIME types at startup so static assets are served consistently.
+    Windows registry ZIP aliases must likewise not override the published
+    curriculum download descriptors.
     """
 
     mimetypes.add_type("text/javascript", ".js")
     mimetypes.add_type("application/javascript", ".mjs")
+    mimetypes.add_type("application/zip", ".zip")
 
 
 register_static_mime_types()
