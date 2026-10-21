@@ -80,8 +80,20 @@ print(json.dumps({'proof':'offline-packaged-child','missingAllFourBeforeActivati
 
 
 def verify_public_resources(journey, resource_root: Path, manifest: dict):
-    records = manifest.get('resources', [])
-    if len(records) != 17: raise RuntimeError('Installed four-root fixture resource register must contain exactly17 entries')
+    canonical_path = Path(__file__).resolve().parents[1] / 'src/openclank/treehouse_curriculum/manifest.json'
+    canonical = json.loads(canonical_path.read_text(encoding='utf-8'))
+    identity = ('sourceId', 'packageRevision', 'packageDigest')
+    if any(not isinstance(canonical.get(key), str) or not canonical[key]
+           or manifest.get(key) != canonical[key] for key in identity):
+        raise RuntimeError('Installed curriculum identity differs from the qualification source manifest')
+    expected = canonical.get('resources')
+    records = manifest.get('resources')
+    if (not isinstance(expected, list) or not expected or records != expected
+            or any(not isinstance(row, dict) or not isinstance(row.get('id'), str)
+                   or not isinstance(row.get('path'), str) for row in expected)
+            or len({row['id'] for row in expected}) != len(expected)
+            or len({row['path'] for row in expected}) != len(expected)):
+        raise RuntimeError('Installed public resource register differs from the canonical source descriptors')
     total = 0
     for descriptor in records:
         path = resource_root / descriptor['path']
@@ -91,7 +103,9 @@ def verify_public_resources(journey, resource_root: Path, manifest: dict):
                 or headers.get_content_type() != descriptor['mime']):
             raise RuntimeError('Installed Treehouse public fixture byte/MIME descriptor differs: ' + descriptor['id'])
         total += len(body)
-    return {'count': len(records), 'bytes': total}
+    return {'count': len(records), 'bytes': total,
+            'source_manifest_package_revision': canonical['packageRevision'],
+            'source_manifest_package_digest': canonical['packageDigest']}
 
 
 def qualify_global_response(journey):
@@ -309,9 +323,9 @@ def qualify_treehouse(base: str, opener, resource_root: Path, *, detailed: bool 
     files += [root / 'static/icons/treehouse-achievements/manifest.json',
               root / 'static/icons/treehouse-achievements/fallback.svg',
               root / 'static/icons/treehouse-achievements/mascot-kit.zip']
-    manifest = json.loads((root / 'src/openclank/treehouse_curriculum/manifest.json').read_text())
+    manifest = json.loads((root / 'src/openclank/treehouse_curriculum/manifest.json').read_text(encoding='utf-8'))
     j.receipt['public_fixtures'] = verify_public_resources(j, root, manifest)
-    j.receipt['checks'].append('all17-public-fixture-bytes-and-MIME-match-admitted-descriptors')
+    j.receipt['checks'].append('all-canonical-public-resource-bytes-and-MIME-match-source-bound-descriptors')
     private_python = root / 'python/bin/python3'
     if private_python.is_file():
         with tempfile.TemporaryDirectory(prefix='openclank-packaged-treehouse-storage-') as work:

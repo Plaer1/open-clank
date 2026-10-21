@@ -59,7 +59,7 @@ class GlobalCatalogue:
         if not manifest_file.is_relative_to(self.path):
             error('invalid_global_path','Index manifest escapes source root')
         self.manifest_path = manifest_file
-        self.manifest = json.loads(manifest_file.read_text())
+        self.manifest = json.loads(manifest_file.read_text(encoding='utf-8'))
         m = self.manifest
         if m.get('format') != 'openclank-treehouse-global-v1' or m.get('schemaVersion') != 1 or m.get('sourceId') != SOURCE_ID:
             error('invalid_global_package', 'Unsupported system curriculum package')
@@ -323,7 +323,7 @@ def load_global_catalogue(package_root=None):
     active = Path(os.environ.get('TREEHOUSE_CONTENT_ROOT') or Path(DATA_DIR) / 'treehouse-content/shared/openclank-treehouse-core')
     marker = active / '.authority.json'
     if marker.exists():
-        value = json.loads(marker.read_text())
+        value = json.loads(marker.read_text(encoding='utf-8'))
         if value.get('format') != 'treehouse-course-authority-v1' or value.get('sourceId') != SOURCE_ID:
             error('invalid_global_package', 'Shared course authority marker needs repair')
         from src.openclank.treehouse_shared_course_index import latest_shared_index

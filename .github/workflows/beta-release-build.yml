@@ -265,6 +265,18 @@ jobs:
           $installers = @(Get-ChildItem dist/installers -Filter "Open-Clank-*-$env:RELEASE_TARGET-Setup.exe")
           if ($installers.Count -ne 1 -or $installers[0].Length -ge 2GB) { throw 'Require exactly one installer under the GitHub 2 GiB per-file limit.' }
           if (-not (Test-Path ($installers[0].FullName + '.sha256'))) { throw 'Installer checksum file is missing.' }
+      - name: Retain unqualified portable payload after failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Unqualified-portable-${{ matrix.target }}
+          path: |
+            dist/Open-Clank-*-${{ matrix.target }}.zip
+            dist/Open-Clank-*-${{ matrix.target }}.zip.sha256
+            dist/portable-zip-${{ matrix.target }}.json
+          if-no-files-found: ignore
+          retention-days: 14
+          compression-level: 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Open-Clank-${{ matrix.target }}
