@@ -112,6 +112,9 @@ output.txt.txt
 !static/docs/media/
 !static/docs/media/**/*.png
 !static/docs/media/**/*.webp
+!/static/treehouse/fixtures/openclank/code-graph-web-alpha-20261019.png
+!/static/treehouse/fixtures/openclank/code-graph-gravity-alpha-20261019.png
+!/static/treehouse/fixtures/openclank/code-graph-menus-alpha-20261019.png
 
 # …except shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
