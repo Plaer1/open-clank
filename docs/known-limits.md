@@ -1,6 +1,6 @@
-# Beta 1 known limits
+# Beta 2 known limits
 
-Beta 1 is the first of several betas. macOS is the current build/dogfood focus.
+Beta 2 is the second beta release. macOS is the current build/dogfood focus.
 Windows source support is working and tested, including authenticated startup,
 Files, Editor save/reopen and History restore, native PNG/JPEG/MP4 thumbnails,
 and host application dispatch. Shared fixes were also tested on macOS. Install
@@ -22,6 +22,27 @@ Files uses cross-platform framed transport. Opt-in Tonic transport is
 macOS-specific. Native previews depend on installed handlers; an unavailable
 handler can produce a fallback rather than document-content pixels.
 
+## Code Graph Alpha
+
+Code Graph is Alpha in Beta 2. Grammar-backed symbols and static relationship
+rules cover supported syntax; this is not a language server, complete type
+system, runtime execution trace or full framework detector. Unresolved or
+inferred relationships keep their evidence state. Large or unsupported inputs
+can have explicit unavailable coverage rather than fabricated facts.
+
+Metadata search indexes declaration metadata. **Source contents** is bounded,
+case-sensitive literal search through current policy-admitted code-index files;
+it is not repository-wide full-text search of arbitrary files. New paths need
+ordinary index refresh. Source reads and actions still require current workspace,
+policy and source authority.
+
+Initial indexing can be expensive. Resource settings take effect through the
+existing drain/revision boundary and do not remove native hard limits. Generation
+storage defaults to 2 GiB with a supported ceiling of 8 GiB; a larger setting is
+not a guarantee every repository fits. A failed generation does not publish
+incomplete resolution data as a complete replacement. Check partial coverage and
+artifact-specific provenance; these notes do not qualify every OS or package.
+
 ## Connections and execution
 
 App login, model connections/subscription login and mailbox authorization are
@@ -38,7 +59,7 @@ Agent processes inherit the server account's OS access. Account privileges,
 agent scopes and typed approvals are application controls, not a process
 sandbox. [SECURITY.md](../SECURITY.md) explains deployment boundaries.
 
-Declarative Hexes activation does not authorize custom executable checks. Beta 1
+Declarative Hexes activation does not authorize custom executable checks. Beta 2
 does not yet provide a supported fresh-install workflow to grant or revoke that
 execution trust. Missing, expired or revoked trust remains refused.
 
@@ -162,6 +183,6 @@ specific workflows; they do not establish complete product or delivery
 acceptance. Record the installed revision, selected backend and reproduction
 steps when reporting a similar result.
 
-Machine version remains `1.0.2`. [Beta 1 notes](beta1.md) describe the label and
+Machine version is `1.0.3`. [Beta 2 notes](beta2.md) describe the label and
 reporting details. Public release assets/tags must be verified at publication;
 these guides do not invent a download or release date.

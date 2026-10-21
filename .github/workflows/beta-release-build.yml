@@ -1,8 +1,6 @@
 name: Beta release Windows builds
 
 on:
-  push:
-    branches: [codex/beta1-release-build-20261006]
   workflow_dispatch:
     inputs:
       emoji_release_tag:
@@ -16,11 +14,11 @@ permissions:
 
 concurrency:
   group: beta-release-build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   windows:
-    if: github.ref == 'refs/heads/codex/beta1-release-build-20261006'
+    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/v1.0.3-beta.2')
     name: Native ${{ matrix.target }} portable qualification
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180

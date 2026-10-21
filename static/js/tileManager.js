@@ -1,3 +1,4 @@
+import { applyEdgeDock, clearRightDock, chatVisiblePlacementRect } from './modalSnap.js';
 import { windowViewportBounds, observeWindowWorkspace, clampFloatingWindow, isBlockingAppletFrame } from './windowResize.js';
 
 /**
@@ -107,6 +108,10 @@ function _zoneForContent(content, x, y) {
   const modal = content && content.closest && content.closest('.modal, .research-overlay');
   const zone = _zoneForPointer(x, y);
   if (!zone) return null;
+  if (modal?.dataset.chatVisibleMaximize === 'true') {
+    const side = zone.name.includes('left') ? 'left' : 'right';
+    return {...zone, rect:chatVisiblePlacementRect(modal, side, zone.name === 'maximize')};
+  }
   return zone;
 }
 
@@ -165,6 +170,11 @@ function _applySnap(content, rect, zoneName, previous = null) {
   // orphaned edge-dock state so only the tile-snap positions the window.
   const _modal = content.closest && content.closest('.modal, .research-overlay, .notes-pane');
   const _fromRect = content.getBoundingClientRect();
+  if (_modal?.dataset.chatVisibleMaximize === 'true') {
+    const side = zoneName.includes('left') ? 'left' : 'right';
+    applyEdgeDock(_modal, side, undefined, {maximized:zoneName === 'maximize'});
+    return;
+  }
   _clearEdgeDockResidue(_modal, content);
 
   // Capture the preceding floating geometry, before its drag reached a snap
@@ -193,6 +203,9 @@ function _applySnap(content, rect, zoneName, previous = null) {
 }
 
 function _unsnap(content) {
+  if (content.dataset._tileZone === 'chat-visible') {
+    clearRightDock(content.closest('.modal')); return;
+  }
   const pre = content.dataset._tilePreSnap;
   if (!pre) return;
   // Clear the !important snap props first — Object.assign can't override them.
@@ -274,7 +287,7 @@ if (typeof document !== 'undefined') document.addEventListener('pointerup', () =
 function _reclampAll(animate = false) {
   document.querySelectorAll('.oc-applet-frame[data-_tile-zone]').forEach(c => {
     const name = c.dataset._tileZone;
-    if (!name) return;
+    if (!name || name === 'chat-visible') return;
     const safe = _viewportSafeRect();
     const W = safe.right - safe.left, H = safe.bottom - safe.top;
     let r;

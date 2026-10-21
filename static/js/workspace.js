@@ -71,13 +71,13 @@ function _openIndexSubscription(workspaceId, generation) {
 window.addEventListener('pagehide', _releaseIndexSubscription);
 
 export function subscribeWorkspaceIndex(workspaceId, {
-  purpose = 'app_folder', sessionId = '', isCurrent = () => true, onStatus = () => {}, observe = false,
+  purpose = 'app_folder', sessionId = '', isCurrent = () => true, onStatus = () => {}, observe = false, automatic = false,
 } = {}) {
   if (!workspaceId || !isCurrent()) return () => {};
   const subscription = { workspaceId, purpose, sessionId, id: crypto.randomUUID() };
   const observer = observeCodeIndex({
     request: event => _indexEvent(subscription, event, event === 'release'),
-    isCurrent, onStatus, observe,
+    isCurrent, onStatus, observe, automatic,
     onDispose: () => window.removeEventListener('pagehide', release),
   });
   const release = () => {
@@ -85,6 +85,8 @@ export function subscribeWorkspaceIndex(workspaceId, {
     observer();
   };
   release.refresh = observer.refresh;
+  release.verify=observer.verify;release.dirty=observer.dirty;release.setVisible=observer.setVisible;release.configure=observer.configure;
+  release.captureSourceChange=observer.captureSourceChange;release.sourceChanged=observer.sourceChanged;
   release.readmit = observer.readmit;
   window.addEventListener('pagehide', release);
   return release;

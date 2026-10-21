@@ -3890,6 +3890,8 @@ function syncActiveFolderWatch() {
     try {
       for await (const event of filesFacadeClient.watch(resourceRef, { signal: controller.signal })) {
         if (controller.signal.aborted || epoch !== state.watchEpoch || activeColumn()?.resourceRef !== resourceRef) return;
+        // A successful watch observation is a dirty hint, never source authority.
+        window.dispatchEvent(new CustomEvent('openclank-files-watch-dirty',{detail:{provider:'host',resourceRef,rescanRequired:event?.rescan_required===true}}));
         if (state.watchRefreshTimer != null) clearTimeout(state.watchRefreshTimer);
         state.watchRefreshTimer = setTimeout(() => {
           state.watchRefreshTimer = null;

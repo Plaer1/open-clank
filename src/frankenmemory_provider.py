@@ -346,7 +346,7 @@ class FrankenmemoryProvider(MemoryProvider):
                 # admission separately requires an acknowledged scheduler.
                 try:
                     from src.settings import load_settings
-                    from src.openclank.code_index_settings import configuration_request, validate_status, configured
+                    from src.openclank.code_index_settings import configuration_request, validate_status, configured, configured_limits
                     saved = load_settings()
                     # Bound only this optional preference acknowledgment. A
                     # stalled/old engine must not prevent ordinary memory
@@ -359,7 +359,10 @@ class FrankenmemoryProvider(MemoryProvider):
                     if getattr(restored, "isError", False):
                         raise ValueError("Indexing scheduler unavailable")
                     status = validate_status(json.loads(restored.content[0].text))
-                    if (status["desired"], status["revision"]) != configured(saved):
+                    requested_limits = configured_limits(saved)
+                    if ((status["desired"], status["revision"]) != configured(saved)
+                            or status["desired_limits"] != requested_limits
+                            or status["effective_limits"] != requested_limits):
                         raise ValueError("Indexing scheduler not acknowledged")
                 except Exception:
                     logger.warning("Indexing scheduler restore pending; ordinary memory remains available")
@@ -604,22 +607,24 @@ class FrankenmemoryProvider(MemoryProvider):
         except json.JSONDecodeError:
             return {"raw": text}
 
-    async def code_index_scheduler(self, *, action, revision=None, max_threads=None, ready_only=True):
+    async def code_index_scheduler(self, *, action, revision=None, max_threads=None, limits=None, ready_only=True):
         """Private app bridge. Settings readback cannot start/restart an owner."""
-        from src.openclank.code_index_settings import integer, MAX_REVISION, validate_status
+        from src.openclank.code_index_settings import integer, MAX_REVISION, validate_status, validate_limits
         if self._broker_url:
             raise MemoryRequestRejectedError("Indexing scheduler is app-only")
         arguments = {"action": action, "origin": "app"}
         if action == "configure":
             arguments.update(revision=integer(revision, "revision", 1, MAX_REVISION),
                              max_threads=integer(max_threads, "max_threads", 1, 32))
-        elif action != "status" or revision is not None or max_threads is not None:
+            if limits is not None:
+                arguments["limits"] = validate_limits(limits)
+        elif action != "status" or revision is not None or max_threads is not None or limits is not None:
             raise MemoryRequestRejectedError("Invalid indexing scheduler action")
         return validate_status(await self._call_tool_transport("code_index_scheduler", arguments, _ready_only=ready_only))
 
     async def _restore_index_scheduler(self):
         from src.settings import load_settings
-        from src.openclank.code_index_settings import configuration_request, configured
+        from src.openclank.code_index_settings import configuration_request, configured, configured_limits
         if self._broker_url:
             raise MemoryRequestRejectedError("Indexing scheduler is app-only")
         lock = self.__dict__.setdefault("_index_scheduler_lock", asyncio.Lock())
@@ -629,7 +634,10 @@ class FrankenmemoryProvider(MemoryProvider):
             await self.initialize()
             saved = load_settings()
             status = await self.code_index_scheduler(**configuration_request(saved), ready_only=True)
-            if (status["desired"], status["revision"]) != configured(saved):
+            requested_limits = configured_limits(saved)
+            if ((status["desired"], status["revision"]) != configured(saved)
+                    or status["desired_limits"] != requested_limits
+                    or status["effective_limits"] != requested_limits):
                 raise MemoryTransportError("Indexing configuration is pending")
 
     async def code_index_lifecycle(
@@ -695,7 +703,7 @@ class FrankenmemoryProvider(MemoryProvider):
         return cleanup
 
     @measured_code_query
-    async def code_query(self, *, binding: Dict[str, Any], query: Optional[Dict[str, Any]], source_claim=None, _read_fence_only=False, _visual_request=None) -> Dict[str, Any]:
+    async def code_query(self, *, binding: Dict[str, Any], query: Optional[Dict[str, Any]], source_claim=None, _read_fence_only=False, _selection_policy_fence=False, _visual_request=None) -> Dict[str, Any]:
         """Private app-owned read job. Polls never admit/rebuild a workspace.
 
         Each RPC returns promptly to the single owner queue; CPU/parse/source
@@ -707,7 +715,7 @@ class FrankenmemoryProvider(MemoryProvider):
         if _visual_request is not None:
             if binding.get("origin") != "app":
                 raise MemoryRequestRejectedError("Code visualization is app-only", code="denied")
-            if (query is not None or source_claim is not None or _read_fence_only
+            if (query is not None or source_claim is not None or _read_fence_only or _selection_policy_fence
                     or not isinstance(_visual_request, dict) or set(_visual_request) != {"mode", "request"}
                     or _visual_request.get("mode") not in ("map", "selection")
                     or not isinstance(_visual_request.get("request"), dict)):
@@ -723,8 +731,12 @@ class FrankenmemoryProvider(MemoryProvider):
             arguments["query"] = dict(query)
         if source_claim is not None:
             arguments["source_claim"] = source_claim
+        if _selection_policy_fence and not _read_fence_only:
+            raise MemoryRequestRejectedError("Selection policy fence requires read fence mode", code="invalid")
         if _read_fence_only:
             arguments["read_fence_only"] = True
+        if _selection_policy_fence:
+            arguments["selection_policy_fence"] = True
         start = asyncio.create_task(self._call_tool("code_query", arguments))
         pending = self.__dict__.setdefault("_code_query_pending_starts", {})
         pending[start] = dict(binding)
@@ -799,8 +811,8 @@ class FrankenmemoryProvider(MemoryProvider):
             raise MemoryRequestRejectedError("Visual request required", code="invalid")
         return await self.code_query(binding=binding, query=None, _visual_request=visual_request)
 
-    async def code_read_fence(self, *, binding, expected_receipt=None):
-        result = await self.code_query(binding=binding, query={"operation": "capabilities", "fields": [], "channels": [], "expected_receipt": expected_receipt}, _read_fence_only=True)
+    async def code_read_fence(self, *, binding, expected_receipt=None, selection_policy=False):
+        result = await self.code_query(binding=binding, query={"operation": "capabilities", "fields": [], "channels": [], "expected_receipt": expected_receipt}, _read_fence_only=True, _selection_policy_fence=selection_policy)
         if isinstance(result.get("private_read_fence"), str):
             return {"fence": result["private_read_fence"], "cost": result.get("cost", {})}
         return result

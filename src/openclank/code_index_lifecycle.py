@@ -38,6 +38,18 @@ def _public_status(result, private_root):
     if "progress" in result:
         progress = result["progress"] or {}
         public["progress"] = {key: progress[key] for key in ("completed_files", "total_files", "heartbeat_at") if key in progress}
+        phases = {"inventory", "verification", "extraction", "dependency_resolution", "visual_summary", "sealing", "publication", "ready"}
+        if progress.get("phase") in phases:
+            public["progress"]["phase"] = progress["phase"]
+            for key in ("phase_completed", "phase_total"):
+                value = progress.get(key)
+                if type(value) is int and 0 <= value <= 4_000_000:
+                    public["progress"][key] = value
+            if progress.get("phase_unit") in {"files", "entries", "references", "links"}:
+                public["progress"]["phase_unit"] = progress["phase_unit"]
+            observed = progress.get("phase_observed_at")
+            if isinstance(observed, str) and len(observed) <= 64:
+                public["progress"]["phase_observed_at"] = observed
     if "error" in result:
         error = result["error"]
         public["error"] = {key: diagnostic(value) if key == "message" else value
@@ -118,7 +130,11 @@ async def workspace_index_event(
         raise CodeIndexLifecycleError("Invalid index response", code="invalid_response")
     # Native metadata is deliberately projected; private roots, identity
     # receipts and authority database paths never cross the browser boundary.
-    return {"workspace_id": workspace.id, **_public_status(result, root)}
+    # These are the resolved public scope identities revalidated above, not
+    # caller/native claims. Consumers need them to fence delayed source hints
+    # and retain only same-scope published metadata during verification.
+    return {"workspace_id": workspace.id, "workspace_revision": workspace.revision,
+            "policy_generation": generation, **_public_status(result, root)}
 
 
 async def session_workspace_index_event(request, session, *, action="ensure", workspace_id=None):

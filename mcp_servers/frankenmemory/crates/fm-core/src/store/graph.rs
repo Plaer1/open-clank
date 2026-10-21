@@ -467,7 +467,7 @@ impl SqliteStore {
         let checkout=Self::codebase_for_root(&conn,scope,&binding.root)?;
         conn.execute("UPDATE code_index_runs SET status='cancelled',finished_at=?1 WHERE owner=?2 AND workspace_id=?3 AND codebase=?4 AND status='running' AND EXISTS(SELECT 1 FROM code_registrations c WHERE c.owner=?2 AND c.workspace_id=?3 AND c.checkout_id=?4 AND (c.policy_generation!=?5 OR c.workspace_revision!=?6 OR c.admission_epoch!=code_index_runs.admission_epoch OR c.config_fingerprint!=code_index_runs.config_fingerprint))",params![Utc::now().to_rfc3339(),scope.owner,scope.workspace_id,checkout,binding.policy_generation,binding.workspace_revision.to_string()]).map_err(|e|e.to_string())?;
         conn.execute("UPDATE code_registrations SET owner_subject_id=?1,location_id=?2,workspace_revision=?3,policy_generation=?4,config_fingerprint=?5 WHERE owner=?6 AND workspace_id=?7 AND checkout_id=?8",params![binding.owner_subject_id,binding.location_id,binding.workspace_revision.to_string(),binding.policy_generation,crate::code::producer_fingerprint(),scope.owner,scope.workspace_id,checkout]).map_err(|e|e.to_string())?;
-        Self::code_lifecycle_inner(&conn,scope,&checkout)
+        Self::code_lifecycle_inner(&conn,scope,&checkout).map(|value|self.lifecycle_progress(scope,&checkout,value))
         })();
         match prepared{Ok(payload)=>{conn.execute_batch("COMMIT").map_err(|e|e.to_string())?;Ok(payload)},Err(error)=>{let _=conn.execute_batch("ROLLBACK");Err(error)}}
     }
@@ -477,7 +477,7 @@ impl SqliteStore {
         let conn=self.conn.lock().unwrap();
         let identity=crate::code::directory_identity(&binding.root)?;
         let checkout:Option<String>=conn.query_row("SELECT checkout_id FROM code_registrations WHERE owner=?1 AND workspace_id=?2 AND directory_identity=?3",params![scope.owner,scope.workspace_id,identity],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
-        if let Some(checkout)=checkout { Self::code_lifecycle_inner(&conn,scope,&checkout) } else {
+        if let Some(checkout)=checkout { Self::code_lifecycle_inner(&conn,scope,&checkout).map(|value|self.lifecycle_progress(scope,&checkout,value)) } else {
             let epoch:Option<(i64,i64)>=conn.query_row("SELECT admission_epoch,erased FROM code_scope_epochs WHERE owner=?1 AND workspace_id IN (?2,'*') ORDER BY CASE WHEN workspace_id=?2 THEN 0 ELSE 1 END LIMIT 1",params![scope.owner,scope.workspace_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
             Ok(serde_json::json!({"registration_id":null,"checkout_id":null,"admission_epoch":epoch.map(|v|v.0).unwrap_or(0),"run_id":null,"head_generation":null,"lifecycle":if epoch.is_some_and(|v|v.1==1){"erased"}else{"missing"},"freshness":"missing","config_fingerprint":crate::code::producer_fingerprint(),"coverage":[],"progress":{"completed_files":0,"total_files":0,"heartbeat_at":null},"error":null}))
         }
@@ -2327,7 +2327,7 @@ impl SqliteStore {
                 "UPDATE code_index_runs
                  SET status=?1, files_indexed=?2, files_unchanged=?3,
                      files_removed=?4, symbols=?5, errors=?6, coverage=?7,
-                     finished_at=?8,heartbeat_at=?8,completed_files=total_files,source_snapshot=?13
+                     finished_at=?8,heartbeat_at=?8,completed_files=CASE WHEN ?1 IN ('ready','verified') THEN total_files ELSE completed_files END,source_snapshot=?13
                  WHERE owner=?9 AND workspace_id=?10 AND codebase=?11 AND run_id=?12 AND status='running'",
                 params![
                     status,
@@ -2568,7 +2568,9 @@ impl SqliteStore {
         });
         let _stop_heartbeat=StopHeartbeat(heartbeat_stop.clone());
         #[cfg(test)] index_test_pause(root,"before_scan");
+        self.set_index_progress(scope,&codebase,&run_id,"inventory",None,None,"entries")?;
         let scan = crate::code::scan_codebase_pinned(root,&root_identity)?;
+        self.set_index_progress(scope,&codebase,&run_id,"inventory",Some(scan.coverage.len()),Some(scan.coverage.len()),"entries")?;
         let policy = scan.policy;
         source_snapshot.selection_policy_digest = policy.digest();
         let files = scan.files;
@@ -2587,6 +2589,10 @@ impl SqliteStore {
             coverage: scan.coverage,
         };
 
+        let effective_limits=crate::code_index_limits::current();
+        if files.len()>effective_limits.max_files{return Err("budget_exceeded: configured selected-file limit".into());}
+        let selected_bytes=files.iter().try_fold(0u64,|total,path|std::fs::metadata(path).ok().and_then(|m|total.checked_add(m.len()))).ok_or("source_changed: source metadata unavailable")?;
+        if selected_bytes>effective_limits.max_source_bytes as u64{return Err("budget_exceeded: configured total-source limit".into());}
         // The v1 path retains its original whole-snapshot budgets. Disk
         // partitions bound larger repositories without weakening v1 readers.
         let file_backed=self.conn.lock().unwrap().path().is_some_and(|path|!path.is_empty());
@@ -2596,6 +2602,7 @@ impl SqliteStore {
             return Ok(output);
         }
 
+        self.set_index_progress(scope,&codebase,&run_id,"extraction",Some(0),Some(total_selected),"files")?;
         let mut coverage_index: HashMap<String, usize> = result
             .coverage
             .iter()
@@ -2640,6 +2647,7 @@ impl SqliteStore {
         let mut seen: HashSet<String> = HashSet::new();
         let mut staged: Vec<crate::code::IndexedFile> = Vec::new();
         let mut staged_evidence_bytes=0usize;
+        let mut acquired_source_bytes=0usize;
         let mut manifest = std::collections::BTreeMap::new();
         let mut failed:Vec<String>=known_map.keys().filter(|rel|result.coverage.iter().any(|entry|entry.status!="selected" && (entry.rel_path==***rel || (entry.status=="ignored" && rel.starts_with(&format!("{}/",entry.rel_path)))))).cloned().collect();
         seen.extend(result.coverage.iter().map(|entry|entry.rel_path.clone()));
@@ -2650,11 +2658,7 @@ impl SqliteStore {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             seen.insert(rel.clone());
-            {
-                let conn = self.conn.lock().unwrap();
-                let renewed = conn.execute("UPDATE code_index_runs SET heartbeat_at=?1,completed_files=?2,total_files=?3 WHERE owner=?4 AND workspace_id=?5 AND codebase=?6 AND run_id=?7 AND status='running'",params![Utc::now().to_rfc3339(),completed as i64,total_selected as i64,scope.owner,scope.workspace_id,codebase,run_id]).map_err(|e|e.to_string())?;
-                if renewed != 1 { return Err("superseded_or_cancelled".into()); }
-            }
+            self.set_index_progress(scope,&codebase,&run_id,"extraction",Some(completed),Some(total_selected),"files")?;
             policy.validate_source(root, &root_identity, &path)?;
             let acquired = match crate::code::acquire_source_pinned(root, &path,&root_identity) {
                 Ok(acquired) => acquired,
@@ -2672,6 +2676,8 @@ impl SqliteStore {
                     continue;
                 }
             };
+            acquired_source_bytes=acquired_source_bytes.checked_add(acquired.bytes.len()).ok_or("budget_exceeded: source byte overflow")?;
+            if acquired_source_bytes>effective_limits.max_source_bytes{return Err("budget_exceeded: configured total-source limit".into());}
             policy.validate_source(root, &root_identity, &path)?;
             let meta = &acquired.metadata;
             let mtime_ns = meta
@@ -2733,6 +2739,7 @@ impl SqliteStore {
                 }
             }
         }
+        self.set_index_progress(scope,&codebase,&run_id,"extraction",Some(total_selected),Some(total_selected),"files")?;
         for entry in &result.coverage {
             manifest.entry(entry.rel_path.clone()).or_insert_with(||format!("{}:{}",entry.status,entry.detail.as_deref().unwrap_or("")));
         }
@@ -2750,12 +2757,14 @@ impl SqliteStore {
             .collect();
         // Pure definition-first corpus resolution is outside the FM write
         // transaction, but its exact base is rechecked below before mutation.
+        self.set_index_progress(scope,&codebase,&run_id,"dependency_resolution",None,None,"files")?;
         let prepared_evidence=super::code_evidence::prepare_evidence(&evidence_base,&codebase,&staged,&gone,&failed,&result.coverage,&run_id)?;
         let evidence_changed=prepared_evidence.changed || evidence_base.manifest.as_deref()!=Some(result.source_snapshot.file_manifest_digest.as_str());
         #[cfg(test)] index_test_pause(root,"before_publish");
         policy.validate(root, &root_identity)?;
         let _authority_guard=if let Some(binding)=binding {Some(binding.publication_guard()?)}else{None};
         if crate::code::directory_identity(root)?!=root_identity{return Err("denied: admitted directory replaced before publication".into());}
+        self.set_index_progress(scope,&codebase,&run_id,"publication",None,None,"files")?;
         let _publication_timing = crate::code_metrics::span(crate::code_metrics::Stage::Publish);
         let conn = self.conn.lock().unwrap();
         // Per-file failure policy: tolerate and report. A file that cannot be

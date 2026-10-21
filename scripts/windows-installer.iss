@@ -21,9 +21,9 @@
 
 [Setup]
 AppId=OpenClank.Beta1.{#Target}
-AppName=Open Clank Beta 1 ({#Target})
+AppName=Open Clank Beta 2 ({#Target})
 AppVersion={#AppVersion}
-AppVerName=Open Clank {#AppVersion} Beta 1 ({#Target})
+AppVerName=Open Clank {#AppVersion} Beta 2 ({#Target})
 AppPublisher=Open Clank
 AppPublisherURL=https://github.com/Plaer1/open-clank
 DefaultDirName={localappdata}\Programs\Open Clank Beta\{#Target}

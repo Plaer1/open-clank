@@ -1,8 +1,6 @@
 name: Existing Windows installer artwork validation
 
 on:
-  push:
-    branches: [codex/beta1-installer-artwork-validation-20261006]
   workflow_dispatch:
     inputs:
       build_run_id:
@@ -24,7 +22,7 @@ concurrency:
 
 jobs:
   artwork:
-    if: github.ref == 'refs/heads/codex/beta1-installer-artwork-validation-20261006'
+    if: github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/tags/v1.0.3-beta.2')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -56,7 +54,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ($env:BUILD_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Bind an explicitly reviewed successful build run/source pair before pushing this validation branch; no latest-run discovery or failed defaults.' }
+          if ($env:BUILD_RUN_ID -notmatch '^[1-9][0-9]*$' -or $env:BUILD_SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Bind an explicitly reviewed successful build run/source pair before dispatching this validation; no latest-run discovery or failed defaults.' }
           python -I -c "import platform; assert platform.machine().lower() in ('${{ matrix.architecture }}', '${{ matrix.architecture == 'x64' && 'amd64' || 'aarch64' }}')"
           if ($LASTEXITCODE -ne 0) { throw 'Validation Python must match the native target.' }
           $root = Join-Path $env:RUNNER_TEMP "installer-artifact-$env:RELEASE_TARGET"
@@ -81,7 +79,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $parts = Join-Path $env:RUNNER_TEMP "artwork-parts-$env:RELEASE_TARGET"
-          gh release download v1.0.2-beta.1-artwork --repo $env:GITHUB_REPOSITORY --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir $parts
+          gh release download v1.0.2-beta.1-artwork-compact --repo $env:GITHUB_REPOSITORY --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*' --dir $parts
           if ($LASTEXITCODE -ne 0) { throw 'Pinned supporting artwork download failed.' }
       - name: Qualify default download and existing-parts installs using the same Setup
         run: |

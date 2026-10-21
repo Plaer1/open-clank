@@ -1,20 +1,23 @@
+import {forceSimulation,forceManyBody,forceLink,forceCollide,forceX,forceY} from '../vendor/d3-force-3.0.0.js';
+import { resolveGraphSettings } from './graphSettings.js';
 // Deterministic bounded CPU layout, not a GPU simulation or evidence producer.
 const MAX_NODES=2000,MAX_EDGES=5000,MAX_BYTES=4*1024*1024;
 const bytes=v=>new TextEncoder().encode(JSON.stringify(v)).length;
 function need(ok){if(!ok)throw Error('Invalid compact map layout');}
 export function validateLayoutInput(input){
-  need(input&&Object.keys(input).length===7&&['serial','namespace','nodes','edges','previous','anchor','viewport'].every(k=>Object.hasOwn(input,k)));
+  need(input&&Object.keys(input).every(k=>['serial','namespace','nodes','edges','previous','anchor','viewport','presentation','settings'].includes(k))&&[7,8,9].includes(Object.keys(input).length)&&(!Object.hasOwn(input,'presentation')||['map','web','gravity'].includes(input.presentation))&&['serial','namespace','nodes','edges','previous','anchor','viewport'].every(k=>Object.hasOwn(input,k)));
   need(input&&Number.isSafeInteger(input.serial)&&input.serial>0&&typeof input.namespace==='string'&&input.namespace.length<=16384&&bytes(input)<=MAX_BYTES);
   need(Array.isArray(input.nodes)&&input.nodes.length<=MAX_NODES&&Array.isArray(input.edges)&&input.edges.length<=MAX_EDGES&&Array.isArray(input.previous)&&input.previous.length<=MAX_NODES);
   const exact=(v,fields)=>v&&Object.keys(v).length===fields.length&&fields.every(k=>Object.hasOwn(v,k));
   need(exact(input.viewport,['width','height'])&&[input.viewport.width,input.viewport.height].every(v=>Number.isFinite(v)&&v>=1&&v<=8192));
-  const ids=new Set();for(const n of input.nodes){need(exact(n,['id','parent','kind'])&&typeof n.id==='string'&&n.id.length>0&&n.id.length<=256&&!ids.has(n.id)&&['repository','folder','file'].includes(n.kind)&&(n.parent===null||typeof n.parent==='string'&&n.parent.length<=256));ids.add(n.id);}
-  for(const e of input.edges)need(exact(e,['from','to'])&&ids.has(e.from)&&ids.has(e.to));
+  const ids=new Set();for(const n of input.nodes){need(exact(n,['id','parent','kind'])&&typeof n.id==='string'&&n.id.length>0&&n.id.length<=256&&!ids.has(n.id)&&['repository','folder','file','symbol'].includes(n.kind)&&(n.parent===null||typeof n.parent==='string'&&n.parent.length<=256));ids.add(n.id);}
+  for(const e of input.edges)need((exact(e,['from','to'])||exact(e,['from','to','relation']))&&ids.has(e.from)&&ids.has(e.to));
   const prior=new Set();for(const p of input.previous){need(exact(p,['id','x','y'])&&ids.has(p.id)&&!prior.has(p.id)&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Math.abs(p.x)<=1e7&&Math.abs(p.y)<=1e7);prior.add(p.id);}
   need(input.anchor===null||ids.has(input.anchor));return input;
 }
 export function layoutCodeMap(input){
   validateLayoutInput(input);
+  if(input.presentation&&input.presentation!=='map')return networkLayout(input);
   const nodes=new Map(input.nodes.map(n=>[n.id,n])),children=new Map(),neighbors=new Map(),ranks=new Map();
   for(const id of nodes.keys())neighbors.set(id,[]);
   for(const e of input.edges){neighbors.get(e.from).push(e.to);neighbors.get(e.to).push(e.from);}
@@ -76,8 +79,36 @@ export function layoutCodeMap(input){
     while(clashes(p)){attempt++;need(attempt<=MAX_NODES*4+1);p.x=start.x+(attempt%45)*190;p.y=start.y+Math.floor(attempt/45)*64;}
     occupy(p);
   }
+  const spacing=resolveGraphSettings({common:input.settings||{}}).mapSpacing;for(const p of positions.values())if(!old.has(p.id)){p.x*=spacing;p.y*=spacing;}
   const result=[...positions.values()].sort((a,b)=>a.id.localeCompare(b.id,'en'));
-  return {serial:input.serial,namespace:input.namespace,positions:result,bounds:result.length?{minX:Math.min(...result.map(p=>p.x)),minY:Math.min(...result.map(p=>p.y)),maxX:Math.max(...result.map(p=>p.x)),maxY:Math.max(...result.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
+  return {serial:input.serial,namespace:input.namespace,presentation:input.presentation||'map',positions:result,bounds:result.length?{minX:Math.min(...result.map(p=>p.x)),minY:Math.min(...result.map(p=>p.y)),maxX:Math.max(...result.map(p=>p.x)),maxY:Math.max(...result.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
+}
+
+// Finite presentation geometry only. Springs never create evidence edges.
+function networkLayout(input){
+  const settings=resolveGraphSettings({common:input.settings||{}},input.presentation);
+  const ids=input.nodes.map(n=>n.id).sort(),byId=new Map(input.nodes.map(n=>[n.id,n])),prior=new Map(input.previous.map(p=>[p.id,p]));
+  const degree=new Map(ids.map(id=>[id,0]));for(const e of input.edges){degree.set(e.from,degree.get(e.from)+1);degree.set(e.to,degree.get(e.to)+1);}
+  const radius=id=>settings.nodeRadius*(settings.nodeSizeBasis==='connections'?1+Math.min(2,Math.log2(1+degree.get(id))*.3):byId.get(id).kind==='repository'?1.5:byId.get(id).kind==='folder'?1.3:1);
+  const groupFor=id=>{if(settings.grouping==='free')return 'all';let n=byId.get(id),chain=[],seen=new Set();while(n&&!seen.has(n.id)){seen.add(n.id);if(n.kind==='folder')chain.unshift(n.id);n=byId.get(n.parent);}return chain.slice(0,settings.groupDepth).at(-1)||'root';};
+  const groupIds=[...new Set(ids.map(groupFor))].sort(),groups=new Map(groupIds.map((id,i)=>[id,{x:(i%Math.ceil(Math.sqrt(groupIds.length)))*settings.clusterSpacing,y:Math.floor(i/Math.ceil(Math.sqrt(groupIds.length)))*settings.clusterSpacing}]));
+  const points=ids.map((id,i)=>{const previous=prior.get(id),g=groups.get(groupFor(id)),angle=i*2.399963229728653,r=20*Math.sqrt(i+1);return {id,x:previous?.x??g.x+Math.cos(angle)*r,y:previous?.y??g.y+Math.sin(angle)*r};});
+  const links=input.edges.filter(e=>e.from!==e.to).map(e=>({source:e.from,target:e.to,relation:e.relation||'containment'}));
+  // Stop the maintained timer immediately. Only this finite worker job ticks;
+  // D3 mutates this fresh local geometry, never native nodes or evidence.
+  const simulation=forceSimulation(points).stop().alpha(1).alphaMin(.002)
+    .alphaDecay(1-Math.pow(.002,1/settings.iterations)).velocityDecay(1-settings.damping)
+    .force('charge',forceManyBody().strength(-settings.repulsion).theta(.9))
+    .force('links',forceLink(links).id(p=>p.id).distance(e=>settings.linkDistance*(e.relation==='containment'?.8:1)).strength(e=>settings.linkStrength*(e.relation==='containment'?settings.containmentStrength:1)))
+    .force('collision',forceCollide(p=>radius(p.id)+settings.collisionPadding+Math.min(45,settings.labelSize*2)).iterations(2))
+    .force('x',forceX(p=>input.presentation==='web'?groups.get(groupFor(p.id)).x:0).strength(input.presentation==='web'?settings.gravity*2:settings.gravity))
+    .force('y',forceY(p=>input.presentation==='web'?groups.get(groupFor(p.id)).y:0).strength(input.presentation==='web'?settings.gravity*2:settings.gravity));
+  if(input.anchor&&prior.has(input.anchor)){const p=points.find(p=>p.id===input.anchor);p.fx=p.x;p.fy=p.y;}
+  for(let step=0;step<settings.iterations;step++){simulation.tick();if(simulation.alpha()<simulation.alphaMin())break;}
+  simulation.stop();
+  const positions=points.map(({id,x,y})=>{need(Number.isFinite(x)&&Number.isFinite(y)&&Math.abs(x)<=1e7&&Math.abs(y)<=1e7);return {id,x,y};});
+  return {serial:input.serial,namespace:input.namespace,presentation:input.presentation,positions,
+    bounds:positions.length?{minX:Math.min(...positions.map(p=>p.x)),minY:Math.min(...positions.map(p=>p.y)),maxX:Math.max(...positions.map(p=>p.x)),maxY:Math.max(...positions.map(p=>p.y))}:{minX:0,minY:0,maxX:0,maxY:0}};
 }
 
 export function createCodeMapLayoutOwner({workerFactory,changed=()=>{}}={}){

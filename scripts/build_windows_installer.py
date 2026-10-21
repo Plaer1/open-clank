@@ -79,8 +79,8 @@ def build(bundle, target, output, tools, qualification):
     output.mkdir(parents=True)
     compiler = install_compiler(tools)
     subprocess.run([str(compiler), '--no-signing', '--no-ide-signtools', '/DTarget=' + target,
-                    '/DBundleRoot=' + str(bundle), '/DAppVersion=1.0.2', '/DOutputRoot=' + str(output), str(SOURCE)], check=True, timeout=1800)
-    installer = output / f'Open-Clank-1.0.2-{target}-Setup.exe'
+                    '/DBundleRoot=' + str(bundle), '/DAppVersion=1.0.3', '/DOutputRoot=' + str(output), str(SOURCE)], check=True, timeout=1800)
+    installer = output / f'Open-Clank-1.0.3-{target}-Setup.exe'
     if not installer.is_file() or installer.stat().st_size >= 2 * 1024**3:
         raise RuntimeError('Installer is missing or exceeds the release asset limit; preserve outputs')
     checksum = digest(installer)

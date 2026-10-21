@@ -1,4 +1,4 @@
-# Open Clank · Beta 1
+# Open Clank · Beta 2
 
 ![Open Clank](docs/assets/open-clank-banner.svg)
 
@@ -27,10 +27,16 @@ article through **Settings → Help**.
 
 ![Programming, Games, AI and Open Clank in the TreeHouse hub](static/docs/media/treehouse-four-main-quests-20261014/preview-960.webp)
 
+**Code Graph remains Alpha.** Open an approved code folder to inspect files,
+lazy symbol children and supported typed relationships. Indexed metadata and
+literal source-content search have separate scopes. Resource and display controls
+remain bounded by native limits; indexing may report explicit partial coverage.
+See [Beta 2 notes](docs/beta2.md) for the scope and limits.
+
 ## Start
 
-**macOS 15+, Apple Silicon:** use `Open-Clank-1.0.2-macos-arm64.dmg` when offered
-by the [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1).
+**macOS 15+, Apple Silicon:** use `Open-Clank-1.0.3-macos-arm64.dmg` when offered
+by the [application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2).
 Check its checksum and source/target provenance. Drag **OpenClank.app** to
 Applications, [install the verified offline artwork](docs/setup.md#macos-app-package)
 with its packaged CLI, then open the app. Private Python, Engine and native
@@ -66,7 +72,7 @@ First source setup downloads dependencies and builds native workers. Follow
 
 ## Support and limits
 
-- Beta 1 is the first of several betas; machine version is `1.0.2`. Include the
+- Beta 2 is the second beta release; machine version is `1.0.3`. Include the
   installed revision when reporting problems.
 - macOS Apple Silicon package/source workflows have bounded qualification;
   Intel/universal builds are not claimed. Windows **source** workflows are
@@ -89,7 +95,7 @@ maintained read-only handbook in Wiki or Editor. Create personal documents for
 practice.
 
 [Setup](docs/setup.md) · [Upgrading](docs/upgrading.md) ·
-[Backup & restore](docs/backup-restore.md) · [Beta notes](docs/beta1.md) ·
+[Backup & restore](docs/backup-restore.md) · [Beta notes](docs/beta2.md) ·
 [Contributing](CONTRIBUTING.md) · [Security CI](docs/security-ci.md)
 
 ## Credits and license

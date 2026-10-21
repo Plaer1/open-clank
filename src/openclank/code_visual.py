@@ -18,7 +18,7 @@ MAX_BYTES = 256 * 1024
 SELECTION_BYTES = 64 * 1024
 MAX_INT = (1 << 53) - 1  # Public counters must remain exact in the browser.
 CANONICAL_ID = re.compile(r"(file|decl|occ):[0-9a-fA-F]{1,128}\Z")
-RELATIONS = ("containment", "import", "call")
+RELATIONS = ("containment", "import", "call", "value_reference", "type_reference", "inherits", "implements", "render", "route", "overrides")
 LIMITS = dict(bytes=MAX_BYTES, nodes=200, edges=800, groups=50, work=4_000_000)
 COST_FIELDS = {"inspected_entries", "sql_vm_steps", "metadata_bytes", "retained_summary_bytes",
     "serialized_bytes", "source_bytes_read", "policy_bytes_read", "summary_cache_hit",
@@ -158,7 +158,7 @@ def validate_visual_request(value):
         direction = request.get("direction", "both")
         _require(direction in ("incoming", "outgoing", "both"))
         relations = request.get("relations", list(RELATIONS))
-        _array(relations, 3)
+        _array(relations, len(RELATIONS))
         _require(bool(relations) and all(type(r) is str and r in RELATIONS for r in relations)
             and len(set(relations)) == len(relations))
         authority, root, cursor = request.get("expected_authority"), request.get("root"), request.get("cursor")
@@ -255,10 +255,22 @@ def _map_result(value, request):
     nodes = _array(value["nodes"], request["limits"]["nodes"])
     ids, parents = set(), {}
     for node in nodes:
-        _obj(node, {"id", "label", "kind", "parent", "source_files", "asset_files", "languages"})
+        _obj(node, {"id", "label", "kind", "parent", "source_files", "asset_files", "languages"}, {"resource_id", "symbol_kind", "qualified_name", "file_resource_id"})
         _text(node["id"])
         _text(node["label"], 160)
-        _require(node["kind"] in ("repository", "folder", "file") and node["id"] not in ids)
+        _require(node["kind"] in ("repository", "folder", "file", "symbol") and node["id"] not in ids)
+        if node["kind"] != "symbol":
+            _require(not any(key in node for key in ("symbol_kind", "qualified_name", "file_resource_id")))
+        else:
+            _require(not preview and all(key in node for key in ("resource_id", "symbol_kind", "qualified_name", "file_resource_id")))
+        if "resource_id" in node:
+            _canonical(node["resource_id"], ("file",) if node["kind"] == "file" else ("decl", "occ"))
+        if "file_resource_id" in node:
+            _canonical(node["file_resource_id"], ("file",))
+        if "symbol_kind" in node:
+            _text(node["symbol_kind"], 64)
+        if "qualified_name" in node:
+            _text(node["qualified_name"], 1024)
         ids.add(node["id"])
         _text(node["parent"], nullable=True)
         _require(node["parent"] != node["id"])
@@ -315,7 +327,7 @@ def _map_result(value, request):
         _obj(selection, {"visual_id", "resource_id", "receipt"})
         _require(not preview and selection["visual_id"] in ids and selection["receipt"] == authority["receipt"])
         _receipt(selection["receipt"])
-        _canonical(selection["resource_id"], ("file",))
+        _canonical(selection["resource_id"])
         _require(root is None or selection["visual_id"] == root)
     if request["root"] is not None and request["root"]["kind"] == "resource":
         _require(selection is not None and selection["visual_id"] == root)

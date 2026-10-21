@@ -3,7 +3,7 @@ import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 import { IS_MAC, isAltGrEvent } from './platform.js';
 import { visibleWindowBounds } from './windowResize.js';
 import {
-  WORKBENCH_MENUS, FILES_WORKBENCH_MENUS, configureWorkbenchCommands, registerWorkbenchSurface,
+  WORKBENCH_MENUS, FILES_WORKBENCH_MENUS, GRAPH_WORKBENCH_MENUS, configureWorkbenchCommands, registerWorkbenchSurface,
   captureWorkbenchTarget, workbenchCommandDescriptors, runWorkbenchCommand, restoreWorkbenchTarget,
 } from './workbenchCommands.js';
 
@@ -227,7 +227,7 @@ export function mountWorkbenchMenu({ host, container, before = null, id = host?.
   if (!routerInstalled) initWorkbenchMenu(appOperations);
   const unregisterSurface = surface ? registerWorkbenchSurface(host, { ...surface, kind }) : () => {};
   const prefix = uniquePrefix(id);
-  const menuNames = kind === 'files' ? FILES_WORKBENCH_MENUS : WORKBENCH_MENUS;
+  const menuNames = kind === 'graph' ? GRAPH_WORKBENCH_MENUS : kind === 'files' ? FILES_WORKBENCH_MENUS : WORKBENCH_MENUS;
   const bar = document.createElement('div'); bar.id = `${prefix}-bar`; bar.className = 'workbench-menubar';
   const nav = document.createElement('nav'); nav.className = 'workbench-menu-navigation';
   nav.setAttribute('role', 'menubar'); nav.setAttribute('aria-label', `${label} menu`); nav.setAttribute('aria-orientation', 'horizontal');

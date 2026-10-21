@@ -1,17 +1,17 @@
 # Open Clank Setup Guide
 
 This guide covers installation, deployment, troubleshooting and configuration.
-**Beta 1 is the first of several beta releases.** macOS is the current
+**Beta 2 is the second beta release.** macOS is the current
 build/dogfood focus. Windows source support is working and tested, including
 Files, Editor save/reopen and History restore, and native image/video thumbnails.
 Install only the native ARM64 or x64 Windows architectures offered by the
 published release, and check the artifact provenance. Linux support is
 coming later. See [known limits](known-limits.md) and
-[Beta 1 notes](beta1.md). Machine version: `1.0.2`.
+[Beta 2 notes](beta2.md). Machine version: `1.0.3`.
 
 Docker is not officially supported or tested. Docker/Compose instructions in
 this guide are retained only as unsupported legacy reference, not an official
-installation path or a Beta 1 release qualification requirement.
+installation path or a Beta 2 release qualification requirement.
 
 Native setup is the primary path, especially on Apple Silicon when local
 serving needs Metal. The commands below describe a **fresh installation**.
@@ -40,8 +40,8 @@ actions.
 
 #### macOS app package
 
-The Apple Silicon download for macOS 15 or later is `Open-Clank-1.0.2-macos-arm64.dmg` from
-the [`v1.0.2-beta.1` application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1)
+The Apple Silicon download for macOS 15 or later is `Open-Clank-1.0.3-macos-arm64.dmg` from
+the [`v1.0.3-beta.2` application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2)
 when published. Check the release checksum and artifact provenance for its
 source revision and target. No Intel/universal or older macOS support is claimed. This Beta app is
 ad-hoc signed, without Developer ID signing or notarization. Check its release
@@ -89,16 +89,16 @@ Install Homebrew, ARM-native Python 3.11 or later, [Rust/Cargo](https://rustup.r
 and Xcode Command Line Tools (`xcode-select --install`). This alternative builds
 locally; Intel Macs remain unqualified.
 
-Downloads become available when `v1.0.2-beta.1` is published on the
-[application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1). Obtain
-`open-clank-1.0.2-beta.1-source.tar.gz` from the application release. Obtain
+Downloads become available when `v1.0.3-beta.2` is published on the
+[application release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2). Obtain
+`open-clank-1.0.3-beta.2-source.tar.gz` from the application release. Obtain
 `emoji-assets.parts.json` and `emoji-assets.pack.part-001` from the separate `v1.0.2-beta.1-artwork-compact` supporting
 [release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact), which is already public. Check the source archive against the release checksum
 file. Keep both artwork files together in a separate directory.
 
 ```bash
-tar -xzf open-clank-1.0.2-beta.1-source.tar.gz
-cd open-clank-1.0.2-beta.1
+tar -xzf open-clank-1.0.3-beta.2-source.tar.gz
+cd open-clank-1.0.3-beta.2
 python3 scripts/emoji_asset_bundle.py assemble --parts /path/to/emoji-parts
 python3 scripts/emoji_asset_bundle.py verify
 ./start-macos.sh
@@ -124,7 +124,7 @@ network path and HTTPS are configured.
 
 ### Linux
 
-**Experimental in Beta 1.** Files/native integration remains unfinished;
+**Experimental in Beta 2.** Files/native integration remains unfinished;
 support is coming as soon as possible. Commands and engine builds do not prove
 parity with macOS dogfooding.
 
@@ -154,8 +154,8 @@ selected model. Cookbook background downloads and serves use `tmux`.
 ### Windows release package
 
 The simplest installation is the per-user Setup executable:
-`Open-Clank-1.0.2-windows-x64-Setup.exe` or
-`Open-Clank-1.0.2-windows-arm64-Setup.exe`. Downloads become available after
+`Open-Clank-1.0.3-windows-x64-Setup.exe` or
+`Open-Clank-1.0.3-windows-arm64-Setup.exe`. Downloads become available after
 publication; install only architectures actually offered by the release, and
 check the checksum and artifact provenance.
 This Beta is unsigned. Windows may show an unsigned-app warning; check the
@@ -183,8 +183,8 @@ create the first administrator, then sign in normally. The server remains on
 loopback by default. Uninstall removes the installed program and shortcuts,
 while preserving personal data and installed artwork; it is not a data reset.
 
-For a portable alternative, download `Open-Clank-1.0.2-windows-x64.zip` or
-`Open-Clank-1.0.2-windows-arm64.zip` from the same application release.
+For a portable alternative, download `Open-Clank-1.0.3-windows-x64.zip` or
+`Open-Clank-1.0.3-windows-arm64.zip` from the same application release.
 Extract the ZIP and keep its entire `openclank` directory together, including
 `_internal` and checksum files. Download the shared artwork part and
 `emoji-assets.parts.json` into a separate directory. From the extracted app
@@ -856,9 +856,9 @@ Obtain these two installation files from the release matching your source or pac
 
 Save them together in one directory. With GitHub CLI installed, the equivalent
 commands below download assets only; they do not create or publish a release.
-Beta 1 uses the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
+Beta 2 continues to use the separate `v1.0.2-beta.1-artwork-compact` supporting release. Use the
 command to obtain the already-published artwork and confirm both installation files are present.
-The application binaries and source use the separate `v1.0.2-beta.1` release.
+The application binaries and source use the separate `v1.0.3-beta.2` release.
 
 ```bash
 gh release download v1.0.2-beta.1-artwork-compact --repo Plaer1/open-clank --dir emoji-parts --pattern 'emoji-assets.parts.json' --pattern 'emoji-assets.pack.part-*'

@@ -7914,3 +7914,208 @@ ASSETS.update({'treehouse-four-main-quests-20261014': {'id': 'treehouse-four-mai
                                                    'bytes': 72032,
                                                    'sha256': 'b36e38faca614a6fac9cb33408f5e46c582f9f172a374e0310850d4f8bd0bb4c'}],
                                      'reduced_motion_url': '/static/docs/media/treehouse-current-work-20261014/preview.webp'}})
+
+
+# Actual deployed Alpha containment previews; source frames remain private.
+ASSETS.update({'code-graph-web-alpha-20261019': {'id': 'code-graph-web-alpha-20261019',
+                                   'state': 'ready',
+                                   'qualification': 'actual-deployed-alpha-containment-preview',
+                                   'scene': 'Code Graph Alpha in Web presentation with nested '
+                                            'folder and file containment preview.',
+                                   'alt': 'Code Graph Alpha in Web presentation with nested folder '
+                                          'and file containment preview.',
+                                   'caption': 'Web arranges the retained multilevel folder/file '
+                                              'preview. Alpha capture during source extraction: '
+                                              'containment preview only; dependencies are not yet '
+                                              'published. Import/call visibility choices do not '
+                                              'prove import/call edges exist.',
+                                   'provenance': {'kind': 'actual running local-app native Mozart '
+                                                          'CUA capture',
+                                                  'capture_date': '2026-10-19',
+                                                  'timezone': 'Pacific/Honolulu',
+                                                  'git_head': 'f37ae817',
+                                                  'revision': 'main f37ae817 plus approved '
+                                                              'working-source changes and accepted '
+                                                              'copal.js / codeMapScene.js '
+                                                              'overlays, running local port7777',
+                                                  'capture_by': 'root coordinator',
+                                                  'source_frame': 'deployed-web.png',
+                                                  'source_sha256': 'bf0c369ef6ff4d277e7cd0333beb276c72e760a8d77ce64d1ac485e37590499d',
+                                                  'native_width': 3360,
+                                                  'native_height': 1994,
+                                                  'crop_box': [455, 384, 2587, 1775],
+                                                  'capture_framing': 'Graph window only; browser '
+                                                                     'tabs, app sidebar and chat '
+                                                                     'background omitted. No '
+                                                                     'redraw, annotation, pixel '
+                                                                     'replacement or generative '
+                                                                     'editing.',
+                                                  'variant_derivation': 'PNG crop at native '
+                                                                        'pixels; same-size WebP '
+                                                                        'quality92. Learning PNG '
+                                                                        'is byte-identical to '
+                                                                        'cropped handbook master.',
+                                                  'data': 'Owner-approved first-party repository '
+                                                          'filename/folder containment; no source '
+                                                          'bodies or chat content.',
+                                                  'limitations': 'Index actively extracting '
+                                                                 'source; folder containment '
+                                                                 'preview only, dependencies not '
+                                                                 'yet published, stale freshness '
+                                                                 'visible. Not proof of current '
+                                                                 'import/call evidence or runtime '
+                                                                 'execution.',
+                                                  'license': 'Open Clank UI, AGPL-3.0-only'},
+                                   'masters': [{'path': 'static/docs/media/code-graph-web-alpha-20261019/master.png',
+                                                'width': 2132,
+                                                'height': 1391,
+                                                'mime': 'image/png',
+                                                'bytes': 1220400,
+                                                'sha256': 'abea99d83b9f08b839e0446a6841bb18872952db0a8aa3c8647a1c33c0a5b169'}],
+                                   'variants': [{'role': 'image',
+                                                 'url': '/static/docs/media/code-graph-web-alpha-20261019/preview.webp',
+                                                 'mime': 'image/webp',
+                                                 'width': 2132,
+                                                 'height': 1391,
+                                                 'bytes': 217670,
+                                                 'sha256': '041b95efaad455f4ba21e598387b60955e8b68be77e1feddd56384f0ba9b6f8f'}],
+                                   'reduced_motion_url': '/static/docs/media/code-graph-web-alpha-20261019/preview.webp'},
+ 'code-graph-gravity-alpha-20261019': {'id': 'code-graph-gravity-alpha-20261019',
+                                       'state': 'ready',
+                                       'qualification': 'actual-deployed-alpha-containment-preview',
+                                       'scene': 'Code Graph Alpha in Gravity presentation with the '
+                                                'retained folder and file containment preview.',
+                                       'alt': 'Code Graph Alpha in Gravity presentation with the '
+                                              'retained folder and file containment preview.',
+                                       'caption': 'Gravity rearranges the retained folder/file '
+                                                  'preview; layout is not additional evidence. '
+                                                  'Alpha capture during source extraction: '
+                                                  'containment preview only; dependencies are not '
+                                                  'yet published. Import/call visibility choices '
+                                                  'do not prove import/call edges exist.',
+                                       'provenance': {'kind': 'actual running local-app native '
+                                                              'Mozart CUA capture',
+                                                      'capture_date': '2026-10-19',
+                                                      'timezone': 'Pacific/Honolulu',
+                                                      'git_head': 'f37ae817',
+                                                      'revision': 'main f37ae817 plus approved '
+                                                                  'working-source changes and '
+                                                                  'accepted copal.js / '
+                                                                  'codeMapScene.js overlays, '
+                                                                  'running local port7777',
+                                                      'capture_by': 'root coordinator',
+                                                      'source_frame': 'deployed-gravity.png',
+                                                      'source_sha256': 'cf982a18f16ea8e8d8fdee116ce3b31d77fadf6bbb5ac3d801f907d272ca1e7f',
+                                                      'native_width': 3360,
+                                                      'native_height': 1994,
+                                                      'crop_box': [455, 384, 2587, 1775],
+                                                      'capture_framing': 'Graph window only; '
+                                                                         'browser tabs, app '
+                                                                         'sidebar and chat '
+                                                                         'background omitted. No '
+                                                                         'redraw, annotation, '
+                                                                         'pixel replacement or '
+                                                                         'generative editing.',
+                                                      'variant_derivation': 'PNG crop at native '
+                                                                            'pixels; same-size '
+                                                                            'WebP quality92. '
+                                                                            'Learning PNG is '
+                                                                            'byte-identical to '
+                                                                            'cropped handbook '
+                                                                            'master.',
+                                                      'data': 'Owner-approved first-party '
+                                                              'repository filename/folder '
+                                                              'containment; no source bodies or '
+                                                              'chat content.',
+                                                      'limitations': 'Index actively extracting '
+                                                                     'source; folder containment '
+                                                                     'preview only, dependencies '
+                                                                     'not yet published, stale '
+                                                                     'freshness visible. Not proof '
+                                                                     'of current import/call '
+                                                                     'evidence or runtime '
+                                                                     'execution.',
+                                                      'license': 'Open Clank UI, AGPL-3.0-only'},
+                                       'masters': [{'path': 'static/docs/media/code-graph-gravity-alpha-20261019/master.png',
+                                                    'width': 2132,
+                                                    'height': 1391,
+                                                    'mime': 'image/png',
+                                                    'bytes': 1186188,
+                                                    'sha256': '3b769a3f9277a3dea1d7130be2e042dc08b210b8db48693f382a49a0857f8be8'}],
+                                       'variants': [{'role': 'image',
+                                                     'url': '/static/docs/media/code-graph-gravity-alpha-20261019/preview.webp',
+                                                     'mime': 'image/webp',
+                                                     'width': 2132,
+                                                     'height': 1391,
+                                                     'bytes': 209638,
+                                                     'sha256': 'fe370bbfc298f4019b642d96c3306ed77a62d594d5ca02748cfee28651351ea1'}],
+                                       'reduced_motion_url': '/static/docs/media/code-graph-gravity-alpha-20261019/preview.webp'},
+ 'code-graph-menus-alpha-20261019': {'id': 'code-graph-menus-alpha-20261019',
+                                     'state': 'ready',
+                                     'qualification': 'actual-deployed-alpha-containment-preview',
+                                     'scene': 'Code Graph Alpha View menu showing graph canvas, '
+                                              'Explorer, Inspector and relationship visibility '
+                                              'commands.',
+                                     'alt': 'Code Graph Alpha View menu showing graph canvas, '
+                                            'Explorer, Inspector and relationship visibility '
+                                            'commands.',
+                                     'caption': 'The shared View menu offers graph navigation and '
+                                                'visibility commands; Search & evidence is '
+                                                'unavailable in this capture. Alpha capture during '
+                                                'source extraction: containment preview only; '
+                                                'dependencies are not yet published. Import/call '
+                                                'visibility choices do not prove import/call edges '
+                                                'exist.',
+                                     'provenance': {'kind': 'actual running local-app native '
+                                                            'Mozart CUA capture',
+                                                    'capture_date': '2026-10-19',
+                                                    'timezone': 'Pacific/Honolulu',
+                                                    'git_head': 'f37ae817',
+                                                    'revision': 'main f37ae817 plus approved '
+                                                                'working-source changes and '
+                                                                'accepted copal.js / '
+                                                                'codeMapScene.js overlays, running '
+                                                                'local port7777',
+                                                    'capture_by': 'root coordinator',
+                                                    'source_frame': 'deployed-menus.png',
+                                                    'source_sha256': '3d6d2cbcaf026f2495111c19ab9b53140783dd601e1296297ff77190dcdf3428',
+                                                    'native_width': 3360,
+                                                    'native_height': 1994,
+                                                    'crop_box': [455, 384, 2587, 1775],
+                                                    'capture_framing': 'Graph window only; browser '
+                                                                       'tabs, app sidebar and chat '
+                                                                       'background omitted. No '
+                                                                       'redraw, annotation, pixel '
+                                                                       'replacement or generative '
+                                                                       'editing.',
+                                                    'variant_derivation': 'PNG crop at native '
+                                                                          'pixels; same-size WebP '
+                                                                          'quality92. Learning PNG '
+                                                                          'is byte-identical to '
+                                                                          'cropped handbook '
+                                                                          'master.',
+                                                    'data': 'Owner-approved first-party repository '
+                                                            'filename/folder containment; no '
+                                                            'source bodies or chat content.',
+                                                    'limitations': 'Index actively extracting '
+                                                                   'source; folder containment '
+                                                                   'preview only, dependencies not '
+                                                                   'yet published, stale freshness '
+                                                                   'visible. Not proof of current '
+                                                                   'import/call evidence or '
+                                                                   'runtime execution.',
+                                                    'license': 'Open Clank UI, AGPL-3.0-only'},
+                                     'masters': [{'path': 'static/docs/media/code-graph-menus-alpha-20261019/master.png',
+                                                  'width': 2132,
+                                                  'height': 1391,
+                                                  'mime': 'image/png',
+                                                  'bytes': 912236,
+                                                  'sha256': '14f27c164aed05403222ca0317733048e6e897d67a8e6923eb4a878f3dca68ae'}],
+                                     'variants': [{'role': 'image',
+                                                   'url': '/static/docs/media/code-graph-menus-alpha-20261019/preview.webp',
+                                                   'mime': 'image/webp',
+                                                   'width': 2132,
+                                                   'height': 1391,
+                                                   'bytes': 159590,
+                                                   'sha256': 'fcb65515bc2b11b6d474e3928738d7ca4cc29ed52eeb52b6e2b40d96a622a4d0'}],
+                                     'reduced_motion_url': '/static/docs/media/code-graph-menus-alpha-20261019/preview.webp'}})

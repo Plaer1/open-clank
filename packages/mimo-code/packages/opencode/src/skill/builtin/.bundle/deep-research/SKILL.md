@@ -79,28 +79,28 @@ For deep mode, before finalizing do one critique pass: reread the report as a sk
 
 Finally, give the user a 5-10 line summary of key conclusions and the report path.
 
-## Alternative: scripted workflow (unattended runs)
+## Alternative: builtin workflow (unattended runs)
 
-The same pipeline exists as a deterministic workflow script at `/Users/mi/claude-workspace/.mimocode/workflows/deep-research-pro.js` — use it instead of the manual phases above when the run should be fully autonomous, resumable, or batch-invoked. It is convergent: re-running with the same `dir` skips completed phases (brief.md / plan.json / findings/F*.md / reflect.json / REPORT.md act as checkpoints).
+The supported builtin `deep-research` workflow performs brief → plan angles → parallel research → gap reflection → cited report → independent review, with a fix pass for critical review findings. Use it when the run should be autonomous, resumable, or batch-invoked. Its checkpoint files (`brief.md`, `plan.json`, `findings/F*.md`, `reflect.json`, `REPORT.md`) let a repeated run reuse completed work; review can run again.
 
-Invocation (workflow tool; custom scripts must be passed inline via `script`, not `name`):
+Use the workflow tool's builtin name. No personal checkout or external script is required:
 
-```
+```javascript
 workflow({
   operation: "run",
-  script: <full text of deep-research-pro.js, Read it first>,
-  workspace: "<ABS_DIR>",            # same value as args.dir
+  name: "deep-research",
+  workspace: "<ABS_DIR>",           // choose the research output directory; prepare its findings/ folder first
   args: {
-    dir: "<ABS_DIR>",                # e.g. /path/to/research/<slug> — mkdir -p <ABS_DIR>/findings first
     question: "<refined research question>",
-    today: "<YYYY-MM-DD>",           # REQUIRED — run `date +%Y-%m-%d` first; sandbox has no Date
-    depth: "standard",               # quick | standard | deep
+    depth: "standard",              // quick | standard | deep
     context: "<audience/language notes, optional>"
   }
 })
 ```
 
 Notes:
-- Do HITL clarification BEFORE invoking (the script never asks the user); fold answers into `question`/`context`.
-- Interrupted or failed run? Re-invoke with identical args — it resumes from the last checkpoint. `workflow({operation:"resume", run_id})` also works.
-- Returns `{ angles, deltaAngles, findingsFiles, reviewCritical, report }`.
+- Clarify scope with the user BEFORE invoking; the workflow itself writes assumptions rather than asking questions. Fold answers into `question`/`context`.
+- The host supplies `today` and `dir` for named builtin runs. Omit `dir` so it stays aligned with `workspace`; sandbox file operations and agent output must use that same directory.
+- Quick/standard/deep select fixed angle/search budgets. Standard and deep allow one bounded reflection round; this differs from the manual phase budget above.
+- Interrupted or failed run? Re-invoke with identical workspace/args to reuse checkpoints, or use `workflow({operation: "resume", run_id: "<RUN_ID>"})` for the existing run.
+- Returns `{ angles, deltaAngles, findingsFiles, reviewCritical, report }`. Do not claim completion if the tool reports a failure or the report was not produced.

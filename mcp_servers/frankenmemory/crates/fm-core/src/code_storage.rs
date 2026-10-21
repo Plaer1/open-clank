@@ -116,7 +116,7 @@ fn raw_bounds(bytes: &[u8], max_nodes: usize) -> Result<(), String> {
             b'}' | b']' => { depth = depth.checked_sub(1).ok_or_else(invalid)?; i += 1; }
             byte => {
                 nodes = nodes.checked_add(1).ok_or_else(budget)?;
-                if nodes > max_nodes { return Err(budget()); }
+                if nodes > max_nodes { return Err(format!("budget_exceeded: compact partition: JSON token limit {max_nodes}")); }
                 match byte {
                     b'{' | b'[' => {
                         depth += 1;
@@ -245,6 +245,99 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T,String> {
         }}else{value.clone()}
     }
     serde_json::from_value(expand(&packed.value,&packed)).map_err(|_|invalid())
+}
+
+// Resolution arrays can have more canonical JSON KEY tokens than an accepted
+// source evidence file. Frame bounded compact arrays without making one giant
+// serde Value tree. File packed/decoded/logical-node bounds remain aggregate;
+// lexical JSON token/depth bounds apply to each compact chunk independently.
+const SEQUENCE_MAGIC:&[u8;8]=b"\x89OCSQ\x01\r\n";
+const SEQUENCE_HEADER:usize=20;
+const SEQUENCE_BATCH:usize=256;
+const MAX_SEQUENCE_CHUNKS:usize=4096;
+
+struct JsonLength{bytes:usize,exceeded:bool}
+impl Write for JsonLength{
+ fn write(&mut self,bytes:&[u8])->io::Result<usize>{
+  let Some(next)=self.bytes.checked_add(bytes.len()).filter(|n|*n<=MAX_DECODED)else{self.exceeded=true;return Err(io::Error::other("sequence decoded byte limit"));};
+  self.bytes=next;Ok(bytes.len())
+ }
+ fn flush(&mut self)->io::Result<()>{Ok(())}
+}
+fn json_length<T:Serialize+?Sized>(value:&T)->Result<usize,String>{
+ let mut count=JsonLength{bytes:0,exceeded:false};let result=serde_json::to_writer(&mut count,value);
+ if count.exceeded{return Err(budget());}result.map_err(|_|invalid())?;Ok(count.bytes)
+}
+// Independent preflight before a typed chunk/whole-array allocation. Returned
+// nodes and expansion size include that chunk's outer array; callers replace
+// those wrappers with one logical outer array in the aggregate accounting.
+fn sequence_chunk_stats(bytes:&[u8])->Result<(usize,usize,usize),String>{
+ if bytes.len()>MAX_ENCODED{return Err(budget());}raw_bounds(bytes,MAX_PACKED_NODES)?;
+ let packed:Packed=serde_json::from_slice(bytes).map_err(|_|invalid())?;
+ if packed.codec!=CODEC_VERSION||packed.strings.len()>MAX_NODES||packed.shapes.len()>MAX_NODES{return Err(invalid());}
+ let(mut nodes,mut size)=(0,0);inspect(&packed.value,&packed,0,&mut nodes,&mut size)?;
+ let values=packed.value.as_array().filter(|a|a.first().and_then(Value::as_i64)==Some(-3)).ok_or_else(invalid)?;
+ Ok((nodes,size,values.len()-1))
+}
+fn sequence_totals(nodes:&mut usize,size:&mut usize,chunk_nodes:usize,chunk_size:usize)->Result<(),String>{
+ *nodes=nodes.checked_add(chunk_nodes.checked_sub(1).ok_or_else(invalid)?).ok_or_else(budget)?;
+ *size=size.checked_add(chunk_size.checked_sub(2).ok_or_else(invalid)?).ok_or_else(budget)?;
+ if *nodes>MAX_NODES||*size>MAX_DECODED{return Err(budget());}Ok(())
+}
+pub fn encode_sequence<T:Serialize>(values:&[T])->Result<Vec<u8>,String>{encode_sequence_checked(values,||Ok(()))}
+pub fn encode_sequence_checked<T:Serialize>(values:&[T],mut check:impl FnMut()->Result<(),String>)->Result<Vec<u8>,String>{
+ check()?;
+ if values.is_empty(){return encode(&values);}
+ if values.len()>=MAX_NODES{return Err(budget());}
+ let canonical=json_length(values)?;
+ let mut output=Vec::with_capacity(SEQUENCE_HEADER);output.extend_from_slice(SEQUENCE_MAGIC);output.extend_from_slice(&0u32.to_le_bytes());output.extend_from_slice(&(canonical as u64).to_le_bytes());
+ let(mut offset,mut chunks,mut nodes,mut size)=(0usize,0u32,1usize,2usize);
+ while offset<values.len(){
+  check()?;let mut count=SEQUENCE_BATCH.min(values.len()-offset);
+  let bytes=loop{match encode(&&values[offset..offset+count]){
+   Ok(bytes)=>break bytes,
+   Err(error)if error.starts_with("budget_exceeded:")&&count>1=>{count/=2;check()?;},
+   Err(error)=>return Err(error),
+  }};
+  let(n,s,records)=sequence_chunk_stats(&bytes)?;if records!=count{return Err(invalid());}sequence_totals(&mut nodes,&mut size,n,s)?;
+  let length=output.len().checked_add(8).and_then(|n|n.checked_add(bytes.len())).ok_or_else(budget)?;
+  if length>MAX_ENCODED||chunks as usize>=MAX_SEQUENCE_CHUNKS{return Err(budget());}
+  output.extend_from_slice(&(count as u32).to_le_bytes());output.extend_from_slice(&(bytes.len() as u32).to_le_bytes());output.extend_from_slice(&bytes);
+  offset=offset.checked_add(count).ok_or_else(budget)?;chunks+=1;
+ }
+ output[8..12].copy_from_slice(&chunks.to_le_bytes());check()?;Ok(output)
+}
+pub fn decode_sequence<T:DeserializeOwned+Serialize>(bytes:&[u8])->Result<Vec<T>,String>{decode_sequence_checked(bytes,||Ok(()))}
+pub fn decode_sequence_checked<T:DeserializeOwned+Serialize>(bytes:&[u8],mut check:impl FnMut()->Result<(),String>)->Result<Vec<T>,String>{
+ check()?;if !bytes.starts_with(SEQUENCE_MAGIC){return decode(bytes);}
+ if bytes.len()>MAX_ENCODED{return Err(budget());}if bytes.len()<SEQUENCE_HEADER{return Err(invalid());}
+ let count=u32::from_le_bytes(bytes[8..12].try_into().map_err(|_|invalid())?)as usize;
+ let canonical=u64::from_le_bytes(bytes[12..20].try_into().map_err(|_|invalid())?);
+ if count==0||count>MAX_SEQUENCE_CHUNKS||canonical<2{return Err(invalid());}if canonical>MAX_DECODED as u64{return Err(budget());}
+ if count.checked_mul(8).and_then(|n|n.checked_add(SEQUENCE_HEADER)).is_none_or(|n|n>bytes.len()){return Err(invalid());}
+ let(mut offset,mut records,mut nodes,mut size)=(SEQUENCE_HEADER,0usize,1usize,2usize);let mut chunks=Vec::with_capacity(count);
+ for _ in 0..count{
+  check()?;let end=offset.checked_add(8).filter(|n|*n<=bytes.len()).ok_or_else(invalid)?;
+  let rows=u32::from_le_bytes(bytes[offset..offset+4].try_into().map_err(|_|invalid())?)as usize;
+  let length=u32::from_le_bytes(bytes[offset+4..end].try_into().map_err(|_|invalid())?)as usize;
+  if rows==0||length==0{return Err(invalid());}offset=end;
+  let end=offset.checked_add(length).filter(|n|*n<=bytes.len()).ok_or_else(invalid)?;
+  let chunk=&bytes[offset..end];let(n,s,actual)=sequence_chunk_stats(chunk)?;
+  if actual!=rows{return Err(invalid());}sequence_totals(&mut nodes,&mut size,n,s)?;
+  records=records.checked_add(rows).filter(|n|*n<MAX_NODES).ok_or_else(budget)?;
+  chunks.push((chunk,rows));offset=end;
+ }
+ if offset!=bytes.len(){return Err(invalid());}
+ // All framing and aggregate expansion/record bounds have passed. Hold one
+ // typed chunk at a time; never collect decoded chunks beside the final Vec.
+ let mut output=Vec::new();output.try_reserve_exact(records).map_err(|_|budget())?;let mut actual_bytes=2usize;
+ for(chunk,rows)in chunks{
+  check()?;let mut values:Vec<T>=decode(chunk)?;if values.len()!=rows{return Err(invalid());}
+  let length=json_length(&values)?.checked_sub(2).ok_or_else(invalid)?;
+  actual_bytes=actual_bytes.checked_add(length).and_then(|n|n.checked_add(usize::from(!output.is_empty()))).filter(|n|*n<=MAX_DECODED).ok_or_else(budget)?;
+  output.append(&mut values);
+ }
+ if actual_bytes as u64!=canonical||output.len()!=records{return Err(invalid());}check()?;Ok(output)
 }
 
 #[cfg(test)]

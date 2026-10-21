@@ -9,6 +9,7 @@ import {
 } from './custom-context-menu.js';
 
 export const WORKBENCH_MENUS = Object.freeze(['File', 'Edit', 'Selection', 'View', 'Go', 'Tools', 'Window', 'Help']);
+export const GRAPH_WORKBENCH_MENUS = Object.freeze(['File', 'View', 'Graph']);
 export const FILES_WORKBENCH_MENUS = Object.freeze(['File', 'Edit', 'View', 'Go', 'Window', 'Help']);
 const surfaces = new WeakMap();
 let operations = {};
@@ -91,9 +92,10 @@ const editorSlots = [
 ];
 
 export function workbenchCommandDescriptors(captured) {
+  const graph=captured.kind==='graph',allowedMenus=graph?GRAPH_WORKBENCH_MENUS:WORKBENCH_MENUS;
   const byId = new Map();
   const add = (descriptor) => {
-    if (!descriptor?.id || !descriptor.label || !WORKBENCH_MENUS.includes(descriptor.menu)) return;
+    if (!descriptor?.id || !descriptor.label || !allowedMenus.includes(descriptor.menu)) return;
     byId.set(descriptor.id, Object.freeze({ ...descriptor, disabledReason:String(descriptor.disabledReason || '') }));
   };
   const app = (id, label, menu, operation, shortcut = '') => add({
@@ -114,7 +116,7 @@ export function workbenchCommandDescriptors(captured) {
     for (const descriptor of captured.surface.provider.commands(captured.surfaceTarget) || []) {
       // Applet descriptors retain their own context/selection authority.
       // They cannot replace app-wide launchers or captured window controls.
-      if (!String(descriptor.id || '').startsWith(files ? 'files.' : 'editor.')) continue;
+      if (!String(descriptor.id || '').startsWith(graph ? 'graph.' : files ? 'files.' : 'editor.')) continue;
       if (files && textEditing && ['files.copy', 'files.cut', 'files.paste', 'files.paste-plain', 'files.delete', 'files.select-all'].includes(descriptor.id)) continue;
       const current = descriptor.current;
       add({ ...descriptor, targeted:true, current:() => isSurfaceCurrent(captured) && (!current || current(captured.surfaceTarget)) });
@@ -130,22 +132,28 @@ export function workbenchCommandDescriptors(captured) {
   }
   app('app.palette', 'Command palette…', 'View', 'palette', `${mod}+Shift+P`);
   app('app.preferences', 'Settings…', files ? 'Edit' : 'Tools', 'settings');
-  app('app.appearance', 'Theme and appearance…', 'View', 'appearance');
+  if(!graph)app('app.appearance', 'Theme and appearance…', 'View', 'appearance');
   if (!files) app('app.chat-search', 'Search conversations…', 'Go', 'chatSearch');
   app('app.help', 'Open Clank help…', 'Help', 'help');
   app('app.docs', 'Documentation', 'Help', 'docs');
   const windowReason = isWindowCurrent(captured) ? '' : 'Activate an applet window first.';
-  add({ id:'window.minimize', label:'Minimize this window', menu:'Window', disabledReason:windowReason,
+  add({ id:'window.minimize', label:'Minimize this window', menu:graph?'View':'Window', disabledReason:windowReason,
     current:() => isWindowCurrent(captured), run:() => Modals.minimize(captured.modal.id) });
   add({ id:'window.close', label:'Close this window', menu:'File', disabledReason:windowReason,
     current:() => isWindowCurrent(captured), run:() => Modals.close(captured.modal.id) });
-  for (const side of ['left', 'right']) add({ id:`window.dock-${side}`, label:`Dock this window ${side}`, menu:'Window', disabledReason:windowReason,
+  if (captured.modal?.dataset.chatVisibleMaximize === 'true') {
+    const api = captured.modal.__openClankWindow;
+    const maximized = !!captured.modal.querySelector('.modal-content')?._chatVisibleMaximized;
+    add({id:'window.maximize', label:maximized ? 'Restore floating window' : 'Maximize beside chat', menu:'View', disabledReason:windowReason,
+      current:() => isWindowCurrent(captured), run:() => maximized ? api?.restorePlacement() : api?.maximize()});
+  }
+  for (const side of ['left', 'right']) add({ id:`window.dock-${side}`, label:`Dock this window ${side}`, menu:graph?'View':'Window', disabledReason:windowReason,
     checked:!!captured.modal?.classList.contains(`modal-${side}-docked`),
-    current:() => isWindowCurrent(captured), run:() => applyEdgeDock(captured.modal, side) });
+    current:() => isWindowCurrent(captured), run:() => applyEdgeDock(captured.modal, side, undefined, {maximized:false}) });
   const docked = captured.modal?.classList.contains('modal-left-docked') || captured.modal?.classList.contains('modal-right-docked');
-  add({ id:'window.undock', label:'Undock this window', menu:'Window', disabledReason:windowReason || (docked ? '' : 'This window is already floating.'),
+  add({ id:'window.undock', label:'Undock this window', menu:graph?'View':'Window', disabledReason:windowReason || (docked ? '' : 'This window is already floating.'),
     current:() => isWindowCurrent(captured), run:() => clearRightDock(captured.modal) });
-  return [...byId.values()].filter((item) => !files || FILES_WORKBENCH_MENUS.includes(item.menu));
+  return [...byId.values()].filter((item) => graph?GRAPH_WORKBENCH_MENUS.includes(item.menu):!files || FILES_WORKBENCH_MENUS.includes(item.menu));
 }
 
 export async function runWorkbenchCommand(descriptor, captured) {

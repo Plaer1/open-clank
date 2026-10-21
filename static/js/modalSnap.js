@@ -33,6 +33,11 @@ function _chatWidthFloor() {
 let _edgeDockHandlePositioner = null;
 
 function _positionEdgeDockResizeHandles() {
+  for (const modal of document.querySelectorAll('[data-chat-visible-maximize="true"].modal-left-docked, [data-chat-visible-maximize="true"].modal-right-docked')) {
+    if (!modal.classList.contains('hidden') && !modal.classList.contains('modal-minimized') && modal.style.display !== 'none') {
+      _reconcileChatVisibleDock(modal, _resolveDockNodes(modal)?.content);
+    }
+  }
   try { _edgeDockHandlePositioner && _edgeDockHandlePositioner(); } catch (_) {}
 }
 
@@ -43,7 +48,8 @@ function _dockClassForSide(side) {
 function _hasOtherDockedWindow(side, owner) {
   const cls = _dockClassForSide(side);
   return Array.from(document.querySelectorAll(`.${cls}`)).some((el) => {
-    if (!el || el === owner) return false;
+    if (!el || el === owner || el.classList.contains('hidden') || el.classList.contains('modal-minimized')
+        || el.style.display === 'none' || _resolveDockNodes(el)?.content?._dockSuspended) return false;
     if (owner && el.contains && el.contains(owner)) return false;
     if (owner && owner.contains && owner.contains(el)) return false;
     return true;
@@ -271,6 +277,7 @@ function _resolveEmailDocSplitWidth(content, left) {
 // and broke the whole tab).
 function _anchorLeftDock(content) {
   if (!content || content._dockSide !== 'left') return;
+  if (_chatVisibleOwner(content._dockOwner)) { _reconcileChatVisibleDock(content._dockOwner, content); return; }
   const left = _leftNavRight();
   const w = document.body.classList.contains('doc-view')
     ? _resolveEmailDocSplitWidth(content, left)
@@ -327,14 +334,81 @@ function _resolveDockNodes(target) {
 }
 
 // Apply edge dock state to a modal/pane. `side` is 'right' (default) or 'left'.
-export function applyEdgeDock(modal, side = 'right', dockClass) {
+// Opt-in applets share this dock's existing chat reservation and lifecycle.
+// Geometry never reserves the same strip through tileManager as well.
+function _chatVisibleOwner(modal) { return modal?.dataset.chatVisibleMaximize === 'true'; }
+function _visibleDockOccupied(side, owner) {
+  return [...document.querySelectorAll(`.${_dockClassForSide(side)}`)].some(modal =>
+    modal !== owner && modal.isConnected && !modal.classList.contains('hidden')
+    && !modal.classList.contains('modal-minimized') && modal.style.display !== 'none'
+    && !_resolveDockNodes(modal)?.content?._dockSuspended);
+}
+export function chatVisiblePlacementRect(modal, side = 'right', maximized = false) {
+  if (maximized && _visibleDockOccupied(side, modal)) side = side === 'left' ? 'right' : 'left';
+  const bounds = windowViewportBounds();
+  const opposite = side === 'left' ? 'right' : 'left';
+  const available = Math.max(1, bounds.width - _activeDockWidth(opposite));
+  const minimum = Math.max(MIN_EDGE_DOCK_WIDTH, Number(modal?.dataset.chatPaneMinWidth) || 560);
+  const single = available < minimum + MIN_CHAT_WIDTH;
+  const content = _resolveDockNodes(modal)?.content;
+  const requested = maximized ? available - MIN_CHAT_WIDTH
+    : content?._userDockWidth || _storedDockWidth(modal, content, side) || Math.round(available * .55);
+  const width = single ? available : Math.min(available - MIN_CHAT_WIDTH, Math.max(minimum, requested));
+  return {left:side === 'left' ? bounds.left : bounds.right - width, top:bounds.top,
+    width, height:bounds.height, single};
+}
+function _notifyChatPlacement(modal, state, detail = {}) {
+  const signature = JSON.stringify({state, ...detail});
+  if (modal._chatPlacementSignature === signature) return;
+  modal._chatPlacementSignature = signature;
+  modal.dataset.chatPlacement = state;
+  modal.dispatchEvent(new CustomEvent('openclank:window-placement', {detail:{state, ...detail}}));
+}
+function _reconcileChatVisibleDock(modal, content) {
+  if (!_chatVisibleOwner(modal) || !content?._dockSide || content._dockSuspended) return;
+  const side = content._dockSide;
+  const rect = chatVisiblePlacementRect(modal, side, content._chatVisibleMaximized === true);
+  const styles = {left:rect.left + 'px', right:'auto', top:rect.top + 'px', bottom:'auto',
+    width:rect.width + 'px', maxWidth:rect.width + 'px', height:rect.height + 'px', maxHeight:rect.height + 'px'};
+  for (const [key, value] of Object.entries(styles)) if (content.style[key] !== value) content.style[key] = value;
+  if (content.dataset._tileZone !== 'chat-visible') content.dataset._tileZone = 'chat-visible';
+  const property = side === 'left' ? '--left-dock-w' : '--right-dock-w';
+  const reservation = (rect.single ? 0 : rect.width) + 'px';
+  if (document.documentElement.style.getPropertyValue(property) !== reservation) document.documentElement.style.setProperty(property, reservation);
+  _notifyChatPlacement(modal, rect.single ? 'single' : 'split',
+    {side, maximized:content._chatVisibleMaximized === true});
+}
+export function maximizeChatVisibleWindow(modal) {
+  return applyEdgeDock(modal, 'right', undefined, {maximized:true});
+}
+
+export function applyEdgeDock(modal, side = 'right', dockClass, options = {}) {
+  if (_chatVisibleOwner(modal)) {
+    if ((options.maximized || options.fallbackSide) && _visibleDockOccupied(side, modal)) side = side === 'left' ? 'right' : 'left';
+    if (_visibleDockOccupied(side, modal)) {
+      _notifyChatPlacement(modal, modal.dataset.chatPlacement || 'floating', {maximized:_resolveDockNodes(modal)?.content?._chatVisibleMaximized === true, blocked:'That dock is occupied. Restore the other window or choose the other side.'});
+      return 0;
+    }
+    const content = _resolveDockNodes(modal)?.content;
+    if (content && typeof options.maximized === 'boolean') content._chatVisibleMaximized = options.maximized;
+  }
+  // An ordinary applet keeps its requested side. The opt-in pane moves or
+  // minimizes through its established lifecycle instead of sharing one variable.
+  if (!_chatVisibleOwner(modal)) {
+    for (const peer of document.querySelectorAll(`.${_dockClassForSide(side)}[data-chat-visible-maximize="true"]`)) {
+      if (peer === modal || peer.classList.contains('hidden') || peer.classList.contains('modal-minimized')) continue;
+      const opposite = side === 'left' ? 'right' : 'left';
+      if (!_visibleDockOccupied(opposite, peer)) _applyDockInternal(peer, opposite, _dockClassForSide(opposite));
+      else peer.__openClankWindow?.minimize?.();
+    }
+  }
   if (!dockClass) dockClass = side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
   return _applyDockInternal(modal, side, dockClass);
 }
 
 // Backwards-compat: existing callers use applyRightDock for right snaps.
 export function applyRightDock(modal, dockClass = 'modal-right-docked') {
-  return _applyDockInternal(modal, 'right', dockClass);
+  return applyEdgeDock(modal, 'right', dockClass);
 }
 
 function _applyDockInternal(modal, side, dockClass) {
@@ -389,6 +463,9 @@ function _applyDockInternal(modal, side, dockClass) {
   }
   modal.classList.add(dockClass);
   content.style.position = 'fixed';
+  if (_chatVisibleOwner(modal) && side === 'right' && _shouldAutoCollapseSidebar(Number(modal.dataset.chatPaneMinWidth) || 560)) {
+    _collapseSidebarToRail(); content._preDockSnapshot.collapsedSidebar = true;
+  }
   const bounds = windowViewportBounds();
   content.style.top = bounds.top + 'px';
   content.style.bottom = (window.innerHeight - bounds.bottom) + 'px';
@@ -504,6 +581,7 @@ function _applyDockInternal(modal, side, dockClass) {
   }
   content._dockSide = side;
   content._dockOwner = modal;
+  _reconcileChatVisibleDock(modal, content);
   _positionEdgeDockResizeHandles();
   // Watch for the docked modal disappearing (removed from DOM or hidden
   // via .hidden class) and clean up the body padding + sidebar in that
@@ -577,6 +655,10 @@ function _onDockedModalGone(modal, dockClass) {
   // at its CSS default (centered). Drag-to-undock still uses clearRightDock,
   // which DOES restore the snapshot for the peel-off feel.
   if (_c) {
+    if (_chatVisibleOwner(modal)) {
+      delete _c.dataset._tileZone; delete _c._chatVisibleMaximized;
+      _notifyChatPlacement(modal, 'floating');
+    }
     for (const prop of ['position', 'inset', 'left', 'top', 'right', 'bottom',
                         'width', 'maxWidth', 'height', 'maxHeight',
                         'borderRadius', 'transform', 'margin']) {
@@ -609,6 +691,10 @@ export function clearRightDock(modal, cx, cy, dockClass) {
   if (!dockClass) dockClass = side === 'left' ? 'modal-left-docked' : 'modal-right-docked';
   if (!modal.classList.contains(dockClass)) return;
   modal.classList.remove(dockClass);
+  if (_chatVisibleOwner(modal)) {
+    delete content.dataset._tileZone; delete content._chatVisibleMaximized;
+    _notifyChatPlacement(modal, 'floating');
+  }
   clearDockSide(side, modal);
   if (side === 'left' && !_hasOtherDockedWindow('left', modal)) {
     _clearEmailDocSplitGeometry();
@@ -721,8 +807,11 @@ export function resumeDock(modal) {
   const side = content._dockSuspended;
   if (!side) return false;
   delete content._dockSuspended;
-  try { applyEdgeDock(modal, side); } catch (_) {}
-  return true;
+  try {
+    const width = applyEdgeDock(modal, side, undefined, {maximized:content._chatVisibleMaximized === true, fallbackSide:true});
+    if (!width && _chatVisibleOwner(modal)) clearRightDock(modal);
+    return width > 0;
+  } catch (_) { if (_chatVisibleOwner(modal)) clearRightDock(modal); return false; }
 }
 
 // Wire right-edge snap detection into a drag session. Call this once per
@@ -772,7 +861,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     commit() {
       _showSnapHint(false, side);
       _hoveringSnap = false;
-      _applyDockInternal(modal, side, dockClass);
+      applyEdgeDock(modal, side, dockClass, {maximized:false});
     },
     release() {
       _showSnapHint(false, side);
@@ -863,6 +952,14 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
     const nodes = _resolveDockNodes(owner);
     const content = nodes?.content;
     if (!content) return 0;
+    if (_chatVisibleOwner(owner)) {
+      const bounds = windowViewportBounds();
+      content._userDockWidth = side === 'right' ? bounds.right - clientX : clientX - bounds.left;
+      content._chatVisibleMaximized = false;
+      _reconcileChatVisibleDock(owner, content);
+      _positionEdgeDockResizeHandles();
+      return parseFloat(content.style.width) || 0;
+    }
     let w = 0;
     if (side === 'right') {
       w = _clampRightDockWidth(windowViewportBounds().right - clientX);
@@ -1078,7 +1175,8 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
 if (typeof document !== 'undefined') observeWindowWorkspace(bounds => {
   for (const modal of document.querySelectorAll('.modal-left-docked, .modal-right-docked')) {
     const content = _resolveDockNodes(modal)?.content;
-    if (!content || content._dockSuspended) continue;
+    if (!content || content._dockSuspended || modal.classList.contains('hidden') || modal.classList.contains('modal-minimized')) continue;
+    if (_chatVisibleOwner(modal)) { _reconcileChatVisibleDock(modal, content); continue; }
     content.style.top = bounds.top + 'px';
     content.style.bottom = (window.innerHeight - bounds.bottom) + 'px';
     content.style.height = bounds.height + 'px'; content.style.maxHeight = bounds.height + 'px';

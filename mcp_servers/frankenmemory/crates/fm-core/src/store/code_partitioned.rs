@@ -10,8 +10,8 @@ pub const STORE_VERSION:u32=1;
 pub const MAX_SOURCE:usize=64*1024*1024;
 pub const MAX_SOURCE_RECORDS:usize=4_000_000;
 pub const MAX_RESOLUTIONS:usize=4_000_000;
-pub const MAX_DISK:u64=2*1024*1024*1024;
-const AUDIT_VERSION:u32=1;
+pub const MAX_DISK:u64=crate::code_index_limits::HARD_LIMITS.max_generation_bytes;
+const AUDIT_VERSION:u32=2;
 const MAX_AUDIT_ENTRIES:usize=16;
 const MAX_AUDIT_KEY_BYTES:usize=16*1024;
 
@@ -44,7 +44,7 @@ thread_local! {static AUDIT_TEST_HOOK:std::cell::RefCell<Option<Box<dyn FnOnce()
 fn audit_test_pause(){let hook=AUDIT_TEST_HOOK.with(|slot|slot.borrow_mut().take());if let Some(hook)=hook{hook();}}
 const MAX_JOURNAL:u64=64*1024*1024;
 const SCHEMA:&str=r#"
-PRAGMA page_size=4096; PRAGMA max_page_count=524288;
+PRAGMA page_size=4096;
 PRAGMA journal_mode=OFF; PRAGMA synchronous=FULL;
 PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192;
 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -63,8 +63,11 @@ CREATE TABLE terms(term TEXT NOT NULL,key INTEGER NOT NULL,PRIMARY KEY(term,key)
 CREATE TABLE edges(occurrence TEXT PRIMARY KEY,caller TEXT,target TEXT,state TEXT NOT NULL,file INTEGER NOT NULL,ordinal INTEGER NOT NULL);
 -- Additive derived metadata, deliberately separate from legacy evidence rows.
 -- Key is the existing occurrence nodes.row, not a duplicated64hex identity.
-CREATE TABLE occurrence_kinds(occurrence INTEGER PRIMARY KEY,kind INTEGER NOT NULL CHECK(kind IN(1,2,3,4)));
+CREATE TABLE occurrence_kinds(occurrence INTEGER PRIMARY KEY,kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 9));
 CREATE TABLE visual_files(file INTEGER PRIMARY KEY,path TEXT NOT NULL,resource TEXT NOT NULL UNIQUE);
+CREATE TABLE visual_symbols(resource TEXT PRIMARY KEY,file_resource TEXT NOT NULL,parent TEXT NOT NULL,label TEXT NOT NULL,kind TEXT NOT NULL,qualified TEXT NOT NULL);
+CREATE INDEX visual_symbols_parent ON visual_symbols(parent,resource);
+CREATE VIRTUAL TABLE symbol_fts USING fts5(name,qualified,signature,documentation,path,tokenize='unicode61 remove_diacritics 0');
 CREATE TABLE visual_links(src INTEGER NOT NULL,dst INTEGER NOT NULL,kind INTEGER NOT NULL,state INTEGER NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(src,dst,kind,state));
 CREATE INDEX edges_caller ON edges(caller) WHERE caller IS NOT NULL AND target IS NOT NULL AND state IN('exact','inferred');
 CREATE INDEX edges_target ON edges(target) WHERE caller IS NOT NULL AND target IS NOT NULL AND state IN('exact','inferred');
@@ -86,7 +89,7 @@ pub(crate) const VISUAL_LINKS:usize=65_536;
 pub(crate) struct VisualSummaryMetadata{
  pub version:u32,pub status:String,pub files:usize,pub links:usize,pub resolved_rows:u64,pub partial:bool,pub digest:String,
 }
-pub(crate) fn visual_summary_hash()->blake3::Hasher{let mut h=blake3::Hasher::new();h.update(b"openclank.visual-summary/v1\0");h}
+pub(crate) fn visual_summary_hash()->blake3::Hasher{let mut h=blake3::Hasher::new();h.update(b"openclank.visual-summary/v2\0");h}
 pub(crate) fn visual_file_hash(h:&mut blake3::Hasher,id:i64,path:&str,resource:&str){h.update(b"f");h.update(&id.to_le_bytes());for s in [path,resource]{h.update(&(s.len() as u64).to_le_bytes());h.update(s.as_bytes());}}
 pub(crate) fn visual_link_hash(h:&mut blake3::Hasher,src:i64,dst:i64,kind:u8,state:u8,count:u64){h.update(b"l");for n in [src,dst]{h.update(&n.to_le_bytes());}h.update(&[kind,state]);h.update(&count.to_le_bytes());}
 pub(crate) fn visual_finish_hash(h:&mut blake3::Hasher,status:&str,partial:bool){h.update(b"s");h.update(status.as_bytes());h.update(&[u8::from(partial)]);}
@@ -282,7 +285,7 @@ fn validate_reused_graph(file:&FileEvidence,graph:&crate::graph::GraphUpsertInpu
 
 pub(crate) struct Generation {
  pub db:OwnedConnection,path:PathBuf,directory:CacheDirectory,pin:File,remove:bool,
- pub source_bytes:usize,pub records:usize,pub resolution_rows:usize,
+ pub source_bytes:usize,pub records:usize,pub resolution_rows:usize,disk_limit:u64,
  audit_memo:Option<(std::sync::Arc<AuditMemo>,AuditKey)>,
 }
 impl Drop for Generation {fn drop(&mut self){if let Some(db)=self.db.0.take(){let _=db.close();}if self.remove{if let Some(name)=self.path.file_name().and_then(|p|p.to_str()){let _=unlink_at(&self.directory,name);}}}}
@@ -309,9 +312,12 @@ impl Generation {
   let writer_uri=format!("{}?vfs=unix-none",pinned_path(&pin,true)?.to_string_lossy().trim_end_matches("?immutable=1"));
   let db=Connection::open_with_flags(writer_uri,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE|rusqlite::OpenFlags::SQLITE_OPEN_URI).map_err(err)?;
   same_file(&pin,&path)?;
-  let value=Self{db:OwnedConnection(Some(db)),path,directory:folder,pin,remove:true,source_bytes:0,records:0,resolution_rows:0,audit_memo:None};
-  value.db.execute_batch(SCHEMA).map_err(err)?;
-  for (k,v) in [("owner",scope.owner.clone()),("workspace",scope.workspace_id.clone()),("checkout",checkout.into()),("run",run.into()),("policy",policy.into()),("producer",crate::code::producer_fingerprint()),("version",STORE_VERSION.to_string()),("visual_kind_version","1".into())]{value.db.execute("INSERT INTO meta VALUES(?1,?2)",params![k,v]).map_err(err)?;}
+  let disk_limit=crate::code_index_limits::current().max_generation_bytes;
+  db.pragma_update(None,"page_size",4096).map_err(err)?;
+  db.pragma_update(None,"max_page_count",disk_limit/4096).map_err(err)?;
+  let value=Self{db:OwnedConnection(Some(db)),path,directory:folder,pin,remove:true,source_bytes:0,records:0,resolution_rows:0,disk_limit,audit_memo:None};
+  value.db.execute_batch(SCHEMA).map_err(|e|value.storage_error(e))?;
+  for (k,v) in [("owner",scope.owner.clone()),("workspace",scope.workspace_id.clone()),("checkout",checkout.into()),("run",run.into()),("policy",policy.into()),("producer",crate::code::producer_fingerprint()),("version",STORE_VERSION.to_string()),("max_generation_bytes",disk_limit.to_string()),("visual_kind_version","2".into())]{value.db.execute("INSERT INTO meta VALUES(?1,?2)",params![k,v]).map_err(|e|value.storage_error(e))?;}
   Ok(value)
  }
  pub fn open(conn:&Connection,scope:&GraphScope,receipt:&super::code_evidence::CodeEvidenceReceipt)->Result<Self,String>{
@@ -329,7 +335,7 @@ impl Generation {
   db.execute_batch("PRAGMA query_only=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-8192; BEGIN").map_err(err)?;
   install_sqlite_work_guard(&db,128_000_000);
   for (key,wanted) in [("owner",scope.owner.as_str()),("workspace",scope.workspace_id.as_str()),("checkout",receipt.checkout_id.as_str()),("run",receipt.head_generation.as_str()),("producer",receipt.config_fingerprint.as_str()),("sealed","1"),("version","1")]{let found:Option<String>=db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=4096 THEN value END FROM meta WHERE key=?1",params![key],|r|r.get(0)).map_err(err)?;if found.as_deref()!=Some(wanted){return Err("reindex_required: partition receipt differs".into());}}
-  let mut value=Self{db:OwnedConnection(Some(db)),path,directory:folder,pin,remove:false,source_bytes:0,records:0,resolution_rows:0,audit_memo:None};
+  let mut value=Self{db:OwnedConnection(Some(db)),path,directory:folder,pin,remove:false,source_bytes:0,records:0,resolution_rows:0,disk_limit:MAX_DISK,audit_memo:None};
   let key=if let Some((expected,_))=memo{value.verify_stamp(expected)?;AuditKey::new(scope,receipt,expected,&value.stamp()?)}else{None};
   if let (Some(key),Some((expected,memo)))=(&key,memo){if memo.contains(key){
    let _hit=crate::code_metrics::span(crate::code_metrics::Stage::GenerationAuditHit);
@@ -348,54 +354,81 @@ impl Generation {
   if unsafe_headers!=0{return Err("reindex_required: partition fields exceed bounds".into());}
   Ok(())
  }
+ // SQLITE_FULL can be the configured page cap or backing filesystem.
+ // Report the bounded page accounting rather than an unqualified OS-full claim.
+ fn storage_error(&self,error:rusqlite::Error)->String{
+  if matches!(&error,rusqlite::Error::SqliteFailure(e,_) if e.code==rusqlite::ErrorCode::DiskFull){
+   let pages:Option<u64>=self.db.pragma_query_value(None,"page_count",|r|r.get(0)).ok();
+   #[cfg(unix)] let available={use std::os::fd::AsRawFd;let mut info=std::mem::MaybeUninit::<libc::statvfs>::uninit();if unsafe{libc::fstatvfs(self.pin.as_raw_fd(),info.as_mut_ptr())}==0{let info=unsafe{info.assume_init()};(info.f_bavail as u64).checked_mul(info.f_frsize as u64)}else{None}};
+   #[cfg(not(unix))] let available:Option<u64>=None;
+   if available==Some(0){return format!("unavailable: partition backing filesystem full; configured generation quota {} bytes",self.disk_limit);}
+   let code=if pages.is_some_and(|n|n>=self.disk_limit/4096){"budget_exceeded: partition generation disk quota"}else{"unavailable: partition storage full; quota versus backing storage cause unproven"};
+   return format!("{code}; configured generation quota {} bytes ({} pages), current pages {:?}, filesystem available bytes {:?}; SQLite full",self.disk_limit,self.disk_limit/4096,pages,available);
+  }err(error)
+ }
  pub fn check_disk(&self)->Result<(),String>{
   same_file(&self.pin,&self.path)?;
-  if self.pin.metadata().map_err(err)?.len()>MAX_DISK{return Err(quota());}
+  if self.pin.metadata().map_err(err)?.len()>self.disk_limit{return Err(format!("budget_exceeded: partition generation disk quota {} bytes",self.disk_limit));}
   let journal=PathBuf::from(format!("{}-journal",self.path.display()));
   if journal.exists() && std::fs::symlink_metadata(&journal).map_err(err)?.len()>MAX_JOURNAL{return Err(quota());}
   Ok(())
  }
  fn key(&self,text:&str,node:i64,roles:i64)->Result<(),String>{
-  self.db.execute("INSERT OR IGNORE INTO keys(text,chars)VALUES(?1,?2)",params![text,text.to_lowercase().chars().count() as i64]).map_err(err)?;
-  let key:i64=self.db.query_row("SELECT id FROM keys WHERE text=?1",params![text],|r|r.get(0)).map_err(err)?;
-  self.db.execute("INSERT INTO key_nodes VALUES(?1,?2,?3)ON CONFLICT(key,node)DO UPDATE SET roles=roles|excluded.roles",params![key,node,roles]).map_err(err)?;
-  if roles&2!=0{for term in crate::code_query::identifier_terms(text){self.db.execute("INSERT OR IGNORE INTO terms VALUES(?1,?2)",params![term,key]).map_err(err)?;}}
+  self.db.prepare_cached("INSERT OR IGNORE INTO keys(text,chars)VALUES(?1,?2)").map_err(err)?.execute(params![text,text.to_lowercase().chars().count() as i64]).map_err(|e|self.storage_error(e))?;
+  let key:i64=self.db.prepare_cached("SELECT id FROM keys WHERE text=?1").map_err(err)?.query_row(params![text],|r|r.get(0)).map_err(err)?;
+  self.db.prepare_cached("INSERT INTO key_nodes VALUES(?1,?2,?3)ON CONFLICT(key,node)DO UPDATE SET roles=roles|excluded.roles").map_err(err)?.execute(params![key,node,roles]).map_err(|e|self.storage_error(e))?;
+  if roles&2!=0{for term in crate::code_query::identifier_terms(text){self.db.prepare_cached("INSERT OR IGNORE INTO terms VALUES(?1,?2)").map_err(err)?.execute(params![term,key]).map_err(|e|self.storage_error(e))?;}}
   Ok(())
  }
  pub fn stage(&mut self,file:&FileEvidence,mtime:i64,graph:&crate::graph::GraphUpsertInput,scope:&GraphScope)->Result<(),String>{
   let mut timing=crate::code_metrics::span(crate::code_metrics::Stage::Stage);timing.add(1,file.source_len as usize);
-  self.source_bytes=self.source_bytes.checked_add(file.source_len as usize).ok_or_else(quota)?;
-  self.records=self.records.checked_add(file.scopes.len()+file.bindings.len()+file.declarations.len()+file.imports.len()+file.occurrences.len()).ok_or_else(quota)?;
-  if self.source_bytes>MAX_SOURCE || self.records>MAX_SOURCE_RECORDS{return Err(quota());}
-  let payload=storage::encode(file)?;let interface=storage::module_interface(file);let packed_interface=storage::encode(&interface)?;
+  let source_bytes=self.source_bytes.checked_add(file.source_len as usize).ok_or_else(quota)?;
+  let records=self.records.checked_add(file.scopes.len()+file.bindings.len()+file.declarations.len()+file.imports.len()+file.occurrences.len()).ok_or_else(quota)?;
+  if source_bytes>MAX_SOURCE||source_bytes>crate::code_index_limits::current().max_source_bytes || records>MAX_SOURCE_RECORDS{return Err(quota());}
+  // A freshly extracted file may exceed a codec expansion bound even while
+  // source/extraction limits fit. Refuse it before counters or SQL mutate.
+  // Decode/corruption and aggregate-generation failures remain fatal.
+  let payload=storage::encode(file).map_err(|e|format!("{e}: file evidence"))?;
+  let interface=storage::module_interface(file);let packed_interface=storage::encode(&interface).map_err(|e|format!("{e}: module interface"))?;
+  let packed_graph=storage::encode(graph).map_err(|e|format!("{e}: compatibility graph"))?;
   let mut header=file.clone();header.scopes.clear();header.bindings.clear();header.declarations.clear();header.imports.clear();header.occurrences.clear();header.diagnostics.clear();
   let header=serde_json::to_string(&header).map_err(err)?;
-  self.db.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+  self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e|self.storage_error(e))?;
   let stage=(||{
-   let packed_graph=storage::encode(graph)?;
-   self.db.execute("INSERT INTO files(path,hash,source_bytes,mtime,symbols,header,interface,payload,payload_hash,node_count,graph)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![file.rel_path,file.source_hash,file.source_len,mtime,file.declarations.len() as i64,header,packed_interface,payload,blake3::hash(&payload).to_hex().to_string(),1+file.declarations.len()+file.occurrences.len(),packed_graph]).map_err(err)?;
+   self.db.execute("INSERT INTO files(path,hash,source_bytes,mtime,symbols,header,interface,payload,payload_hash,node_count,graph)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![file.rel_path,file.source_hash,file.source_len,mtime,file.declarations.len() as i64,header,packed_interface,payload,blake3::hash(&payload).to_hex().to_string(),1+file.declarations.len()+file.occurrences.len(),packed_graph]).map_err(|e|self.storage_error(e))?;
    let id=self.db.last_insert_rowid();
    for (kind,name) in graph.nodes.iter().map(|n|(&n.kind,&n.name)).chain(graph.edges.iter().flat_map(|e|[(&e.src.kind,&e.src.name),(&e.dst.kind,&e.dst.name)])){
-    self.db.execute("INSERT OR IGNORE INTO graph_ids VALUES(?1)",params![scope.node_id(kind,name)]).map_err(err)?;
+    self.db.prepare_cached("INSERT OR IGNORE INTO graph_ids VALUES(?1)").map_err(|e|self.storage_error(e))?.execute(params![scope.node_id(kind,name)]).map_err(|e|self.storage_error(e))?;
    }
    let rows=std::iter::once((format!("file:{}",file.file_id),"file",file.rel_path.as_str(),file.rel_path.as_str(),0usize))
     .chain(file.declarations.iter().enumerate().map(|(i,d)|(format!("decl:{}",d.id),"declaration",d.name.as_str(),d.qualified_name.as_str(),i)))
     .chain(file.occurrences.iter().enumerate().map(|(i,o)|(format!("occ:{}",o.id),"occurrence",o.symbol_text.as_str(),o.symbol_text.as_str(),i)));
    for (i,(node,kind,name,label,ordinal)) in rows.enumerate(){
     let state=if kind=="file"{if graph.edges.is_empty(){"no_source_units"}else{"indexed"}}else{"metadata"};
-    self.db.execute("INSERT INTO nodes(id,file,kind,ordinal,state)VALUES(?1,?2,?3,?4,?5)",params![node,id,kind,ordinal as i64,state]).map_err(err)?;let row=self.db.last_insert_rowid();
+    self.db.prepare_cached("INSERT INTO nodes(id,file,kind,ordinal,state)VALUES(?1,?2,?3,?4,?5)").map_err(|e|self.storage_error(e))?.execute(params![node,id,kind,ordinal as i64,state]).map_err(|e|self.storage_error(e))?;let row=self.db.last_insert_rowid();
     if kind=="occurrence" {
      let occurrence=file.occurrences.get(ordinal).ok_or("invalid_evidence: occurrence kind ordinal")?;
-     let typed=match &occurrence.kind{OccurrenceKind::Call=>1,OccurrenceKind::ImportReference=>2,OccurrenceKind::ValueReference=>3,OccurrenceKind::TypeReference=>4};
-     self.db.execute("INSERT INTO occurrence_kinds VALUES(?1,?2)",params![row,typed]).map_err(err)?;
+     let typed=crate::code_evidence::relation_code(occurrence);
+     self.db.prepare_cached("INSERT INTO occurrence_kinds VALUES(?1,?2)").map_err(|e|self.storage_error(e))?.execute(params![row,typed]).map_err(|e|self.storage_error(e))?;
     }
     self.key(name,row,1|4|if kind!="declaration"{2}else{0})?;self.key(label,row,1|2)?;self.key(&file.rel_path,row,1)?;
     if i%512==0{self.check_disk()?;}
    }
+   {
+    let mut symbols=self.db.prepare_cached("INSERT INTO visual_symbols VALUES(?1,?2,?3,?4,?5,?6)").map_err(err)?;
+    let mut lexical=self.db.prepare_cached("INSERT INTO symbol_fts(rowid,name,qualified,signature,documentation,path) SELECT row,?2,?3,?4,?5,?6 FROM nodes WHERE id=?1").map_err(err)?;
+    for d in &file.declarations {
+     let resource=format!("decl:{}",d.id);let file_resource=format!("file:{}",file.file_id);
+     let parent=d.lexical_parent_id.as_ref().map(|p|format!("decl:{p}")).unwrap_or_else(||file_resource.clone());
+     symbols.execute(params![resource,file_resource,parent,d.name,d.kind,d.qualified_name]).map_err(|e|self.storage_error(e))?;
+     lexical.execute(params![resource,crate::code_query::identifier_terms(&d.name).join(" "),crate::code_query::identifier_terms(&d.qualified_name).join(" "),crate::code_query::identifier_terms(&d.signature).join(" "),crate::code_query::identifier_terms(d.documentation.as_ref().map(|d|d.text.as_str()).unwrap_or("")).join(" "),crate::code_query::identifier_terms(&file.rel_path).join(" ")]).map_err(|e|self.storage_error(e))?;
+    }
+   }
    self.check_disk()
   })();
   if stage.is_err(){let _=self.db.execute_batch("ROLLBACK");return stage;}
-  self.db.execute_batch("COMMIT").map_err(err)?;self.check_disk()
+  self.db.execute_batch("COMMIT").map_err(|e|self.storage_error(e))?;self.check_disk()?;
+  self.source_bytes=source_bytes;self.records=records;Ok(())
  }
  pub fn load(&self,id:i64)->Result<FileEvidence,String>{
   let (payload,hash):(Option<Vec<u8>>,String)=self.db.query_row("SELECT CASE WHEN length(payload)<=8388608 THEN payload END,payload_hash FROM files WHERE id=?1",params![id],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
@@ -415,32 +448,38 @@ impl Generation {
    if bytes>MAX_MODULE_INTERFACE_BYTES{return Err(format!("budget_exceeded: module interfaces {bytes} exceed {MAX_MODULE_INTERFACE_BYTES}"));}out.push(file);
   } Ok(out)
  }
- pub fn resolve(&mut self,checkout:&str,unavailable:&[UnavailableFile],mut check:impl FnMut()->Result<(),String>)->Result<(),String>{
+ pub fn resolve(&mut self,checkout:&str,unavailable:&[UnavailableFile],check:impl FnMut()->Result<(),String>)->Result<(),String>{
+  self.resolve_with_progress(checkout,unavailable,check,|_,_,_,_|Ok(()))
+ }
+ pub fn resolve_with_progress(&mut self,checkout:&str,unavailable:&[UnavailableFile],mut check:impl FnMut()->Result<(),String>,mut progress:impl FnMut(&str,Option<usize>,Option<usize>,&str)->Result<(),String>)->Result<(),String>{
+  progress("dependency_resolution",None,None,"files")?;
   let _timing=crate::code_metrics::span(crate::code_metrics::Stage::Resolve);
   let input=CorpusInput{checkout_id:checkout.into(),files:self.interfaces()?,unavailable_files:unavailable.to_vec()};
-  self.db.execute("INSERT INTO meta VALUES('unavailable',?1)",params![serde_json::to_string(unavailable).map_err(err)?]).map_err(err)?;
+  self.db.execute("INSERT INTO meta VALUES('unavailable',?1)",params![serde_json::to_string(unavailable).map_err(err)?]).map_err(|e|self.storage_error(e))?;
   let resolver={let _timing=crate::code_metrics::span(crate::code_metrics::Stage::Interfaces);crate::code_evidence::PartitionResolver::new(&input).map_err(err)?};
   let ids:Vec<i64>=self.db.prepare("SELECT id FROM files ORDER BY id").map_err(err)?.query_map([],|r|r.get(0)).map_err(err)?.collect::<rusqlite::Result<_>>().map_err(err)?;
-  for id in ids{
+  let total=ids.len();progress("dependency_resolution",Some(0),Some(total),"files")?;
+  for (completed,id) in ids.into_iter().enumerate(){
    check()?;
    let file=self.load(id)?;
    let result=resolver.resolve(&file).map_err(err)?;
    self.resolution_rows=self.resolution_rows.checked_add(result.resolutions.len()).ok_or_else(quota)?;if self.resolution_rows>MAX_RESOLUTIONS{return Err(quota());}
-   let packed=storage::encode(&result.resolutions)?;
+   let packed=storage::encode_sequence_checked(&result.resolutions,&mut check).map_err(|e|format!("{e}: resolutions for {}",file.rel_path))?;
    let mut _staging=crate::code_metrics::span(crate::code_metrics::Stage::Stage);_staging.add(result.resolutions.len(),packed.len());
-   self.db.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+   self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e|self.storage_error(e))?;
    let result=(||{
-    self.db.execute("UPDATE files SET resolutions=?1,resolution_hash=?2 WHERE id=?3",params![packed,blake3::hash(&packed).to_hex().to_string(),id]).map_err(err)?;
+    self.db.execute("UPDATE files SET resolutions=?1,resolution_hash=?2 WHERE id=?3",params![packed,blake3::hash(&packed).to_hex().to_string(),id]).map_err(|e|self.storage_error(e))?;
     for (i,r) in result.resolutions.iter().enumerate(){
      let state=serde_json::to_value(&r.state).map_err(err)?.as_str().unwrap().to_owned();
-     self.db.execute("INSERT INTO edges VALUES(?1,?2,?3,?4,?5,?6)",params![r.occurrence_id,r.caller_id,r.target_id,state,id,i as i64]).map_err(err)?;
-     self.db.execute("UPDATE nodes SET state=?1 WHERE id=?2",params![state,format!("occ:{}",r.occurrence_id)]).map_err(err)?;
+     self.db.prepare_cached("INSERT INTO edges VALUES(?1,?2,?3,?4,?5,?6)").map_err(|e|self.storage_error(e))?.execute(params![r.occurrence_id,r.caller_id,r.target_id,state,id,i as i64]).map_err(|e|self.storage_error(e))?;
+     self.db.prepare_cached("UPDATE nodes SET state=?1 WHERE id=?2").map_err(|e|self.storage_error(e))?.execute(params![state,format!("occ:{}",r.occurrence_id)]).map_err(|e|self.storage_error(e))?;
      if i%512==0{self.check_disk()?;}
     } self.check_disk()
    })();
    if result.is_err(){let _=self.db.execute_batch("ROLLBACK");return result;}
-   self.db.execute_batch("COMMIT").map_err(err)?;self.check_disk()?;
-  } self.build_visual_summary(&mut check)
+   self.db.execute_batch("COMMIT").map_err(|e|self.storage_error(e))?;self.check_disk()?;
+   progress("dependency_resolution",Some(completed+1),Some(total),"files")?;
+  } self.build_visual_summary_with_budget_and_progress(&mut check,128_000_000,&mut progress)
  }
  // Derived metadata is built once in the unpublished writer, never by a read.
  // Fixed primitive keys have a conservative 256B/key (16MiB) domain; no rich
@@ -449,61 +488,67 @@ impl Generation {
   self.build_visual_summary_with_budget(check,128_000_000)
  }
  fn build_visual_summary_with_budget(&mut self,check:&mut impl FnMut()->Result<(),String>,maximum:usize)->Result<(),String>{
+  self.build_visual_summary_with_budget_and_progress(check,maximum,&mut |_,_,_,_|Ok(()))
+ }
+ fn build_visual_summary_with_budget_and_progress(&mut self,check:&mut impl FnMut()->Result<(),String>,maximum:usize,progress:&mut impl FnMut(&str,Option<usize>,Option<usize>,&str)->Result<(),String>)->Result<(),String>{
+  progress("visual_summary",None,None,"files")?;
   if !self.remove{return Err("denied: published summary is immutable".into());}check()?;
-  self.db.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
+  self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e|self.storage_error(e))?;
   let exhausted=std::sync::Arc::new(AtomicBool::new(false));let flag=exhausted.clone();let mut vm=0usize;let interval=maximum.clamp(1,1000);
   self.db.progress_handler(interval as i32,Some(move||{vm=vm.saturating_add(interval);if vm>maximum{flag.store(true,Ordering::Relaxed);true}else{false}}));
   let built=(||{
-   self.db.execute_batch("DELETE FROM visual_files; DELETE FROM visual_links").map_err(err)?;
-   let partial:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM edges e CROSS JOIN nodes o INDEXED BY sqlite_autoindex_nodes_1 ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' CROSS JOIN occurrence_kinds k ON k.occurrence=o.row WHERE k.kind IN(1,2) AND (e.state NOT IN('exact','inferred') OR e.target IS NULL))",[],|r|r.get(0)).map_err(err)?;
+   self.db.execute_batch("DELETE FROM visual_files; DELETE FROM visual_links").map_err(|e|self.storage_error(e))?;
+   let partial:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM edges e CROSS JOIN nodes o INDEXED BY sqlite_autoindex_nodes_1 ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' CROSS JOIN occurrence_kinds k ON k.occurrence=o.row WHERE k.kind BETWEEN 1 AND 9 AND (e.state NOT IN('exact','inferred') OR e.target IS NULL))",[],|r|r.get(0)).map_err(err)?;
    let mut hash=visual_summary_hash();let mut ids=BTreeSet::new();
    {let mut stmt=self.db.prepare("SELECT f.id,CASE WHEN octet_length(f.path)<=4096 THEN f.path END,CASE WHEN octet_length(n.id)<=256 THEN n.id END FROM files f CROSS JOIN nodes n INDEXED BY nodes_file ON n.file=f.id AND n.kind='file' ORDER BY f.id LIMIT 10001").map_err(err)?;
     for row in stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(err)?{
      let(id,path,resource)=row.map_err(err)?;if ids.contains(&id){return Err("invalid_evidence: compact file mapping".into());}if ids.len()>=10_000{return Err("budget_exceeded: compact summary capacity".into());}ids.insert(id);
      let path=path.ok_or_else(quota)?;let resource=resource.ok_or_else(quota)?;
-     self.db.execute("INSERT INTO visual_files VALUES(?1,?2,?3)",params![id,path,resource]).map_err(err)?;visual_file_hash(&mut hash,id,&path,&resource);if ids.len()%128==0{check()?;self.check_disk()?;}
+     self.db.prepare_cached("INSERT INTO visual_files VALUES(?1,?2,?3)").map_err(err)?.execute(params![id,path,resource]).map_err(|e|self.storage_error(e))?;visual_file_hash(&mut hash,id,&path,&resource);if ids.len()%128==0{check()?;progress("visual_summary",Some(ids.len()),None,"files")?;self.check_disk()?;}
     }}
+   progress("visual_summary",Some(ids.len()),Some(ids.len()),"files")?;
    let mut links:BTreeMap<(i64,i64,u8,u8),u64>=BTreeMap::new();let mut rows=0u64;let mut overflow=false;
-   {let mut stmt=self.db.prepare("SELECT e.file,t.file,k.kind,CASE e.state WHEN 'exact' THEN 1 WHEN 'inferred' THEN 2 END FROM edges e JOIN nodes o ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' JOIN occurrence_kinds k ON k.occurrence=o.row JOIN nodes t ON t.id='decl:'||e.target WHERE k.kind IN(1,2) AND e.state IN('exact','inferred')").map_err(err)?;
+   {let mut stmt=self.db.prepare("SELECT e.file,t.file,k.kind,CASE e.state WHEN 'exact' THEN 1 WHEN 'inferred' THEN 2 END FROM edges e JOIN nodes o ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' JOIN occurrence_kinds k ON k.occurrence=o.row JOIN nodes t ON t.id='decl:'||e.target WHERE k.kind BETWEEN 1 AND 9 AND e.state IN('exact','inferred')").map_err(err)?;
     for row in stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,u8>(2)?,r.get::<_,u8>(3)?))).map_err(err)?{
      let(src,dst,kind,state)=row.map_err(err)?;if !ids.contains(&src)||!ids.contains(&dst){return Err("invalid_evidence: compact dependency file".into());}
      rows=rows.checked_add(1).ok_or_else(quota)?;if rows>MAX_RESOLUTIONS as u64{return Err(quota());}
      let key=(src,dst,kind,state);if !links.contains_key(&key)&&links.len()==VISUAL_LINKS{overflow=true;links.clear();rows=0;break;}
-     let value=links.entry(key).or_default();*value=value.checked_add(1).ok_or_else(quota)?;if rows%512==0{check()?;}
+     let value=links.entry(key).or_default();*value=value.checked_add(1).ok_or_else(quota)?;if rows%512==0{check()?;progress("visual_summary",Some(rows as usize),None,"references")?;}
     }}
    for (i,(&(src,dst,kind,state),&count)) in links.iter().enumerate(){
-    self.db.execute("INSERT INTO visual_links VALUES(?1,?2,?3,?4,?5)",params![src,dst,kind,state,count]).map_err(err)?;visual_link_hash(&mut hash,src,dst,kind,state,count);if i%128==0{check()?;self.check_disk()?;}
+    self.db.prepare_cached("INSERT INTO visual_links VALUES(?1,?2,?3,?4,?5)").map_err(err)?.execute(params![src,dst,kind,state,count]).map_err(|e|self.storage_error(e))?;visual_link_hash(&mut hash,src,dst,kind,state,count);if i%128==0{check()?;progress("visual_summary",Some(i+1),Some(links.len()),"links")?;self.check_disk()?;}
    }
-   let status=if overflow{"budget_exceeded"}else{"complete"};visual_finish_hash(&mut hash,status,partial);
-   let metadata=VisualSummaryMetadata{version:1,status:status.into(),files:ids.len(),links:links.len(),resolved_rows:rows,partial,digest:hash.finalize().to_hex().to_string()};
-   self.db.execute("INSERT OR REPLACE INTO meta VALUES('visual_summary',?1)",params![serde_json::to_string(&metadata).map_err(err)?]).map_err(err)?;check()?;self.check_disk()
+   progress("visual_summary",Some(links.len()),Some(links.len()),"links")?;
+   let status=if overflow{"budget_exceeded"}else{"complete"};let partial=partial||overflow;visual_finish_hash(&mut hash,status,partial);
+   let metadata=VisualSummaryMetadata{version:2,status:status.into(),files:ids.len(),links:links.len(),resolved_rows:rows,partial,digest:hash.finalize().to_hex().to_string()};
+   self.db.execute("INSERT OR REPLACE INTO meta VALUES('visual_summary',?1)",params![serde_json::to_string(&metadata).map_err(err)?]).map_err(|e|self.storage_error(e))?;check()?;self.check_disk()
   })();
   self.db.progress_handler(0,None::<fn()->bool>);
   if let Err(error)=built{
-   if !self.db.is_autocommit(){self.db.execute_batch("ROLLBACK").map_err(err)?;}
+   if !self.db.is_autocommit(){self.db.execute_batch("ROLLBACK").map_err(|e|self.storage_error(e))?;}
    if exhausted.load(Ordering::Relaxed)||error=="budget_exceeded: compact summary capacity"{return self.mark_visual_summary_budget(check);}
    return Err(error);
   }
-  self.db.execute_batch("COMMIT").map_err(err)?;self.check_disk()
+  self.db.execute_batch("COMMIT").map_err(|e|self.storage_error(e))?;self.check_disk()
  }
  fn mark_visual_summary_budget(&mut self,check:&mut impl FnMut()->Result<(),String>)->Result<(),String>{
   check()?;let mut hash=visual_summary_hash();visual_finish_hash(&mut hash,"budget_exceeded",true);
-  let metadata=VisualSummaryMetadata{version:1,status:"budget_exceeded".into(),files:0,links:0,resolved_rows:0,partial:true,digest:hash.finalize().to_hex().to_string()};
-  self.db.execute_batch("BEGIN IMMEDIATE").map_err(err)?;
-  let result=(||{self.db.execute_batch("DELETE FROM visual_files; DELETE FROM visual_links").map_err(err)?;self.db.execute("INSERT OR REPLACE INTO meta VALUES('visual_summary',?1)",params![serde_json::to_string(&metadata).map_err(err)?]).map_err(err)?;check()?;self.check_disk()})();
-  if result.is_err(){let _=self.db.execute_batch("ROLLBACK");return result;}self.db.execute_batch("COMMIT").map_err(err)?;self.check_disk()
+  let metadata=VisualSummaryMetadata{version:2,status:"budget_exceeded".into(),files:0,links:0,resolved_rows:0,partial:true,digest:hash.finalize().to_hex().to_string()};
+  self.db.execute_batch("BEGIN IMMEDIATE").map_err(|e|self.storage_error(e))?;
+  let result=(||{self.db.execute_batch("DELETE FROM visual_files; DELETE FROM visual_links").map_err(err)?;self.db.execute("INSERT OR REPLACE INTO meta VALUES('visual_summary',?1)",params![serde_json::to_string(&metadata).map_err(err)?]).map_err(|e|self.storage_error(e))?;check()?;self.check_disk()})();
+  if result.is_err(){let _=self.db.execute_batch("ROLLBACK");return result;}self.db.execute_batch("COMMIT").map_err(|e|self.storage_error(e))?;self.check_disk()
  }
  pub fn seal(&mut self)->Result<(),String>{
   let _timing=crate::code_metrics::span(crate::code_metrics::Stage::Seal);
   self.check_disk()?;
   let integrity:String=self.db.query_row("PRAGMA quick_check(1)",[],|r|r.get(0)).map_err(err)?;
   if integrity!="ok"{return Err("invalid_evidence: partition integrity".into());}
-  for table in ["files","nodes","edges"]{let count:i64=self.db.query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).map_err(err)?;self.db.execute("INSERT INTO meta VALUES(?1,?2)",params![table,count.to_string()]).map_err(err)?;}
+  for table in ["files","nodes","edges"]{let count:i64=self.db.query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).map_err(err)?;self.db.execute("INSERT INTO meta VALUES(?1,?2)",params![table,count.to_string()]).map_err(|e|self.storage_error(e))?;}
   let kinds:i64=self.db.query_row("SELECT count(*) FROM occurrence_kinds",[],|r|r.get(0)).map_err(err)?;
   let occurrences:i64=self.db.query_row("SELECT count(*) FROM nodes WHERE kind='occurrence'",[],|r|r.get(0)).map_err(err)?;
   if kinds!=occurrences{return Err("invalid_evidence: incomplete typed occurrence metadata".into());}
-  self.db.execute("INSERT INTO meta VALUES('visual_occurrences',?1)",params![kinds.to_string()]).map_err(err)?;
-  self.db.execute("INSERT INTO meta VALUES('sealed','1')",[]).map_err(err)?;
+  self.db.execute("INSERT INTO meta VALUES('visual_occurrences',?1)",params![kinds.to_string()]).map_err(|e|self.storage_error(e))?;
+  self.db.execute("INSERT INTO meta VALUES('sealed','1')",[]).map_err(|e|self.storage_error(e))?;
   // Finish SQLite's writer lifetime before capturing immutable lineage. Read
   // opens must not change this best-effort corruption identity.
   if let Some(db)=self.db.0.take(){db.close().map_err(|(_,e)|err(e))?;}
@@ -558,16 +603,17 @@ impl SqliteStore {
   for entry in &result.coverage{
    let Some(old)=by_path.get(entry.rel_path.as_str())else{return Ok(None)};
    if selected.contains(&Some(entry.rel_path.as_str())){
-    if entry.status!="selected"||!matches!(old.status.as_str(),"indexed"|"no_source_units"|"parse_failed"|"binary")||old.source_hash.as_ref().is_none_or(|h|!h.bytes().all(|b|b.is_ascii_hexdigit()))||old.source_generation.as_deref()!=Some(head){return Ok(None);}
+    if entry.status!="selected"||!matches!(old.status.as_str(),"indexed"|"no_source_units"|"parse_failed"|"budget_exceeded"|"binary")||old.source_hash.as_ref().is_none_or(|h|!h.bytes().all(|b|b.is_ascii_hexdigit()))||old.source_generation.as_deref()!=Some(head){return Ok(None);}
    }else if entry.status!=old.status||entry.detail!=old.detail||old.source_hash.is_some(){return Ok(None);}
   }
   let mut expected=BTreeMap::new();let mut bytes=0usize;let mut successes=0usize;let mut declarations=0usize;
+  self.set_index_progress(scope,checkout,&result.run_id,"verification",Some(0),Some(paths.len()),"files")?;
   for (completed,path) in paths.iter().enumerate(){
    self.index_scheduler().verification_checkpoint()?;
    if let Some(b)=binding{b.validate()?;}policy.validate_source(root,identity,path)?;
    {let conn=self.conn.lock().unwrap();let n=conn.execute("UPDATE code_index_runs SET completed_files=?1,total_files=?2,heartbeat_at=?3 WHERE owner=?4 AND workspace_id=?5 AND codebase=?6 AND run_id=?7 AND status='running'",params![completed as i64,paths.len() as i64,chrono::Utc::now().to_rfc3339(),scope.owner,scope.workspace_id,checkout,result.run_id]).map_err(err)?;if n!=1{return Err("superseded_or_cancelled".into());}}
    let rel=path.strip_prefix(root).map_err(err)?.to_str().ok_or("unsupported source path")?;let old=by_path.get(rel).copied().ok_or("reindex_required: selected coverage absent")?;
-   let acquired=match acquire_source_pinned(root,path,identity){Ok(a)=>a,Err(_)=>return Ok(None)};bytes=bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if bytes>MAX_SOURCE{return Err(quota());}
+   let acquired=match acquire_source_pinned(root,path,identity){Ok(a)=>a,Err(_)=>return Ok(None)};bytes=bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if bytes>MAX_SOURCE||bytes>crate::code_index_limits::current().max_source_bytes{return Err(quota());}
    let hash=crate::code_metrics::source_hash(&acquired.bytes).to_hex().to_string();if old.source_hash.as_deref()!=Some(hash.as_str()){return Ok(None);}
    if matches!(old.status.as_str(),"indexed"|"no_source_units"){
     let Some(indexed)=previous.reuse(checkout,rel,path,&acquired,&hash)?else{return Ok(None)};
@@ -577,6 +623,7 @@ impl SqliteStore {
     previous.generation.resolutions(id)?;successes+=1;declarations=declarations.checked_add(indexed.symbol_count).ok_or_else(quota)?;
    }
    expected.insert(rel.to_owned(),hash);policy.validate_source(root,identity,path)?;if let Some(b)=binding{b.validate()?;}
+   self.set_index_progress(scope,checkout,&result.run_id,"verification",Some(completed+1),Some(paths.len()),"files")?;
   }
   let prior_successes:i64=previous.generation.db.query_row("SELECT count(*) FROM files",[],|r|r.get(0)).map_err(err)?;
   if usize::try_from(prior_successes).ok()!=Some(successes)||usize::try_from(symbols).ok()!=Some(declarations){return Err("reindex_required: no-change file counts differ".into());}
@@ -591,11 +638,13 @@ impl SqliteStore {
   // Re-acquire every selected source: policy-only validation cannot prove a
   // same-stat byte edit did not race preflight. Check run/epoch BEFORE each
   // acquisition too, so cancellation does not read the rest of the corpus.
-  let mut final_bytes=0usize;for path in paths{
+  self.set_index_progress(scope,checkout,&result.run_id,"verification",Some(0),Some(paths.len()),"files")?;
+  let mut final_bytes=0usize;for (completed,path) in paths.iter().enumerate(){
    self.index_scheduler().verification_checkpoint()?;
    {let conn=self.conn.lock().unwrap();let active:i64=conn.query_row("SELECT count(*) FROM code_index_runs r JOIN code_registrations c ON c.owner=r.owner AND c.workspace_id=r.workspace_id AND c.checkout_id=r.codebase WHERE r.owner=?1 AND r.workspace_id=?2 AND r.codebase=?3 AND r.run_id=?4 AND r.status='running' AND c.lifecycle!='erased' AND r.admission_epoch=c.admission_epoch AND r.config_fingerprint=c.config_fingerprint",params![scope.owner,scope.workspace_id,checkout,result.run_id],|r|r.get(0)).map_err(err)?;if active!=1{return Err("superseded_or_cancelled".into());}}
-   if let Some(b)=binding{b.validate()?;}policy.validate_source(root,identity,path)?;let acquired=acquire_source_pinned(root,path,identity)?;final_bytes=final_bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if final_bytes>MAX_SOURCE{return Err(quota());}
+   if let Some(b)=binding{b.validate()?;}policy.validate_source(root,identity,path)?;let acquired=acquire_source_pinned(root,path,identity)?;final_bytes=final_bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if final_bytes>MAX_SOURCE||final_bytes>crate::code_index_limits::current().max_source_bytes{return Err(quota());}
    let rel=path.strip_prefix(root).map_err(err)?.to_str().ok_or("unsupported source path")?;if expected.get(rel)!=Some(&crate::code_metrics::source_hash(&acquired.bytes).to_hex().to_string()){return Err("source_changed: partition no-change bytes changed".into());}policy.validate_source(root,identity,path)?;
+   self.set_index_progress(scope,checkout,&result.run_id,"verification",Some(completed+1),Some(paths.len()),"files")?;
   }
   #[cfg(test)] {let hook=NO_CHANGE_FINAL_TEST_HOOK.with(|slot|slot.borrow_mut().take());if let Some(hook)=hook{hook();}}
   // Final complete discovery runs AFTER byte verification so a new nested
@@ -664,13 +713,21 @@ impl SqliteStore {
  fn accept_partition_extraction(&self,scope:&GraphScope,root:&Path,binding:Option<&WorkspaceBinding>,identity:&str,policy:&SelectionPolicy,checkout:&str,run:&str,path:&Path,rel:&str,hash:&str,indexed:Result<&IndexedFile,&str>,generation:&mut Generation,result:&mut CodeIndexResult,manifest:&mut BTreeMap<String,String>)->Result<(),String>{
   self.partition_extraction_fence(scope,root,binding,identity,policy,checkout,run,path)?;
   let entry=result.coverage.iter_mut().find(|c|c.rel_path==rel).ok_or("invalid scan coverage")?;entry.source_hash=Some(hash.into());entry.source_generation=Some(run.into());
+  if let Ok(indexed)=indexed{if indexed.blake3!=hash||indexed.rel_path!=rel{return Err("source_changed: indexing worker receipt differs".into());}}
+  let indexed=match indexed{Ok(indexed)=>match generation.stage(&indexed.evidence,indexed.mtime_ns,&indexed.upsert,scope){
+   Ok(())=>Ok(indexed),Err(e)if e.starts_with("budget_exceeded: compact partition")=>Err(e),Err(e)=>return Err(e)},Err(e)=>Err(e.to_owned())};
   match indexed{
-   Ok(indexed)=>{
-    if indexed.blake3!=hash||indexed.rel_path!=rel{return Err("source_changed: indexing worker receipt differs".into());}
-    generation.stage(&indexed.evidence,indexed.mtime_ns,&indexed.upsert,scope)?;result.files_indexed+=1;result.symbols+=indexed.symbol_count;entry.status=if indexed.upsert.edges.is_empty(){"no_source_units"}else{"indexed"}.into();entry.detail=None;manifest.insert(rel.into(),hash.into());
+   Ok(indexed)=>{result.files_indexed+=1;result.symbols+=indexed.symbol_count;entry.status=if indexed.upsert.edges.is_empty(){"no_source_units"}else{"indexed"}.into();entry.detail=None;manifest.insert(rel.into(),hash.into());
    },
-   Err(e)=>{if e.starts_with("budget_exceeded:"){return Err(e.into());}entry.status=if e=="binary source"{"binary"}else{"parse_failed"}.into();entry.detail=Some(e.into());result.errors.push(format!("{rel}: {e}"));manifest.insert(rel.into(),format!("failed:{e}"));}
-  }Ok(())
+   Err(e)=>{let codec_budget=e.starts_with("budget_exceeded: compact partition");if e.starts_with("budget_exceeded:")&&!codec_budget{return Err(e);}
+    // Only encoding this fresh file is a per-file refusal. Never reinterpret
+    // a decode/integrity, SQL, I/O or whole-generation quota failure.
+    if !codec_budget&&e.starts_with("invalid_evidence:"){return Err(e);}
+    entry.status=if codec_budget{"budget_exceeded"}else if e=="binary source"{"binary"}else{"parse_failed"}.into();entry.detail=Some(e.clone());result.errors.push(format!("{rel}: {e}"));manifest.insert(rel.into(),format!("failed:{e}"));}
+  }
+  let completed=result.coverage.iter().filter(|entry|entry.source_generation.as_deref()==Some(run)).count();
+  let total=result.coverage.iter().filter(|entry|entry.status=="selected"||entry.source_generation.as_deref()==Some(run)).count();
+  self.set_index_progress(scope,checkout,run,"extraction",Some(completed),Some(total),"files")
  }
  pub(crate) fn code_index_partitioned(&self,scope:&GraphScope,root:&Path,binding:Option<&WorkspaceBinding>,identity:&str,
    paths:Vec<PathBuf>,policy:&SelectionPolicy,mut result:CodeIndexResult)->Result<CodeIndexResult,String>{
@@ -688,9 +745,10 @@ impl SqliteStore {
   let worker_policy=std::sync::Arc::new(policy.clone());
   let mut pending=Vec::new();
   let selected=paths.len();
-  for (completed,path) in paths.iter().enumerate(){
+  self.set_index_progress(scope,&checkout,&run,"extraction",Some(0),Some(selected),"files")?;
+  for path in &paths{
    if let Some(b)=binding{b.validate()?;}
-   {let conn=self.conn.lock().unwrap();let changed=conn.execute("UPDATE code_index_runs SET heartbeat_at=?1,completed_files=?2,total_files=?3 WHERE owner=?4 AND workspace_id=?5 AND codebase=?6 AND run_id=?7 AND status='running'",params![chrono::Utc::now().to_rfc3339(),completed as i64,selected as i64,scope.owner,scope.workspace_id,checkout,run]).map_err(err)?;if changed!=1{return Err("superseded_or_cancelled".into());}}
+
    policy.validate_source(root,identity,path)?;
    let rel=path.strip_prefix(root).map_err(err)?.to_str().ok_or("unsupported source path")?.to_owned();
    // Prior-cache decoding has independent 64 MiB component bounds; do not
@@ -707,7 +765,7 @@ impl SqliteStore {
    let (indexed,reused)=match acquired {
     Ok(acquired)=>{
      policy.validate_source(root,identity,path)?;
-     source_bytes=source_bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if source_bytes>MAX_SOURCE{return Err(quota());}
+     source_bytes=source_bytes.checked_add(acquired.bytes.len()).ok_or_else(quota)?;if source_bytes>MAX_SOURCE||source_bytes>crate::code_index_limits::current().max_source_bytes{return Err(quota());}
      let current_hash=crate::code_metrics::source_hash(&acquired.bytes).to_hex().to_string();hash=Some(current_hash.clone());
      if previous.is_none(){
       let task_root=root.to_path_buf();let task_path=path.clone();let task_identity=identity.to_owned();let task_policy=worker_policy.clone();let task_binding=binding.cloned();let task_checkout=checkout.clone();
@@ -737,20 +795,26 @@ impl SqliteStore {
    self.flush_partition_extraction(&mut pending,scope,root,binding,identity,policy,&checkout,&run,&mut generation,&mut result,&mut manifest)?;
    let entry=result.coverage.iter_mut().find(|c|c.rel_path==rel).ok_or("invalid scan coverage")?;
    entry.source_hash=hash.clone();entry.source_generation=Some(run.clone());
+   let indexed=match indexed{Ok(indexed)=>match generation.stage(&indexed.evidence,indexed.mtime_ns,&indexed.upsert,scope){
+    Ok(())=>Ok(indexed),Err(e)if e.starts_with("budget_exceeded: compact partition")=>Err(e),Err(e)=>return Err(e)},Err(e)=>Err(e)};
    match indexed {
-    Ok(indexed)=>{generation.stage(&indexed.evidence,indexed.mtime_ns,&indexed.upsert,scope)?;
+    Ok(indexed)=>{
      if reused{result.files_unchanged+=1;}else{result.files_indexed+=1;}result.symbols+=indexed.symbol_count;entry.status=if indexed.upsert.edges.is_empty(){"no_source_units"}else{"indexed"}.into();entry.detail=None;
      manifest.insert(rel,indexed.blake3);
      #[cfg(test)] if reused{let hook=REUSE_STAGE_TEST_HOOK.with(|slot|slot.borrow_mut().take());if let Some(hook)=hook{hook();}}
     },
-    Err(e)=>{if e.starts_with("budget_exceeded:"){return Err(e);}
-     entry.status=if e=="binary source"{"binary"}else{"parse_failed"}.into();entry.detail=Some(e.clone());
+    Err(e)=>{let codec_budget=e.starts_with("budget_exceeded: compact partition");if e.starts_with("budget_exceeded:")&&!codec_budget{return Err(e);}
+     if !codec_budget&&e.starts_with("invalid_evidence:"){return Err(e);}
+     entry.status=if codec_budget{"budget_exceeded"}else if e=="binary source"{"binary"}else{"parse_failed"}.into();entry.detail=Some(e.clone());
      result.errors.push(format!("{rel}: {e}"));manifest.insert(rel,format!("failed:{e}"));
     }
    }
    drop(reservation);
+   let completed=result.coverage.iter().filter(|entry|entry.source_generation.as_deref()==Some(run.as_str())).count();
+   self.set_index_progress(scope,&checkout,&run,"extraction",Some(completed),Some(selected),"files")?;
   }
   self.flush_partition_extraction(&mut pending,scope,root,binding,identity,policy,&checkout,&run,&mut generation,&mut result,&mut manifest)?;
+  self.set_index_progress(scope,&checkout,&run,"extraction",Some(selected),Some(selected),"files")?;
   if let Some(previous)=&previous{previous.generation.verify_stamp(&previous.stamp)?;}drop(previous);
   for entry in &result.coverage {manifest.entry(entry.rel_path.clone()).or_insert_with(||format!("{}:{}",entry.status,entry.detail.as_deref().unwrap_or("")));}
   let mut digest=blake3::Hasher::new();digest.update(policy.digest().as_bytes());digest.update(&[0]);
@@ -762,11 +826,14 @@ impl SqliteStore {
   // retain through serial active-payload decode, seal and graph publication.
   // This is not a claim that codec/allocator/interface RSS fits 256 MiB.
   let _partition_data=scheduler.data(crate::code_index_scheduler::LARGE_DATA_BYTES)?;
-  generation.resolve(&checkout,&unavailable,||{
+  generation.resolve_with_progress(&checkout,&unavailable,||{
    if let Some(b)=binding{b.validate()?;}
    let conn=self.conn.lock().unwrap();let count=conn.execute("UPDATE code_index_runs SET heartbeat_at=?1 WHERE owner=?2 AND workspace_id=?3 AND codebase=?4 AND run_id=?5 AND status='running'",params![chrono::Utc::now().to_rfc3339(),scope.owner,scope.workspace_id,checkout,run]).map_err(err)?;
    if count!=1{return Err("superseded_or_cancelled".into());}Ok(())
-  })?;generation.seal()?;
+  },|phase,completed,total,unit|self.set_index_progress(scope,&checkout,&run,phase,completed,total,unit))?;
+  self.set_index_progress(scope,&checkout,&run,"sealing",None,None,"files")?;generation.seal()?;
+  let publication_total:usize=generation.db.query_row("SELECT count(*) FROM files",[],|row|row.get(0)).map_err(err)?;
+  self.set_index_progress(scope,&checkout,&run,"publication",Some(0),Some(publication_total),"files")?;
   result.source_snapshot.evidence_cache_identity=generation.stamp()?;
   policy.validate(root,identity)?;
   let authority=if let Some(b)=binding{Some(b.publication_guard()?)}else{None};
@@ -793,11 +860,12 @@ impl SqliteStore {
    conn.execute("DELETE FROM code_resolutions WHERE owner=?1 AND workspace_id=?2 AND checkout_id=?3",params![scope.owner,scope.workspace_id,checkout]).map_err(err)?;
    conn.execute("DELETE FROM code_file_evidence WHERE owner=?1 AND workspace_id=?2 AND checkout_id=?3",params![scope.owner,scope.workspace_id,checkout]).map_err(err)?;
    let mut stmt=generation.db.prepare("SELECT path,hash,source_bytes,mtime,symbols,CASE WHEN length(graph)<=8388608 THEN graph END FROM files ORDER BY id").map_err(err)?;
-   for row in stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,Option<Vec<u8>>>(5)?))).map_err(err)? {
+   for (completed,row) in stmt.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,Option<Vec<u8>>>(5)?))).map_err(err)?.enumerate() {
     let (path,hash,bytes,mtime,symbols,graph)=row.map_err(err)?;
     let upsert:crate::graph::GraphUpsertInput=storage::decode(&graph.ok_or_else(quota)?)?;
     Self::graph_upsert_inner(&conn,scope,&upsert).map_err(err)?;
     conn.execute("INSERT INTO code_files(codebase,rel_path,blake3,mtime_ns,size,symbol_count,indexed_at,config_fingerprint,source_generation)VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![key,path,hash,mtime,bytes,symbols,chrono::Utc::now().to_rfc3339(),crate::code::producer_fingerprint(),run]).map_err(err)?;
+    self.record_index_progress(scope,&checkout,&run,"publication",Some(completed+1),Some(publication_total),"files");
    }
    let _=prior_files;
    policy.validate(root,identity)?;generation.check_disk()?;
@@ -820,39 +888,48 @@ pub(crate) fn is_partitioned(conn:&Connection,scope:&GraphScope,receipt:&super::
  match mode{None|Some(0)=>Ok(false),Some(1)=>Ok(true),_=>Err("reindex_required: unsupported partition store".into())}
 }
 fn filter_sql()->&'static str{
- "(?1 IS NULL OR f.path=?1) AND (?2 IS NULL OR substr(f.path,1,length(?2))=?2) AND (json_array_length(?3)=0 OR n.kind IN(SELECT value FROM json_each(?3))) AND (json_array_length(?4)=0 OR json_extract(f.header,'$.language') IN(SELECT value FROM json_each(?4))) AND (json_array_length(?5)=0 OR n.state IN(SELECT value FROM json_each(?5)))"
+ "(?1 IS NULL OR f.path=?1) AND (?2 IS NULL OR substr(f.path,1,length(?2))=?2) AND (json_array_length(?3)=0 OR n.kind IN(SELECT value FROM json_each(?3))) AND (json_array_length(?4)=0 OR json_extract(f.header,'$.language') IN(SELECT value FROM json_each(?4))) AND (json_array_length(?5)=0 OR n.state IN(SELECT value FROM json_each(?5))) AND (json_array_length(?9)=0 OR EXISTS(SELECT 1 FROM visual_symbols vs WHERE vs.resource=n.id AND vs.kind IN(SELECT value FROM json_each(?9))))"
 }
 fn matches_coverage(row:&ScanCoverage,filter:&QueryFilter)->bool{
  filter.rel_path.as_ref().is_none_or(|p|p==&row.rel_path)&&filter.path_prefix.as_ref().is_none_or(|p|row.rel_path.starts_with(p))
- &&(filter.kinds.is_empty()||filter.kinds.iter().any(|k|k=="file"))&&filter.languages.is_empty()
+ &&(filter.kinds.is_empty()||filter.kinds.iter().any(|k|k=="file"))&&filter.languages.is_empty()&&filter.symbol_kinds.is_empty()
  &&(filter.states.is_empty()||filter.states.contains(&row.status))
 }
 impl Generation {
  fn eligible_nodes(&self,query:&CodeQuery)->Result<usize,QueryError>{
-  let count=||{
-   let _sql=crate::code_metrics::span(crate::code_metrics::Stage::QuerySql);
-   let count:i64=self.db.query_row(&format!("SELECT count(*) FROM nodes n JOIN files f ON f.id=n.file WHERE {}",filter_sql()),params![query.filter.rel_path,query.filter.path_prefix,serde_json::to_string(&query.filter.kinds).unwrap(),serde_json::to_string(&query.filter.languages).unwrap(),serde_json::to_string(&query.filter.states).unwrap()],|r|r.get(0)).map_err(qerr)?;
-   usize::try_from(count).map_err(|_|qerr("invalid eligible count"))
-  };
   let filter=&query.filter;
-  let unfiltered=filter.rel_path.is_none()&&filter.path_prefix.is_none()&&filter.kinds.is_empty()&&filter.languages.is_empty()&&filter.states.is_empty();
-  if unfiltered{if let Some((memo,key))=&self.audit_memo{
-   self.verify_stamp(&key.expected).map_err(qerr)?;
-   if let Some(value)=memo.count(key){let _hit=crate::code_metrics::span(crate::code_metrics::Stage::EligibleCountHit);self.verify_stamp(&key.expected).map_err(qerr)?;return Ok(value);}
-   let _miss=crate::code_metrics::span(crate::code_metrics::Stage::EligibleCountMiss);
-   let value=count()?;self.verify_stamp(&key.expected).map_err(qerr)?;memo.remember_count(key,value);return Ok(value);
-  }}
-  count()
+  let unfiltered=filter.rel_path.is_none()&&filter.path_prefix.is_none()&&filter.kinds.is_empty()&&filter.symbol_kinds.is_empty()&&filter.languages.is_empty()&&filter.states.is_empty();
+  if unfiltered{
+   // open/audit already compared this exact sealed count to the table. Do not
+   // spend every search's result budget rediscovering the whole node corpus.
+   if let Some((memo,key))=&self.audit_memo{self.verify_stamp(&key.expected).map_err(qerr)?;if let Some(n)=memo.count(key){return Ok(n);}}
+   let text:String=self.db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=64 THEN value END FROM meta WHERE key='nodes'",[],|r|r.get(0)).map_err(qerr)?;
+   let count=text.parse::<usize>().map_err(|_|qerr("invalid sealed eligible count"))?;
+   if let Some((memo,key))=&self.audit_memo{self.verify_stamp(&key.expected).map_err(qerr)?;memo.remember_count(key,count);}return Ok(count);
+  }
+  let _sql=crate::code_metrics::span(crate::code_metrics::Stage::QuerySql);
+  let mut conditions=Vec::new();let mut args=Vec::<rusqlite::types::Value>::new();
+  if let Some(path)=&filter.rel_path{args.push(path.clone().into());conditions.push(format!("f.path=?{}",args.len()));}
+  if let Some(prefix)=&filter.path_prefix{args.push(prefix.clone().into());let i=args.len();conditions.push(format!("substr(f.path,1,length(?{i}))=?{i}"));}
+  for(column,values)in [("n.kind",&filter.kinds),("json_extract(f.header,'$.language')",&filter.languages),("n.state",&filter.states)]{
+   if !values.is_empty(){args.push(serde_json::to_string(values).map_err(qerr)?.into());conditions.push(format!("{column} IN(SELECT value FROM json_each(?{}))",args.len()));}
+  }
+  if !filter.symbol_kinds.is_empty(){args.push(serde_json::to_string(&filter.symbol_kinds).map_err(qerr)?.into());conditions.push(format!("EXISTS(SELECT 1 FROM visual_symbols vs WHERE vs.resource=n.id AND vs.kind IN(SELECT value FROM json_each(?{})))",args.len()));}
+  // Keep the small file scope outermost. In particular a relative prefix must
+  // be applied before walking matching nodes, not after a global node scan.
+  let sql=format!("SELECT count(*) FROM files f CROSS JOIN nodes n INDEXED BY nodes_file ON n.file=f.id WHERE {}",conditions.join(" AND "));
+  let count:i64=self.db.query_row(&sql,rusqlite::params_from_iter(args),|r|r.get(0)).map_err(qerr)?;
+  usize::try_from(count).map_err(|_|qerr("invalid eligible count"))
  }
  fn resolutions(&self,file:i64)->Result<Vec<ResolutionEvidence>,String>{
   let (payload,hash):(Option<Vec<u8>>,Option<String>)=self.db.query_row("SELECT CASE WHEN length(resolutions)<=8388608 THEN resolutions END,resolution_hash FROM files WHERE id=?1",params![file],|r|Ok((r.get(0)?,r.get(1)?))).map_err(err)?;
-  let payload=payload.ok_or_else(quota)?;if Some(blake3::hash(&payload).to_hex().to_string())!=hash{return Err("reindex_required: corrupt resolution partition".into());}storage::decode(&payload)
+  let payload=payload.ok_or_else(quota)?;if Some(blake3::hash(&payload).to_hex().to_string())!=hash{return Err("reindex_required: corrupt resolution partition".into());}storage::decode_sequence(&payload)
  }
  fn filtered_nodes(&self,query:&CodeQuery,condition:&str,value:impl rusqlite::ToSql,role:i64)->Result<Vec<(String,i64,String,usize)>,QueryError>{
   let filter=&query.filter;let kinds=serde_json::to_string(&filter.kinds).unwrap();let languages=serde_json::to_string(&filter.languages).unwrap();let states=serde_json::to_string(&filter.states).unwrap();
   let sql=format!("SELECT CASE WHEN length(CAST(n.id AS BLOB))<=4096 THEN n.id END,n.file,CASE WHEN length(CAST(n.kind AS BLOB))<=64 THEN n.kind END,n.ordinal FROM nodes n JOIN files f ON f.id=n.file {condition} AND {} LIMIT ?8",filter_sql());
-  let mut stmt=self.db.prepare(&sql).map_err(qerr)?;
-  let rows=stmt.query_map(params![filter.rel_path,filter.path_prefix,kinds,languages,states,value,role,query.budgets.work.min(100_000)+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,usize>(3)?))).map_err(qerr)?.collect::<rusqlite::Result<Vec<_>>>().map_err(qerr)?;
+  let mut stmt=self.db.prepare_cached(&sql).map_err(qerr)?;
+  let rows=stmt.query_map(params![filter.rel_path,filter.path_prefix,kinds,languages,states,value,role,query.budgets.work.min(100_000)+1,serde_json::to_string(&filter.symbol_kinds).unwrap()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,r.get::<_,usize>(3)?))).map_err(qerr)?.collect::<rusqlite::Result<Vec<_>>>().map_err(qerr)?;
    if rows.len()>query.budgets.work.min(100_000){return Err(qerr(quota()));}Ok(rows)
  }
  fn query_snapshot(&self,scope:&GraphScope,binding:&WorkspaceBinding,receipt:super::code_evidence::CodeEvidenceReceipt,
@@ -871,14 +948,15 @@ impl Generation {
     scope_key:serde_json::to_string(&(scope.owner.as_str(),binding.owner_subject_id.as_str(),scope.workspace_id.as_str(),binding.location_id.as_str(),binding.workspace_revision,binding.policy_generation,binding.origin.as_str(),binding.subscriber_id.as_str())).unwrap(),
     files:vec![],resolutions:vec![],coverage,metadata_bytes:0,metadata_records:work.get(),eligible_records:None});
   }
-  let mut files=BTreeMap::new();let mut indexed_paths=BTreeSet::new();
-  let mut stmt=self.db.prepare("SELECT id,path,hash,CASE WHEN length(CAST(header AS BLOB))<=65536 THEN header END FROM files ORDER BY id LIMIT 10001").map_err(qerr)?;
-  for row in stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?))).map_err(qerr)?{
-   charge(1)?;let (id,path,hash,header)=row.map_err(qerr)?;let header=header.ok_or_else(||qerr(quota()))?;bytes=bytes.checked_add(header.len()).ok_or_else(||qerr(quota()))?;
-   if files.len()>=10_000 || bytes>storage::MAX_DECODED{return Err(qerr(quota()));}
-   let file:FileEvidence=serde_json::from_str(&header).map_err(qerr)?;
-   if file.rel_path!=path||file.source_hash!=hash||file.checkout_id!=receipt.checkout_id||file.producer_fingerprint!=receipt.config_fingerprint{return Err(qerr("reindex_required: partition header differs"));}
-   indexed_paths.insert(path);files.insert(id,file);
+  let mut files=BTreeMap::new();let mut indexed_paths=BTreeSet::new();let mut header_ids=BTreeSet::new();
+  let broad_headers=matches!(query.operation,Operation::Overview|Operation::Catalog|Operation::Facets);
+  // Keep the global eligible/coverage universe without decoding every header.
+  let mut stmt=self.db.prepare_cached("SELECT id,path FROM files ORDER BY id LIMIT 10001").map_err(qerr)?;
+  for row in stmt.query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?))).map_err(qerr)? {
+   charge(1)?;let(id,path)=row.map_err(qerr)?;
+   if indexed_paths.len()>=10_000||path.len()>4096{return Err(qerr(quota()));}
+   bytes=bytes.checked_add(path.len()).ok_or_else(||qerr(quota()))?;
+   indexed_paths.insert(path);if broad_headers{header_ids.insert(id);}
   }
   drop(stmt);
   let count=self.eligible_nodes(query)?;
@@ -892,11 +970,17 @@ impl Generation {
    Operation::Search=>{
     let text=query.query.as_deref().unwrap_or("");let mut keys:BTreeMap<i64,i64>=BTreeMap::new();
     if !text.is_empty(){
-     if query.channels.contains(&Channel::Exact){let key:Option<i64>=self.db.query_row("SELECT id FROM keys WHERE text=?1",params![text],|r|r.get(0)).optional().map_err(qerr)?;charge(1)?;if let Some(k)=key{*keys.entry(k).or_default()|=1;}}
+     if query.channels.contains(&Channel::Exact){let key:Option<i64>=self.db.prepare_cached("SELECT id FROM keys WHERE text=?1").map_err(qerr)?.query_row(params![text],|r|r.get(0)).optional().map_err(qerr)?;charge(1)?;if let Some(k)=key{*keys.entry(k).or_default()|=1;}}
      if query.channels.contains(&Channel::Identifier){
       let terms=crate::code_query::identifier_terms(text);
-      if let Some(term)=terms.first(){let mut stmt=self.db.prepare("SELECT k.id,CASE WHEN length(CAST(k.text AS BLOB))<=524288 THEN k.text END FROM terms t JOIN keys k ON k.id=t.key WHERE t.term=?1").map_err(qerr)?;
-       for row in stmt.query_map(params![term],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?))).map_err(qerr)?{
+      if !terms.is_empty(){
+       // Identifier admission requires every segmented term. Intersect their
+       // indexed postings before decoding/matching keys; a broad first term
+       // must not consume the whole request budget for an exact identifier.
+       let mut sql=String::from("SELECT k.id,CASE WHEN length(CAST(k.text AS BLOB))<=524288 THEN k.text END FROM terms t JOIN keys k ON k.id=t.key WHERE t.term=?1");
+       for i in 1..terms.len(){sql.push_str(&format!(" AND EXISTS(SELECT 1 FROM terms x WHERE x.term=?{} AND x.key=t.key)",i+1));}
+       let mut stmt=self.db.prepare_cached(&sql).map_err(qerr)?;
+       for row in stmt.query_map(rusqlite::params_from_iter(terms.iter()),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Option<String>>(1)?))).map_err(qerr)?{
         let (id,key)=row.map_err(qerr)?;let key=key.ok_or_else(||qerr(quota()))?;let (matched,used)=crate::code_query::index_key_match(text,&key,2,&[Channel::Identifier],query.budgets.work.saturating_sub(work.get()))?;charge(used)?;if matched{*keys.entry(id).or_default()|=2;}
        }
       }
@@ -907,6 +991,10 @@ impl Generation {
        let (id,key)=row.map_err(qerr)?;let key=key.ok_or_else(||qerr(quota()))?;let (matched,used)=crate::code_query::index_key_match(text,&key,4,&[Channel::Fuzzy],query.budgets.work.saturating_sub(work.get()))?;charge(used)?;if matched{*keys.entry(id).or_default()|=4;}
       }
      }
+    }
+    if query.channels.contains(&Channel::Lexical) && !text.is_empty() {
+     let terms=crate::code_query::identifier_terms(text);let fts=terms.iter().map(|t|format!("\"{}\"",t.replace('"',"\"\""))).collect::<Vec<_>>().join(" AND ");
+     if !fts.is_empty(){let rows=self.filtered_nodes(query,"JOIN symbol_fts ON symbol_fts.rowid=n.row WHERE symbol_fts MATCH ?6 AND ?7=1",fts,1)?;charge(rows.len())?;add(rows)?;}
     }
     for (key,roles) in keys {let rows=self.filtered_nodes(query,"JOIN key_nodes kn ON kn.node=n.row WHERE kn.key=?6 AND (kn.roles&?7)!=0",key,roles)?;charge(rows.len())?;add(rows)?;}
    },
@@ -921,29 +1009,50 @@ impl Generation {
     let mut frontier:BTreeSet<String>=query.seed_ids.iter().cloned().collect();let mut visited=BTreeSet::new();
     let hops=if query.operation==Operation::Inspect{0}else if query.operation==Operation::Neighbors{1}else{query.budgets.hops};
     let direction=query.direction.unwrap_or(if query.operation==Operation::Impact{Direction::Incoming}else{Direction::Outgoing});
-    for depth in 0..=hops{
-     let mut next=BTreeSet::new();for node in frontier{
-      if !visited.insert(node.clone()){continue;}
-      add(self.filtered_nodes(query,"WHERE n.id=?6 AND ?7=0",&node,0)?)?;charge(1)?;
-      if depth==hops{continue;}
-      let Some(id)=node.strip_prefix("decl:")else{continue;};
-      for incoming in [false,true]{if (incoming&&direction==Direction::Outgoing)||(!incoming&&direction==Direction::Incoming){continue;}
-       let condition=if incoming{"target"}else{"caller"};let mut stmt=self.db.prepare(&format!("SELECT occurrence,caller,target FROM edges WHERE {condition}=?1 AND caller IS NOT NULL AND target IS NOT NULL AND state IN('exact','inferred') LIMIT ?2")).map_err(qerr)?;
-       for row in stmt.query_map(params![id,query.budgets.work.min(100_000)+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(qerr)?{
-        charge(1)?;let (occ,caller,target)=row.map_err(qerr)?;add(self.filtered_nodes(query,"WHERE n.id=?6 AND ?7=0",format!("occ:{occ}"),0)?)?;
-        next.insert(format!("decl:{}",if incoming{caller}else{target}));if next.len()>100_000{return Err(qerr(quota()));}
-       }
+    // Evidence witnesses support filtered endpoints; they are not returned hits.
+    let mut witness_query=query.clone();witness_query.filter=QueryFilter::default();
+    for depth in 0..=hops {
+     cancelled()?;
+     let current:Vec<_>=frontier.difference(&visited).cloned().collect();
+     if current.is_empty(){break;}
+     charge(current.len())?;visited.extend(current.iter().cloned());
+     add(self.filtered_nodes(query,"WHERE n.id IN(SELECT value FROM json_each(?6)) AND ?7=0",serde_json::to_string(&current).map_err(qerr)?,0)?)?;
+     if depth==hops{break;}
+     let declarations:Vec<_>=current.iter().filter_map(|node|node.strip_prefix("decl:")).collect();
+     let frontier_json=serde_json::to_string(&declarations).map_err(qerr)?;
+     let mut next=BTreeSet::new();let mut witnesses=BTreeSet::new();
+     for incoming in [false,true] {
+      if (incoming&&direction==Direction::Outgoing)||(!incoming&&direction==Direction::Incoming){continue;}
+      let condition=if incoming{"target"}else{"caller"};
+      let mut stmt=self.db.prepare_cached(&format!("SELECT occurrence,caller,target FROM edges WHERE {condition} IN(SELECT value FROM json_each(?1)) AND caller IS NOT NULL AND target IS NOT NULL AND state IN('exact','inferred') ORDER BY occurrence LIMIT ?2")).map_err(qerr)?;
+      for row in stmt.query_map(params![frontier_json,query.budgets.work.min(100_000)+1],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(qerr)? {
+       charge(1)?;let(occ,caller,target)=row.map_err(qerr)?;
+       witnesses.insert(format!("occ:{occ}"));next.insert(format!("decl:{}",if incoming{caller}else{target}));
+       if next.len()>100_000||witnesses.len()>100_000{return Err(qerr(quota()));}
       }
-     }frontier=next;
+     }
+     if !witnesses.is_empty(){add(self.filtered_nodes(&witness_query,"WHERE n.id IN(SELECT value FROM json_each(?6)) AND ?7=0",serde_json::to_string(&witnesses).map_err(qerr)?,0)?)?;}
+     frontier=next;
     }
    },Operation::Pipeline=>return Err(qerr("unsupported partition pipeline"))
   }
   drop(add);
   let mut selected:BTreeMap<i64,Vec<(String,String,usize)>>=BTreeMap::new();
   for (id,(file,kind,ordinal)) in nodes{selected.entry(file).or_default().push((id,kind,ordinal));}
+  header_ids.extend(selected.keys().copied());
+  let mut stmt=self.db.prepare_cached("SELECT id,path,hash,CASE WHEN length(CAST(header AS BLOB))<=65536 THEN header END FROM files WHERE id IN(SELECT value FROM json_each(?1)) ORDER BY id LIMIT 10001").map_err(qerr)?;
+  for row in stmt.query_map(params![serde_json::to_string(&header_ids).map_err(qerr)?],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?))).map_err(qerr)? {
+   charge(1)?;let(id,path,hash,header)=row.map_err(qerr)?;let header=header.ok_or_else(||qerr(quota()))?;
+   bytes=bytes.checked_add(header.len()).ok_or_else(||qerr(quota()))?;if bytes>storage::MAX_DECODED{return Err(qerr(quota()));}
+   let file:FileEvidence=serde_json::from_str(&header).map_err(qerr)?;
+   if file.rel_path!=path||file.source_hash!=hash||file.checkout_id!=receipt.checkout_id||file.producer_fingerprint!=receipt.config_fingerprint{return Err(qerr("reindex_required: partition header differs"));}
+   files.insert(id,file);
+  }
+  drop(stmt);
   let mut resolutions=Vec::new();
   for (id,rows) in selected{
-   cancelled()?;let full=self.load(id).map_err(qerr)?;
+   cancelled()?;if rows.iter().all(|(_,kind,_)|kind=="file"){continue;}
+   let full=self.load(id).map_err(qerr)?;
    charge(full.scopes.len()+full.bindings.len()+full.declarations.len()+full.occurrences.len()+full.imports.len())?;
    let header=files.get_mut(&id).ok_or_else(||qerr("invalid partition file"))?;
    if full.file_id!=header.file_id||full.rel_path!=header.rel_path||full.source_hash!=header.source_hash{return Err(qerr("invalid partition provenance"));}

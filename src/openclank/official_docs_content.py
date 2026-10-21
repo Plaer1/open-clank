@@ -7,7 +7,7 @@ resources. They are references, not invented URLs or executable page content.
 ARTICLE_CONTENT = {
     "openclank-docs-home": """# Open Clank Handbook
 
-This handbook ships with **Open Clank Beta 1, the first of several betas**. The macOS15+ Apple Silicon package has passed native and menu-bar Open/Quit qualification, with no Dock icon. It is ad-hoc signed, not notarized. Windows source support is working and tested, including Files, Editor save/reopen and History restore, and native image/video thumbnails. Native ARM64 and x64 Windows installers/packages still need final qualification. Application downloads are not yet announced; the verified offline artwork is supplied separately in v1.0.2-beta.1-artwork-compact when published. Linux release support is coming soon and remains unqualified.
+This handbook ships with **Open Clank Beta 2, machine version 1.0.3**. Code Graph remains Alpha. The macOS15+ Apple Silicon app is ad-hoc signed, not notarized, and uses a menu-bar owner without a Dock icon. Use the [application release page](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2) for the available macOS and Windows artifacts, architectures, checksums and source/target qualification records. The verified offline artwork is supplied separately in the [supporting artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact). Linux release support remains unqualified.
 
 Official pages are read-only. Wiki opens a dedicated page-authoring applet; Editor and Wiki share the same document identity, drafts, saves, history and attachments.
 
@@ -159,6 +159,8 @@ Open a document from Files or a document link. Editor tabs retain parallel work;
 
 Use **Open Folder** for a host workspace. Folder selection and **Choose template folder** use the same Files dialog and fixed Open/Cancel footer. Check the selected folder before editing host files. This does not import the whole folder into Copal or grant access to other host paths.
 
+For a supported Host file or folder, **Open in Code Graph** opens scoped source exploration. [[Graph]] explains Code Graph (Alpha), index freshness and saved source; unsaved buffers are not implicitly saved or indexed.
+
 [[App Windows and Navigation]] explains focus and the bottom dock; [[Source Editing]] covers language modes, multicursors and spelling.
 
 ## Save, Undo and close
@@ -246,6 +248,10 @@ Drag supported files between split panes or independent Files windows. An intern
 
 **Edit → Copy/Cut**, then **Paste** in the destination, uses the same file transfer operations. In a text field, editing commands act on text. Review the operation result before retrying. If a destination name already exists, **Keep Both** retries failed items with a new destination name instead of overwriting the existing file.
 
+## Explore saved code
+
+Select one supported Host file/folder and choose **Open in Code Graph**. A file uses an authorized containing folder; Copal documents do not become code scopes. See [[Graph]] for Code Graph (Alpha), Map/Web/Gravity and source-evidence limits.
+
 ## Imps projects
 
 Imps provides managed image editing. Open an eligible image from Files to work with its project, layers and tools. Save a project to retain editable state; exporting an image produces a flattened delivery file.
@@ -271,6 +277,28 @@ Review a generated or retrieved image, then save/adopt it using the offered File
 Use the filter panel to narrow by folder, kind, tag or property. Clear a filter to broaden the result. Facets come from document metadata; large collections may take time to load. An empty view can mean the filters exclude everything rather than that your documents disappeared.
 
 Galaxy mode combines supported document/calendar relationships. Structure mode exposes a page's headings and bullets as an outline. Inspect the selected page before using structural editing actions; a Graph view is not a backup of its content.
+
+## Code Graph (Alpha)
+
+[Open Code Graph](clank://graph?mode=code), or choose **Open in Code Graph** for one supported Host file/folder in Files or Editor. For a file, confirm its authorized containing folder. Check the displayed code folder: it is separate from your chat workspace and Copal documents. Unsaved Editor buffers are not automatically saved or indexed.
+
+**Map** retains the dense strip. **Web** arranges a traditional network; **Gravity** uses forces to separate connected items. These presentations arrange the same loaded evidence. **Graph → Expand selected branch**, **Expand next level** and **Load more for selected branch** continue bounded exploration. Select a parent and use **Hide children** or **Show children** to control a branch such as tests while keeping its parent and siblings. Hiding changes the view, not source files or index policy. **View → Explorer** and **Inspector** provide navigation and selection details.
+
+The Alpha parser supports Rust, Python, TypeScript/TSX and JavaScript/JSX, including supported module extensions. Expand a file to see its declarations, then inspect calls, imports, references and supported inheritance relationships. Named rules also expose simple overrides, JSX component rendering and FastAPI route registration. Coverage depends on the language and syntax; these are static facts or inferences, not a complete runtime/framework model.
+
+**Indexed metadata** search covers declaration names, qualified names, signatures, documentation and relative paths. Use kind/language/path filters and **Show in graph** to focus a returned symbol. **Source contents · literal** searches current saved text in files admitted to the current code index, using case-sensitive literal matching. It returns file paths with **Open file** and **Read current window** actions. Narrow by path for larger scopes; a partial scan does not prove that other files have no match. Newly added files need index refresh before this search includes them. Content matches remain separate from indexed symbols and relationship evidence.
+
+**View → Graph settings…** offers separate limits for displayed code nodes, note/document items, edges and connections, along with loading, layout, labels, motion and rendering controls. Displayed items, retained data and indexed files are different quantities. Settings are saved in this browser for the current account and workspace; effective engine limits still apply. Choose reduced/off motion without losing the final arrangement. Changing layout or a display limit does not rebuild the index. **Settings → System → Code indexing** controls indexing threads, selected-file capacity, total source bytes, per-file bytes and the derived-generation disk budget (2 GiB default, configurable up to 8 GiB). Saved/requested and effective values can differ while active indexing drains. The disk budget bounds derived index storage; it does not reserve free disk space or increase source/display limits. Native hard quotas remain visible.
+
+Use **View → Maximize beside chat** to enlarge Graph while chat reflows alongside. On a narrow screen, **Show chat** minimizes the pane and keeps its view available from the window dock. **Restore floating window** returns to its previous floating placement.
+
+**File**, **View** and **Graph** menus hold source, view and index commands. Choose **Search & evidence** for detailed queries; select a file and use **Connections for selected item** or **Inspect selected evidence** to inspect static relationships. Follow the source location before treating an edge as current fact. Exact and inferred static edges are distinct; neither proves runtime execution. **Add selected evidence to chat** prepares context; **Ask about selected evidence** is the explicit question action.
+
+Check the index state and last verification time. Folder preview can show structure before dependency evidence is published. With automatic source verification enabled, a ready visible graph checks saved changes through the existing index owner; external edits may wait for the configured verification interval. After terminal failure, choose **Retry indexing** unless a newer validated in-scope saved-file or root-watch signal permits one recovery attempt. Focus, visibility and periodic timers do not repeatedly restart failed work. Without such a scoped signal, including for nested external edits after failure, retry explicitly. **Refresh now** requests a fresh check. The previous same-folder graph remains visible while a successor is prepared; valid selection, camera and hidden branches carry forward within the restoration budget. If a branch cannot be restored safely, the view explains the limit instead of substituting another source. A previous picture is not proof that its source is still current.
+
+Partial coverage, stale evidence, failed/cancelled indexing and an unavailable backend differ from an empty project. Source actions check current saved bytes. **Retry indexing** handles offered recovery; an erased index requires explicit **Readmit erased index**. **Stop observing** detaches this view without cancelling other consumers. **Automatic code context** controls context offered to the agent and remains separate from automatic source verification.
+
+Alpha currently has bounded expansion, paging and rendering, language-dependent static coverage and platform-dependent Host/native support. Some branches require manual continuation; unsupported or unparsed source does not become a proven absence of relationships. Map/Web/Gravity are presentation choices, not semantic/vector retrieval or a performance guarantee. Compare indexed evidence with the current saved file before relying on it.
 
 ## Official pages
 
@@ -459,7 +487,7 @@ This handbook distinguishes shipped implementation from a capability observed on
 
 ## Platforms and deployment
 
-This is **Beta 1, the first of several betas**. The macOS15+ Apple Silicon package has passed native and menu-bar Open/Quit qualification. Its pyramid-and-eye menu owns the app lifecycle, without a Dock icon. It is ad-hoc signed, not notarized; Intel/universal packages are not claimed. Windows source Setup/Check, authenticated startup, Files, Editor save/reopen and History restore, native PNG/JPEG/MP4 thumbnails, and host application dispatch are working and tested. Shared fixes were also tested on macOS. The tested source setup used x64 Python with ARM Engine and native sidecars; native ARM64 and x64 frozen release packages still need qualification. Linux release support is coming soon and remains unqualified. Application downloads become available when the v1.0.2-beta.1 release is published; the verified offline artwork is supplied separately in v1.0.2-beta.1-artwork-compact when published. Host compatibility still depends on the selected Python/runtime versions and optional operating system dependencies. GPU model serving depends on the runtime, drivers, model format and available memory. Docker is not officially supported or tested. Retained Docker files and instructions are unsupported legacy reference, not an official installation path or a Beta 1 release qualification requirement.
+This is **Beta 2, machine version 1.0.3**; Code Graph remains Alpha. The macOS15+ Apple Silicon package uses a pyramid-and-eye menu-bar owner without a Dock icon. It is ad-hoc signed, not notarized; Intel/universal packages are not claimed. Use only macOS or Windows architectures offered on the [application release page](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2), and consult each artifact's source, target and bounded qualification records. Source support or an earlier release's checks do not qualify a new installer. Linux release support remains unqualified. The verified offline artwork is supplied separately in the [supporting artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact). Host compatibility depends on the selected Python/runtime versions and optional operating system dependencies. GPU model serving depends on the runtime, drivers, model format and available memory. Docker is not officially supported or tested. Retained Docker files and instructions are unsupported legacy reference, not an official installation path or a Beta 2 release qualification requirement.
 
 Desktop capture/OCR and host-opening adapters are macOS-focused. Their implementation does not prove that permission was granted or a particular application launched on your host. Use the availability/error state.
 
@@ -492,11 +520,11 @@ Use the packaged app or the source alternative below. Local model serving is opt
 
 ## macOS app package
 
-On Apple Silicon Macs running macOS15 or later, install Open-Clank-1.0.2-macos-arm64.dmg from the application release when published. Copy OpenClank.app to Applications. The package has passed native and menu-bar Open/Quit qualification; it includes private Python, Engine and native workers, so no checkout or system Python is required. It is ad-hoc signed and not notarized; no Intel/universal qualification is claimed.
+On Apple Silicon Macs running macOS15 or later, use Open-Clank-1.0.3-macos-arm64.dmg when offered on the [application release page](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2). Check its checksum and source/target qualification records, then copy OpenClank.app to Applications. The package includes private Python, Engine and native workers, so no checkout or system Python is required. It is ad-hoc signed and not notarized; no Intel/universal qualification is claimed.
 
 Open the app and use its pyramid-and-eye menu-bar icon: **Open** shows the browser UI; **Quit** stops the server owned by that app. There is no Dock icon. Open uses the configured loopback address, normally http://127.0.0.1:7777. Reopening retains user data. Custom packaged launch settings use the per-user macOS launch profile described in the repository Setup Guide; a source checkout's terminal settings do not configure an unrelated Finder launch.
 
-Download the pinned artwork part and emoji-assets.parts.json from the matching [supporting artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact) when published. Keep them together and run the packaged command:
+Download the pinned artwork part and emoji-assets.parts.json from the matching [supporting artwork release](https://github.com/Plaer1/open-clank/releases/tag/v1.0.2-beta.1-artwork-compact). Keep them together and run the packaged command:
 
 ```bash
 "/Applications/OpenClank.app/Contents/Resources/runtime/openclank" assets assemble --parts /path/to/emoji-parts
@@ -507,7 +535,7 @@ The compact offline pack preserves all available Google/Kitchen identities: exac
 
 ## Windows release package
 
-The planned per-user installers are Open-Clank-1.0.2-windows-x64-Setup.exe and Open-Clank-1.0.2-windows-arm64-Setup.exe. Final native installer and artwork qualification remains pending; use only architectures actually offered when the application release is published. The beta is unsigned. Each package includes private Python and native workers, with no global Python/PATH changes. ARM64 payloads are native ARM64; the x64 installer bootstrap uses Windows ARM emulation.
+The per-user installer names are Open-Clank-1.0.3-windows-x64-Setup.exe and Open-Clank-1.0.3-windows-arm64-Setup.exe. Use only architectures actually offered on the [application release page](https://github.com/Plaer1/open-clank/releases/tag/v1.0.3-beta.2), and check each artifact's checksum and source/target qualification records. The beta is unsigned. Each package includes private Python and native workers, with no global Python/PATH changes. ARM64 payloads are native ARM64; the x64 installer bootstrap uses Windows ARM emulation.
 
 Setup can download verified artwork or use the existing part and manifest. Start menu **Open Clank** opens the local browser app; **Stop Open Clank** stops its owned server. Uninstall preserves user data and artwork. ZIPs remain an alternative; keep the complete extracted folder together and use `openclank.exe assets assemble --parts <directory>` then `assets verify`. See the repository Setup Guide for exact release assets and commands.
 
@@ -555,7 +583,7 @@ Run setup or an explicit migration only when the applicable release guidance cal
 
 ## Docker (unsupported legacy reference)
 
-Docker is not officially supported or tested. Docker/Compose files and the repository setup notes are retained only as unsupported legacy reference. Use the native/source installation paths; Docker is not an official installation option or a Beta 1 release qualification target.
+Docker is not officially supported or tested. Docker/Compose files and the repository setup notes are retained only as unsupported legacy reference. Use the native/source installation paths; Docker is not an official installation option or a Beta 2 release qualification target.
 
 ## When startup fails
 
@@ -953,7 +981,7 @@ Included editors/renderers use CodeMirror/Lezer, Shiki, Mermaid, spreadsheet/doc
 
 Font credits cover Fira Code, Inter, Comic Neue, OpenDyslexic and Fredoka. Liga Comic Mono has Comic Mono and Fira Code ligature lineage with an unresolved exact source/release chain. The file named `GohuFont.ttf` internally identifies as Untitled1, copyright 2025 Unknown; the older Gohu/WTFPL claim is unverified.
 
-Detailed included paths, versions, asset fingerprints, retained full texts and provenance qualifications are in the repository's [Acknowledgments](https://github.com/Plaer1/open-clank/blob/main/ACKNOWLEDGMENTS.md) and [Bundled components](https://github.com/Plaer1/open-clank/blob/main/licenses/BUNDLED-COMPONENTS.md). These links identify the repository notice destinations; its public branch may lag the installed Beta 1 bundle until publication. Study references stay outside first-party runtime/build dependencies. This read-only article is part of the shared handbook opened by the existing two Help buttons.
+Detailed included paths, versions, asset fingerprints, retained full texts and provenance qualifications are in the repository's [Acknowledgments](https://github.com/Plaer1/open-clank/blob/main/ACKNOWLEDGMENTS.md) and [Bundled components](https://github.com/Plaer1/open-clank/blob/main/licenses/BUNDLED-COMPONENTS.md). These links identify the repository notice destinations; use the installed artifact provenance for its exact source revision. Study references stay outside first-party runtime/build dependencies. This read-only article is part of the shared handbook opened by the existing two Help buttons.
 """),
 )
 
@@ -972,7 +1000,7 @@ ARTICLE_ASSETS = {'openclank-docs-home': ('beta1-welcome-20261005', 'beta1-help-
                                'beta1-files-images-20261004',
                                'beta1-image-editor-20261004',
                                'beta1-image-result-20261004'),
- 'openclank-docs-graph': ('beta1-graph-20261004', 'beta1-timeline-20261004'),
+ 'openclank-docs-graph': ('beta1-graph-20261004', 'beta1-timeline-20261004', 'code-graph-web-alpha-20261019', 'code-graph-gravity-alpha-20261019', 'code-graph-menus-alpha-20261019'),
  'openclank-docs-memory-lore': ('beta1-memery-20261004', 'beta1-skills-20261004'),
  'openclank-docs-tasks': ('beta1-meatbag-tasks-20261004', 'beta1-clanker-tasks-20261004'),
  'openclank-docs-settings-themes': ('beta1-appearance-20261004', 'beta1-appearance-controls-20261004'),

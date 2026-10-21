@@ -144,9 +144,15 @@ def _source_file_excluded(relative: Path) -> bool:
     relative_text = relative.as_posix()
     if relative_text in _SOURCE_EXCLUDED_FILES:
         return True
-    # Markdown is distribution documentation; the remaining suffixes are
-    # compiler, package, log, or process outputs rather than build inputs.
-    if relative.suffix.lower() in {".md", ".tsbuildinfo", ".log", ".pid", ".tgz"}:
+    # bundle.macro.ts embeds Markdown below each builtin skill directory;
+    # those are runtime instructions, while other Markdown stays documentation.
+    if relative.suffix.lower() == ".md":
+        return not (
+            relative_text.startswith("packages/opencode/src/skill/builtin/.bundle/")
+            and len(relative.parts) >= 8
+        )
+    # Compiler, package, log, or process outputs are not build inputs.
+    if relative.suffix.lower() in {".tsbuildinfo", ".log", ".pid", ".tgz"}:
         return True
     if name in {".DS_Store", "Thumbs.db"} or name.endswith(("~", ".bun-build")):
         return True

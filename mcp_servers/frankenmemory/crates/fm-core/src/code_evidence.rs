@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub mod storage;
 
 pub const EVIDENCE_FORMAT_VERSION: u32 = 1;
-pub const EXTRACTOR_VERSION: &str = "s11-static-2";
+pub const EXTRACTOR_VERSION: &str = "graph-static-3";
 /// Aggregate root-module interfaces, independently bounded from each active
 /// decoded file (64 MiB). Current full-source measurement is 104,563,687 bytes;
 /// 128 MiB leaves 28% headroom without dropping provenance or raising any
@@ -193,6 +193,13 @@ pub enum OccurrenceKind {
     ValueReference,
     TypeReference,
     ImportReference,
+}
+/// Typed syntax rules share the existing occurrence/resolution witnesses.
+pub fn relation_code(o:&OccurrenceEvidence)->i64 {
+    match o.syntax_kind.as_str() { "inherits"=>5,"implements"=>6,"jsx_render"=>7,"fastapi_route_registration"=>8,"overrides"=>9,_=>match o.kind {OccurrenceKind::Call=>1,OccurrenceKind::ImportReference=>2,OccurrenceKind::ValueReference=>3,OccurrenceKind::TypeReference=>4} }
+}
+pub fn relation_name(o:&OccurrenceEvidence)->&'static str {
+    match relation_code(o) {1=>"call",2=>"import",3=>"value_reference",4=>"type_reference",5=>"inherits",6=>"implements",7=>"render",8=>"route",9=>"overrides",_=>"unsupported"}
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -435,10 +442,10 @@ pub fn language_capability(rel_path: &str) -> LanguageCapability {
             true,
         ),
         "tsx" => ("typescript", "tsx", "tree-sitter-typescript@0.23.2", true),
-        "js" | "jsx" => ("javascript", extension, "unavailable", false),
+        "js" | "jsx" | "mjs" | "cjs" => ("javascript", "javascript", "tree-sitter-javascript@0.25.0", true),
         _ => ("unsupported", extension, "unavailable", false),
     };
-    LanguageCapability { language:language.into(), dialect:dialect.into(), parser:"tree-sitter".into(), grammar_version:grammar.into(), extractor_version:EXTRACTOR_VERSION.into(), available, binding_level:"static_lexical_only".into(), limitations:vec!["No runtime dispatch, typechecker, package-loader, macro expansion or framework inference".into(), "Dynamic receivers and runtime-assigned callable values are not exact".into()] }
+    LanguageCapability { language:language.into(), dialect:dialect.into(), parser:"tree-sitter".into(), grammar_version:grammar.into(), extractor_version:EXTRACTOR_VERSION.into(), available, binding_level:"static_lexical_only".into(), limitations:vec!["No runtime dispatch, typechecker, package-loader or macro expansion; framework rules cover only named static FastAPI/JSX syntax".into(), "Dynamic receivers and runtime-assigned callable values are not exact".into()] }
 }
 fn span(node: Node<'_>) -> SourceSpan {
     SourceSpan {
@@ -524,7 +531,7 @@ impl Builder<'_> {
                 && node
                     .child_by_field_name("kind")
                     .is_some_and(|kind| kind.kind() == "var");
-        if self.file.language != "typescript" || !declared_var {
+        if !matches!(self.file.language.as_str(), "typescript" | "javascript") || !declared_var {
             return Ok(scope.into());
         }
         self.callable_binding_scope(scope)
@@ -930,7 +937,18 @@ impl Builder<'_> {
                 self.mark_skip(node);
                 Ok(true)
             }
-            "import_statement" | "export_statement" if self.file.language == "typescript" => {
+            "variable_declarator" if matches!(self.file.language.as_str(),"javascript"|"typescript") => {
+                let Some(call)=node.child_by_field_name("value").filter(|n|n.kind()=="call_expression") else{return Ok(false);};
+                if call.child_by_field_name("function").is_none_or(|n|n.kind()!="identifier"||text(n,self.source)!="require"){return Ok(false);}
+                let Some(args)=call.child_by_field_name("arguments") else{return Ok(false);};
+                let args=children(args);if args.len()!=1||args[0].kind()!="string"{return Ok(false);}
+                let Some(name)=node.child_by_field_name("name").filter(|n|n.kind()=="identifier") else{return Ok(false);};
+                let module=text(args[0],self.source).trim_matches(['\'','"']).to_owned();
+                if module.contains('\\'){return Ok(false);}
+                self.imported(node,scope,text(name,self.source).into(),module,None,None,false,false,false)?;
+                self.mark_skip(node);Ok(true)
+            }
+            "import_statement" | "export_statement" if matches!(self.file.language.as_str(), "typescript" | "javascript") => {
                 let source = node.child_by_field_name("source");
                 let Some(module_node) = source else {
                     return Ok(false);
@@ -1085,11 +1103,14 @@ impl Builder<'_> {
                 ]);
                 let provisional = digest(&[&identity_key, &node.start_byte().to_string()]);
                 let index = self.file.declarations.len();
+                let route=if self.file.language=="python"&&kind=="function"{fastapi_route(node,self.source,&self.file.imports)}else{None};
+                let is_component=matches!(self.file.language.as_str(),"javascript"|"typescript")&&matches!(kind,"function"|"function_value")&&name.chars().next().is_some_and(char::is_uppercase)&&has_owned_jsx(node);
+                let declared_kind=if route.is_some(){"route"}else if is_component{"component"}else if kind=="function"&&parent.is_some_and(|p|matches!(self.file.declarations[p].kind.as_str(),"class"|"implementation")){"method"}else{kind};
                 let declaration = DeclarationEvidence {
                     id: provisional.clone(),
                     identity_key,
                     identity_state: IdentityState::Stable,
-                    kind: kind.into(),
+                    kind: declared_kind.into(),
                     name: name.clone(),
                     qualified_name,
                     lexical_parent_id: parent.map(|i| self.file.declarations[i].id.clone()),
@@ -1113,6 +1134,35 @@ impl Builder<'_> {
                 self.account(&declaration)?;
                 self.file.declarations.push(declaration);
                 self.declaration_nodes.insert(node.id(), index);
+                if matches!(declared_kind,"method")&&parent.is_some_and(|p|matches!(self.file.declarations[p].kind.as_str(),"class"|"interface")) {
+                    let parent_id=&self.file.declarations[parent.unwrap()].id;
+                    if self.file.occurrences.iter().any(|o|o.caller_id.as_ref()==Some(parent_id)&&o.syntax_kind=="inherits") {
+                        self.occurrence(name_node,OccurrenceKind::TypeReference,name.clone(),scope.into(),Some(provisional.clone()))?;
+                        self.file.occurrences.last_mut().unwrap().syntax_kind="overrides".into();
+                    }
+                }
+                if let Some(decorator)=route {
+                    self.occurrence(decorator,OccurrenceKind::ValueReference,name.clone(),scope.into(),None)?;
+                    self.file.occurrences.last_mut().unwrap().syntax_kind="fastapi_route_registration".into();
+                }
+                // Base expressions bind in the enclosing scope; the class/impl
+                // is the actual source declaration, not a fabricated caller.
+                let mut bases=Vec::new();
+                if let Some(superclasses)=node.child_by_field_name("superclasses") {
+                    for base in children(superclasses){if matches!(base.kind(),"identifier"|"attribute"){bases.push((base,"inherits"));}}
+                }
+                for heritage in children(node).into_iter().filter(|n|n.kind()=="class_heritage"||n.kind()=="extends_type_clause") {
+                    for clause in children(heritage) {
+                        if matches!(clause.kind(),"identifier"|"type_identifier"|"member_expression"|"nested_type_identifier"){bases.push((clause,"inherits"));continue;}
+                        let relation=if clause.kind()=="implements_clause"{"implements"}else{"inherits"};
+                        for base in children(clause){if matches!(base.kind(),"identifier"|"type_identifier"|"member_expression"|"nested_type_identifier"){bases.push((base,relation));}else if base.kind()=="generic_type"{if let Some(name)=base.child_by_field_name("name"){bases.push((name,relation));}}}
+                    }
+                }
+                if let Some(trait_node)=node.child_by_field_name("trait"){bases.push((trait_node,"implements"));}
+                for (base,relation) in bases {
+                    self.occurrence(base,OccurrenceKind::TypeReference,text(base,self.source).into(),scope.into(),Some(provisional.clone()))?;
+                    self.file.occurrences.last_mut().unwrap().syntax_kind=relation.into();self.mark_skip(base);
+                }
                 if name_node.kind() == "computed_property_name" {
                     // A computed key executes in the surrounding source
                     // context, not in the method whose name it computes.
@@ -1130,7 +1180,7 @@ impl Builder<'_> {
                 // TS method names are object/class properties, not lexical
                 // variables (including inside a field initializer or method).
                 if kind != "implementation"
-                    && !(self.file.language == "typescript" && kind == "method")
+                    && !(matches!(self.file.language.as_str(), "typescript" | "javascript") && kind == "method")
                 {
                     let binding_scope = self.variable_binding_scope(node, scope)?;
                     self.binding(
@@ -1343,7 +1393,7 @@ impl Builder<'_> {
             }
             return Ok(());
         }
-        if self.file.language == "typescript" && node.kind() == "class" {
+        if matches!(self.file.language.as_str(), "typescript" | "javascript") && node.kind() == "class" {
             let nested = digest(&[
                 "class_expression_scope",
                 &self.file.file_id,
@@ -1379,7 +1429,7 @@ impl Builder<'_> {
             }
             return Ok(());
         }
-        if self.file.language == "typescript" && node.kind() == "object" {
+        if matches!(self.file.language.as_str(), "typescript" | "javascript") && node.kind() == "object" {
             let nested = digest(&[
                 "object_scope",
                 &self.file.file_id,
@@ -1447,7 +1497,7 @@ impl Builder<'_> {
                     .child_by_field_name("left")
                     .or_else(|| node.child_by_field_name("name"))
                 {
-                    let binding_scope = if self.file.language == "typescript" {
+                    let binding_scope = if matches!(self.file.language.as_str(), "typescript" | "javascript") {
                         self.callable_binding_scope(scope)?
                     } else {
                         scope.into()
@@ -1560,6 +1610,7 @@ impl Builder<'_> {
             &node.end_byte().to_string(),
             &symbol,
         ]);
+        let syntax_kind=if matches!(self.file.language.as_str(),"javascript"|"typescript")&&symbol.chars().next().is_some_and(char::is_uppercase)&&node.parent().is_some_and(|p|matches!(p.kind(),"jsx_opening_element"|"jsx_self_closing_element")&&p.child_by_field_name("name")==Some(node)){"jsx_render"}else{node.kind()};
         let occurrence = OccurrenceEvidence {
             id,
             kind,
@@ -1567,7 +1618,7 @@ impl Builder<'_> {
             source: self.locator(node),
             caller_id: caller,
             scope_id: scope,
-            syntax_kind: node.kind().into(),
+            syntax_kind: syntax_kind.into(),
         };
         self.account(&occurrence)?;
         self.file.occurrences.push(occurrence);
@@ -1753,6 +1804,55 @@ impl Builder<'_> {
     }
 }
 
+fn has_owned_jsx(node:Node<'_>)->bool {
+    let owner=if node.kind()=="variable_declarator"{node.child_by_field_name("value").unwrap_or(node)}else{node};
+    let mut stack=children(owner);
+    while let Some(n)=stack.pop(){
+        if matches!(n.kind(),"jsx_element"|"jsx_self_closing_element"){return true;}
+        if matches!(n.kind(),"function_declaration"|"function_expression"|"arrow_function"|"class_declaration"|"method_definition"){continue;}
+        stack.extend(children(n));
+    }false
+}
+fn module_writes<'a>(root:Node<'a>,name:&str,source:&str)->Vec<Node<'a>> {
+    let mut stack=children(root);let mut writes=Vec::new();
+    while let Some(node)=stack.pop(){
+        if matches!(node.kind(),"function_definition"|"class_definition") {
+            if node.child_by_field_name("name").is_some_and(|n|text(n,source)==name){writes.push(node);}continue;
+        }
+        if matches!(node.kind(),"assignment"|"augmented_assignment"|"named_expression") {
+            let mut targets=node.child_by_field_name("left").or_else(||node.child_by_field_name("name")).into_iter().collect::<Vec<_>>();let mut matches=false;
+            while let Some(n)=targets.pop(){if n.kind()=="identifier"&&text(n,source)==name{matches=true;}targets.extend(children(n));}
+            if matches{writes.push(node);}
+        }
+        stack.extend(children(node));
+    }writes
+}
+fn fastapi_route<'a>(node:Node<'a>,source:&str,imports:&[ImportEvidence])->Option<Node<'a>> {
+    let decorated=node.parent().filter(|p|p.kind()=="decorated_definition")?;
+    let root=decorated.parent().filter(|p|p.kind()=="module")?;
+    for decorator in children(decorated).into_iter().filter(|n|n.kind()=="decorator") {
+        let Some(call)=children(decorator).into_iter().find(|n|n.kind()=="call") else{continue;};
+        let Some(function)=call.child_by_field_name("function").filter(|n|n.kind()=="attribute") else{continue;};
+        let Some(receiver)=function.child_by_field_name("object").filter(|n|n.kind()=="identifier") else{continue;};
+        let Some(method)=function.child_by_field_name("attribute") else{continue;};
+        if !matches!(text(method,source),"get"|"post"|"put"|"patch"|"delete"|"options"|"head"|"websocket"|"api_route"){continue;}
+        let Some(args)=call.child_by_field_name("arguments") else{continue;};
+        let Some(path)=children(args).into_iter().next() else{continue;};
+        if path.kind()!="string"||children(path).iter().any(|n|n.kind()=="interpolation"){continue;}
+        let assignments=module_writes(root,text(receiver,source),source);
+        if assignments.iter().any(|n|n.kind()!="assignment"||n.parent().and_then(|p|p.parent()).is_none_or(|p|p!=root)){continue;}
+        if assignments.len()!=1||assignments[0].start_byte()>=decorated.start_byte(){continue;}
+        let Some(init)=assignments[0].child_by_field_name("right").filter(|n|n.kind()=="call").and_then(|n|n.child_by_field_name("function")) else{continue;};
+        let constructor=text(init,source);
+        for import in imports.iter().filter(|i|i.module_path=="fastapi") {
+            let supported=import.imported_name.as_deref().is_some_and(|name|matches!(name,"FastAPI"|"APIRouter")&&import.local_name==constructor)||import.imported_name.is_none()&&matches!(constructor.strip_prefix(&format!("{}.",import.local_name)),Some("FastAPI"|"APIRouter"));
+            if !supported||imports.iter().filter(|i|i.local_name==import.local_name).count()!=1{continue;}
+            // No same-module rebinding of the imported constructor/module name.
+            let rebound=!module_writes(root,&import.local_name,source).is_empty();
+            if !rebound{return Some(decorator);}
+        }
+    }None
+}
 pub fn extract_evidence(
     checkout: &str,
     rel_path: &str,
@@ -1785,20 +1885,18 @@ pub fn extract_evidence(
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "python" => tree_sitter_python::LANGUAGE.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "javascript" => tree_sitter_javascript::LANGUAGE.into(),
         _ => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
     };
-    let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&grammar).map_err(|_| {
-        error(
-            EvidenceErrorCode::UnsupportedLanguage,
-            "grammar ABI unavailable",
-        )
-    })?;
-    let tree = parser.parse(source, None).ok_or_else(|| {
-        error(
-            EvidenceErrorCode::SyntaxError,
-            "parser did not return a tree",
-        )
+    // One bounded parser per grammar on each existing scheduler worker. No
+    // retained trees/source buffers and no additional executor or CPU lease.
+    thread_local! { static PARSERS: std::cell::RefCell<HashMap<String, tree_sitter::Parser>> = std::cell::RefCell::new(HashMap::new()); }
+    let tree = PARSERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        let parser = pool.entry(capability.dialect.clone()).or_insert_with(tree_sitter::Parser::new);
+        parser.set_language(&grammar).map_err(|_| error(EvidenceErrorCode::UnsupportedLanguage, "grammar ABI unavailable"))?;
+        parser.reset();
+        parser.parse(source, None).ok_or_else(|| error(EvidenceErrorCode::SyntaxError, "parser did not return a tree"))
     })?;
     if tree.root_node().has_error() {
         return Err(error(
@@ -2218,7 +2316,7 @@ impl<'a> Resolver<'a> {
             } else {
                 keys.insert(path);
             }
-        } else if from.language == "typescript" {
+        } else if matches!(from.language.as_str(), "typescript" | "javascript") {
             if !module.starts_with('.') {
                 return Ok(vec![]);
             }
@@ -2273,8 +2371,8 @@ impl<'a> Resolver<'a> {
         for key in keys {
             let candidates: Vec<String> = match from.language.as_str() {
                 "python" => vec![format!("{key}.py"), format!("{key}/__init__.py")],
-                "typescript" => std::iter::once(key.clone())
-                    .chain(["ts", "tsx", "mts", "cts"].into_iter().flat_map(|ext| {
+                "typescript" | "javascript" => std::iter::once(key.clone())
+                    .chain(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"].into_iter().flat_map(|ext| {
                         [format!("{key}.{ext}"), format!("{key}/index.{ext}")]
                     }))
                     .collect(),
@@ -2285,7 +2383,7 @@ impl<'a> Resolver<'a> {
                 self.tick()?;
                 if let Some(file) = self.paths.get(path.as_str())
                     .or_else(|| self.base_paths.and_then(|base| base.get(path.as_str()))).copied()
-                    .filter(|file| file.language == from.language)
+                    .filter(|file| file.language == from.language || matches!((file.language.as_str(), from.language.as_str()), ("typescript", "javascript") | ("javascript", "typescript")))
                 {
                     if seen.insert(file.rel_path.as_str()) {
                         result.push(file);
@@ -2431,6 +2529,24 @@ impl<'a> Resolver<'a> {
             witnesses: vec![],
             dependencies: vec![],
         };
+        if o.syntax_kind=="overrides" {
+            self.inspect(file.declarations.len()+file.occurrences.len())?;
+            let method=o.caller_id.as_ref().and_then(|id|file.declarations.iter().find(|d|&d.id==id));
+            let owner=method.and_then(|m|m.lexical_parent_id.as_ref()).and_then(|id|file.declarations.iter().find(|d|&d.id==id));
+            let bases=owner.map(|owner|file.occurrences.iter().filter(|base|base.syntax_kind=="inherits"&&base.caller_id.as_ref()==Some(&owner.id)).collect::<Vec<_>>()).unwrap_or_default();
+            r.dependencies=vec![dependency(file)];
+            if bases.len()!=1 {r.state=ResolutionState::Unsupported;r.reason="override rule requires exactly one direct base".into();return Ok(r);}
+            let base=self.occurrence(file,bases[0])?;
+            let Some(base_id)=base.target_id else{r.state=ResolutionState::Unsupported;r.reason="direct base is not statically resolved".into();return Ok(r);};
+            if !file.declarations.iter().any(|d|d.id==base_id&&matches!(d.kind.as_str(),"class"|"interface")){r.state=ResolutionState::Unsupported;r.reason="override rule requires a same-file direct class/interface base".into();return Ok(r);}
+            let targets=file.declarations.iter().filter(|d|d.lexical_parent_id.as_deref()==Some(&base_id)&&d.name==o.symbol_text&&d.kind=="method").collect::<Vec<_>>();
+            r.candidate_ids=targets.iter().map(|d|d.id.clone()).collect();
+            if targets.len()==1&&targets[0].identity_state==IdentityState::Stable&&method.is_some_and(|m|m.identity_state==IdentityState::Stable) {
+                r.target_id=Some(targets[0].id.clone());r.state=ResolutionState::Inferred;r.reason="single direct same-file base has matching method; no MRO/typechecker/runtime dispatch claim".into();
+                r.witnesses=base.witnesses;r.witnesses.push(ResolutionWitness{kind:"direct_base_syntax".into(),source:bases[0].source.clone(),description:"single declared direct base".into()});r.witnesses.push(ResolutionWitness{kind:"static_override_target".into(),source:targets[0].source.clone(),description:targets[0].qualified_name.clone()});
+            }else if targets.len()>1{r.state=ResolutionState::Ambiguous;r.reason="multiple same-named direct-base methods".into();}
+            return Ok(r);
+        }
         let mut deps = BTreeMap::from([(file.rel_path.clone(), dependency(file))]);
         let raw = &o.symbol_text;
         let (name, member) = if let Some((head, tail)) = raw.split_once('.') {
@@ -2593,6 +2709,7 @@ impl<'a> Resolver<'a> {
                 "receiver/module/alias-cycle target unavailable; no bare-name fallback".into();
         }
         r.candidate_ids = candidates.iter().map(|d| d.id.clone()).collect();
+        if matches!(o.syntax_kind.as_str(),"fastapi_route_registration"|"jsx_render")&&r.state==ResolutionState::Exact{r.state=ResolutionState::Inferred;r.reason="named static framework syntax; runtime registration/render is not asserted".into();}
         r.dependencies = deps.into_values().collect();
         Ok(r)
     }

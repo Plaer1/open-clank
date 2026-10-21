@@ -1,3 +1,4 @@
+import { normalizeGraphSettings } from './graphSettings.js';
 import { cloneEnvelope, resourceKeyId } from './resourceModel.js';
 
 // Graph, Galaxy and structure are presentations of one scoped window.  The
@@ -380,7 +381,7 @@ export function normalizeGraphState(source = {}) {
   // structure projection switch and can explicitly describe an unavailable source.
   const sharedSource = source?.source && typeof source.source === 'object' ? cloneEnvelope(source.source) : null;
   const requestedMode = LEGACY_MODE_ALIAS[source?.mode] || source?.mode;
-  return { version:2, mode:GRAPH_MODES.includes(requestedMode) ? requestedMode : DEFAULT_MODE, source:sharedSource, modes };
+  return { version:3, settings:normalizeGraphSettings(source?.settings), mode:GRAPH_MODES.includes(requestedMode) ? requestedMode : DEFAULT_MODE, source:sharedSource, modes };
 }
 
 /**

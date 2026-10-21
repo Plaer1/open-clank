@@ -162,6 +162,7 @@ pub enum Lang {
     Python,
     TypeScript,
     Tsx,
+    JavaScript,
 }
 
 impl Lang {
@@ -171,6 +172,7 @@ impl Lang {
             "py" => Some(Self::Python),
             "ts" | "mts" | "cts" => Some(Self::TypeScript),
             "tsx" => Some(Self::Tsx),
+            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
             _ => None,
         }
     }
@@ -181,6 +183,7 @@ impl Lang {
             Self::Python => tree_sitter_python::LANGUAGE.into(),
             Self::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Self::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Self::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
         }
     }
 
@@ -211,6 +214,14 @@ impl Lang {
                 (call function: (attribute attribute: (identifier) @call))
             "#
             }
+            Self::JavaScript => { r#"
+                (function_declaration name: (identifier) @def)
+                (class_declaration name: (identifier) @def)
+                (method_definition name: (property_identifier) @def)
+                (import_statement source: (string (string_fragment) @import))
+                (call_expression function: (identifier) @call)
+                (call_expression function: (member_expression property: (property_identifier) @call))
+            "# },
             Self::TypeScript | Self::Tsx => {
                 r#"
                 (function_declaration name: (identifier) @def)
@@ -232,14 +243,12 @@ pub struct FileExtraction {
     pub calls: Vec<String>,
 }
 
+fn parse_compatibility(lang:Lang,source:&str)->Result<tree_sitter::Tree,String>{
+    thread_local!{static PARSERS:std::cell::RefCell<std::collections::HashMap<u8,Parser>>=std::cell::RefCell::new(std::collections::HashMap::new());}
+    PARSERS.with(|pool|{let mut pool=pool.borrow_mut();let parser=pool.entry(lang as u8).or_insert_with(Parser::new);parser.set_language(&lang.grammar()).map_err(|e|format!("grammar load failed: {e}"))?;parser.reset();parser.parse(source,None).ok_or_else(||"parse produced no tree".into())})
+}
 pub fn extract_file(lang: Lang, source: &str) -> Result<FileExtraction, String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&lang.grammar())
-        .map_err(|e| format!("grammar load failed: {e}"))?;
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| "parse produced no tree".to_string())?;
+    let tree=parse_compatibility(lang,source)?;
     if tree.root_node().has_error() {
         return Err("syntax_error: parser recovered ERROR or missing nodes".into());
     }
@@ -281,8 +290,7 @@ pub(crate) enum CompatibilityReference {Import,Call}
 // extract_file + its existing consumer. Borrow source slices; never retain an
 // unbounded compatibility Vec<String> ahead of the bounded graph builder.
 pub(crate) fn stream_compatibility_references(lang:Lang,source:&str,mut accept:impl FnMut(CompatibilityReference,&str)->Result<(),String>)->Result<(),String>{
-    let mut parser=Parser::new();parser.set_language(&lang.grammar()).map_err(|e|format!("grammar load failed: {e}"))?;
-    let tree=parser.parse(source,None).ok_or("parse produced no tree")?;
+    let tree=parse_compatibility(lang,source)?;
     if tree.root_node().has_error(){return Err("syntax_error: parser recovered ERROR or missing nodes".into());}
     let query=Query::new(&lang.grammar(),lang.query_source()).map_err(|e|format!("query compile failed: {e}"))?;
     for (wanted,kind) in [("import",CompatibilityReference::Import),("call",CompatibilityReference::Call)]{
@@ -456,7 +464,7 @@ impl SelectionPolicy {
 /// unsupported asset (even a large one) cannot consume a resolver-file slot.
 pub fn eligible_unavailable(entry: &ScanCoverage) -> bool {
     Lang::from_path(Path::new(&entry.rel_path)).is_some()
-        && matches!(entry.status.as_str(), "parse_failed" | "permission_denied" | "unsupported" | "binary" | "outside_root" | "oversize" | "oversized")
+        && matches!(entry.status.as_str(), "parse_failed" | "budget_exceeded" | "permission_denied" | "unsupported" | "binary" | "outside_root" | "oversize" | "oversized")
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {
@@ -475,6 +483,7 @@ pub fn producer_fingerprint() -> String {
     FINGERPRINT.get_or_init(||{
     let mut hash=blake3::Hasher::new();
     hash.update(include_str!("code.rs").as_bytes());
+    hash.update(include_str!("code_index_limits.rs").as_bytes());
     hash.update(include_str!("graph.rs").as_bytes());
     hash.update(include_str!("store/graph.rs").as_bytes());
     hash.update(include_str!("code_evidence.rs").as_bytes());
@@ -491,7 +500,13 @@ pub fn producer_fingerprint() -> String {
     hash.update(MAX_FILE_BYTES.to_string().as_bytes());
     for excluded in SKIP_DIRS {hash.update(excluded.as_bytes());hash.update(&[0]);}
     hash.finalize().to_hex().to_string()
-    }).clone()
+    });
+    let limits=crate::code_index_limits::current();let mut effective=blake3::Hasher::new();
+    effective.update(FINGERPRINT.get().unwrap().as_bytes());
+    // Storage allowance does not change extracted semantics or invalidate a
+    // readable prior head when lowered. Keep the original3 admission fields.
+    effective.update(&serde_json::to_vec(&(&limits.max_files,&limits.max_source_bytes,&limits.max_file_bytes)).expect("bounded index limits"));
+    effective.finalize().to_hex().to_string()
 }
 
 #[derive(Debug,Clone,PartialEq,Eq)]
@@ -649,7 +664,7 @@ fn open_pinned_path(root:&Path,path:&Path,expected:&str)->Result<std::fs::File,S
 
 #[cfg(any(unix,windows))]
 pub fn acquire_source_pinned(root:&Path,path:&Path,expected:&str)->Result<AcquiredSource,String> {
-    acquire_bounded_pinned(root,path,expected,MAX_FILE_BYTES)
+    acquire_bounded_pinned(root,path,expected,crate::code_index_limits::current().max_file_bytes as u64)
 }
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -1242,11 +1257,11 @@ fn scan_codebase_inventory_mode(root:&Path,expected:&str,visual:Option<(&std::sy
                 });
                 continue;
             }
-            if meta.size > MAX_FILE_BYTES {
+            if meta.size > crate::code_index_limits::current().max_file_bytes as u64 {
                 coverage.push(ScanCoverage {
                     rel_path: rel,
                     status: "oversize".into(),
-                    detail: Some(format!("{} bytes exceeds {}", meta.size, MAX_FILE_BYTES)),
+                    detail: Some(format!("{} bytes exceeds {}", meta.size, crate::code_index_limits::current().max_file_bytes)),
                     ..Default::default()
                 });
                 continue;

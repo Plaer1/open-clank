@@ -63,7 +63,8 @@ export function createSceneOwner(options = {}) {
   const motionQuery = typeof win.matchMedia === 'function'
     ? win.matchMedia('(prefers-reduced-motion: reduce)')
     : null;
-  const reducedMotionOf = () => !!(motionQuery && motionQuery.matches);
+  let localReduced=false,animationUntil=0,requestedFps=60,lastPaintTime=0;
+  const reducedMotionOf = () => localReduced || !!(motionQuery && motionQuery.matches);
 
   let animationFrame = 0;
   let paintOnceFrame = 0;
@@ -90,8 +91,8 @@ export function createSceneOwner(options = {}) {
 
   function scheduleFrame() {
     if (disposed || suspended) return;
-    if (demand) return; // demand paints never seed a continuous chain
-    if (animationFrame) return; // already scheduled — never stack loops
+    if (demand && animationUntil<=performanceNow()) return; // finite work only
+    if (animationFrame || paintOnceFrame) return; // already scheduled — never stack loops
     if (reducedMotionOf()) return;
     if (typeof win.requestAnimationFrame !== 'function') return;
     animationFrame = win.requestAnimationFrame(frame);
@@ -107,6 +108,7 @@ export function createSceneOwner(options = {}) {
     if (suspended) return;
     if (doc && doc.hidden) return;
     const reduced = reducedMotionOf();
+    if(demand&&animationUntil&&time<animationUntil&&requestedFps>0&&lastPaintTime&&time-lastPaintTime<1000/requestedFps-1){scheduleFrame();return;}
     if (!demand && !reduced && lastTime && scene && typeof scene.advance === 'function') {
       scene.advance(Math.min(34, Math.max(0, time - lastTime)), false);
     } else if (!demand && reduced && scene && typeof scene.advance === 'function') {
@@ -115,7 +117,8 @@ export function createSceneOwner(options = {}) {
     lastTime = demand ? 0 : time;
     painting = true;
     try {
-      paint(demand ? 0 : time, reduced, scene);
+      paint(demand && !animationUntil ? 0 : time, reduced, scene);
+      lastPaintTime=time;
       frames += 1;
       if (scene && typeof scene.markPainted === 'function' && !(demand && repaintAfterPaint)) scene.markPainted();
     } finally {
@@ -127,6 +130,7 @@ export function createSceneOwner(options = {}) {
     } else {
       repaintAfterPaint = false;
     }
+    if(animationUntil<=time||reduced)animationUntil=0;
     scheduleFrame();
   }
 
@@ -150,7 +154,7 @@ export function createSceneOwner(options = {}) {
       // Defer the one-shot paint. Consumers can call owner.start() while
       // their draw callback is still being assigned; a synchronous reduced
       // paint would re-enter that callback before construction completes.
-      if (paintOnceFrame) return;
+      if (paintOnceFrame || animationFrame) return;
       const token = ++paintOnceToken;
       if (typeof win.requestAnimationFrame !== 'function') {
         paintOnceFrame = 1;
@@ -244,6 +248,16 @@ export function createSceneOwner(options = {}) {
       else scheduleFrame();
       return owner;
     },
+
+    // A demand consumer may request finite presentation work without becoming
+    // a continuous scene or allocating a competing RAF owner.
+    animate(duration=0,{fps=60,reduced=false}={}) {
+      if(disposed)return owner;localReduced=reduced===true;
+      requestedFps=Number.isFinite(fps)&&fps>=0?fps:60;
+      animationUntil=reducedMotionOf()?0:Math.max(animationUntil,performanceNow()+Math.max(0,Math.min(5000,duration)));
+      paintOnce();return owner;
+    },
+    finishAnimation(){animationUntil=0;localReduced=false;cancelFrame();paintOnce();return owner;},
 
     /** Suspend the loop (keep owner and state). */
     suspend() {

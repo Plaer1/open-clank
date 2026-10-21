@@ -681,14 +681,21 @@ struct CodeIndexParams {
 }
 
 #[derive(Debug,Deserialize,JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CodeIndexLimitsParams {max_files:usize,max_source_bytes:usize,max_file_bytes:usize,#[serde(default="fm_core::code_index_limits::default_generation_bytes")]max_generation_bytes:u64}
+#[derive(Debug,Deserialize,JsonSchema)]
 #[serde(tag="action",rename_all="snake_case",deny_unknown_fields)]
-enum CodeIndexSchedulerParams{Status{origin:String},Configure{origin:String,revision:u64,max_threads:u8}}
+enum CodeIndexSchedulerParams{Status{origin:String},Configure{origin:String,revision:u64,max_threads:u8,#[serde(default)] limits:Option<CodeIndexLimitsParams>}}
 
 impl CodeIndexSchedulerParams {
     fn request(self) -> fm_core::code_index_scheduler::SchedulerRequest {
         match self {
             Self::Status { origin } => fm_core::code_index_scheduler::SchedulerRequest::Status { origin },
-            Self::Configure { origin, revision, max_threads } => fm_core::code_index_scheduler::SchedulerRequest::Configure { origin, revision, max_threads },
+            Self::Configure { origin, revision, max_threads, limits } => match limits {
+                Some(limits)=>fm_core::code_index_scheduler::SchedulerRequest::ConfigureResources{origin,revision,max_threads,
+                    limits:fm_core::code_index_limits::IndexLimits{max_files:limits.max_files,max_source_bytes:limits.max_source_bytes,max_file_bytes:limits.max_file_bytes,max_generation_bytes:limits.max_generation_bytes}},
+                None=>fm_core::code_index_scheduler::SchedulerRequest::Configure { origin, revision, max_threads },
+            },
         }
     }
 }
@@ -736,6 +743,7 @@ struct CodeQueryParams {
     /// Private Files-byte ExactText validation, never a model-visible input.
     #[serde(default)] source_claim:Option<serde_json::Value>,
     #[serde(default)] read_fence_only:bool,
+    #[serde(default)] selection_policy_fence:bool,
     /// App-only map/selection on the existing owned read-job lifecycle.
     #[serde(default)] visual_request:Option<serde_json::Value>,
 }
@@ -743,7 +751,7 @@ struct CodeQueryParams {
 fn visual_request(params:&CodeQueryParams,origin:&str)->Result<Option<fm_core::code_visual::VisualRequest>,rmcp::ErrorData>{
     let Some(raw)=&params.visual_request else{return Ok(None)};
     let invalid=||rmcp::ErrorData::invalid_params("Invalid private visual request",None);
-    if params.action!="start"||origin!="app"||params.query.is_some()||params.source_claim.is_some()||params.read_fence_only{return Err(invalid());}
+    if params.action!="start"||origin!="app"||params.query.is_some()||params.source_claim.is_some()||params.read_fence_only||params.selection_policy_fence{return Err(invalid());}
     // Count before typed deserialization without allocating an unbounded copy.
     struct Bound(usize);
     impl std::io::Write for Bound {
@@ -1801,6 +1809,8 @@ impl FrankenmemoryServer {
                 };
                 let source_claim:Option<fm_core::code_evidence::SourceClaim>=params.source_claim.map(serde_json::from_value).transpose().map_err(|_|invalid("Invalid private source claim"))?;
                 if params.read_fence_only && source_claim.is_some(){return Err(invalid("Read fence cannot carry source claims"));}
+                if params.selection_policy_fence && !params.read_fence_only{return Err(invalid("Selection policy fence requires read fence mode"));}
+                let selection_policy_fence=params.selection_policy_fence;
                 let read_fence_only=params.read_fence_only;
                 if let Some(claim)=&source_claim{
                     if query.as_ref().is_none_or(|q|q.expected_receipt.is_none()) || !matches!(&claim.predicate,fm_core::code_evidence::SourcePredicate::ExactText{text} if text.len()<=32768){return Err(invalid("Expected receipt and bounded Files ExactText claim required"));}
@@ -1840,7 +1850,7 @@ impl FrankenmemoryServer {
                                 return result;
                             }
                             let query=query.expect("validated evidence query or visual request");
-                            if read_fence_only{return store.code_read_fence(&scope,&binding,query.expected_receipt.as_ref()).map(|fence|serde_json::json!({"private_read_fence":fence,"receipt":null}));}
+                            if read_fence_only{let fence=if selection_policy_fence{store.code_policy_fence(&scope,&binding,query.expected_receipt.as_ref())}else{store.code_read_fence(&scope,&binding,query.expected_receipt.as_ref())};return fence.map(|fence|serde_json::json!({"private_read_fence":fence,"private_policy_fence":selection_policy_fence,"receipt":null}));}
                             let mut result=store.code_query(&scope,&binding,&query,&cancel,&secret)?;
                             let mut value=serde_json::to_value(&result).map_err(|_|fm_core::code_query::QueryError{code:"unavailable".into(),message:"Code serialization unavailable".into()})?;
                             if let Some(claim)=source_claim{
@@ -1933,7 +1943,7 @@ impl FrankenmemoryServer {
                             let _permit=permit;
                             let _interactive=self.graph_store.index_scheduler().interactive_activity();
                             if let Some(expected_fence)=value["private_read_fence"].as_str(){
-                                let current=self.graph_store.code_read_fence(&scope,&binding,None).map_err(|_|invalid("Code read authority or admission changed"))?;
+                                let current=if value["private_policy_fence"].as_bool()==Some(true){self.graph_store.code_policy_fence(&scope,&binding,None)}else{self.graph_store.code_read_fence(&scope,&binding,None)}.map_err(|_|invalid("Code read authority or admission changed"))?;
                                 if current!=expected_fence{return Err(invalid("Code read admission or head changed"));}
                                 return Ok(CallToolResult::success(vec![Content::text(serde_json::json!({"state":"completed","token":token,"result":value}).to_string())]));
                             }
@@ -1949,7 +1959,7 @@ impl FrankenmemoryServer {
         Ok(CallToolResult::success(vec![Content::text(payload.to_string())]))
     }
 
-    #[tool(name="code_index_scheduler",description="Private app-owner indexing CPU ceiling/readback. Status/configuration never starts an index or worker. Not an agent operation.")]
+    #[tool(name="code_index_scheduler",description="Private app-owner indexing CPU/source resource ceilings and effective readback. Status/configuration never starts an index or worker. Not an agent operation.")]
     async fn code_index_scheduler(&self,Parameters(params):Parameters<CodeIndexSchedulerParams>)->Result<CallToolResult,rmcp::ErrorData>{
         reject_agent_bridge_internal_tool("code_index_scheduler")?;
         let request=params.request();
@@ -1959,7 +1969,7 @@ impl FrankenmemoryServer {
 
     #[tool(
         name = "code_index",
-        description = "App-only admitted code index lifecycle: ensure queues one coalesced background verification/build, status reads progress and prior ready head, release drops one subscriber, cancel explicitly fences a job, remove atomically erases the workspace code scope, and admit explicitly renews erased admission. Source languages Rust/Python/TypeScript/TSX; failed prior files are excluded with coverage. Legacy index/stale actions are unavailable; legacy status/impact are bounded metadata reads. Never available on Agent memory bridge."
+        description = "App-only admitted code index lifecycle: ensure queues one coalesced background verification/build, status reads progress and prior ready head, release drops one subscriber, cancel explicitly fences a job, remove atomically erases the workspace code scope, and admit explicitly renews erased admission. Source languages Rust/Python/TypeScript/TSX/JavaScript/JSX/MJS/CJS; failed prior files are excluded with coverage. Legacy index/stale actions are unavailable; legacy status/impact are bounded metadata reads. Never available on Agent memory bridge."
     )]
     async fn code_index(
         &self,

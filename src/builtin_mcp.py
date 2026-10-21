@@ -15,6 +15,7 @@ import sys
 
 from core.platform_compat import IS_WINDOWS, which_tool
 from src.runtime_paths import get_app_root
+from src.constants import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ def _find_npx() -> str:
     for candidate in [
         os.path.expanduser("~/.npm-global/bin/npx"),
         os.path.expanduser("~/.local/bin/npx"),
+        "/opt/homebrew/bin/npx",
         "/usr/local/bin/npx",
         "/usr/bin/npx",
     ]:
@@ -59,6 +61,19 @@ def _find_npx() -> str:
         if os.path.isfile(npx_candidate):
             return npx_candidate
     return "npx"  # fallback, will fail with a clear error
+
+
+def _browser_node_env(npx_path: str) -> dict[str, str]:
+    """Keep explicit PATH tools; complete a discovered POSIX npm/node pair."""
+    if IS_WINDOWS or which_tool("node") or not os.path.isabs(npx_path):
+        return {}
+    node_dir = os.path.dirname(npx_path)
+    node = os.path.join(node_dir, "node")
+    if not os.path.isfile(node) or not os.access(node, os.X_OK):
+        return {}
+    inherited_path = os.environ.get("PATH", "")
+    return {"PATH": node_dir + (os.pathsep + inherited_path if inherited_path else "")}
+
 
 # Server definitions: id -> (script path relative to project root, display name)
 #
@@ -210,7 +225,8 @@ async def register_builtin_servers(mcp_manager):
             # with ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE=1.
             args = _browser_mcp_args(cfg["args"]) if server_id == "builtin_browser" else list(cfg["args"])
             pkg_spec = _npx_package_from_args(args)
-            if BROWSER_MCP_REQUIRE_CACHE and pkg_spec and not await _is_npx_package_cached(npx_path, pkg_spec):
+            browser_env = _browser_node_env(npx_path) if server_id == "builtin_browser" else None
+            if BROWSER_MCP_REQUIRE_CACHE and pkg_spec and not await _is_npx_package_cached(npx_path, pkg_spec, env=browser_env):
                 logger.warning(
                     f"{cfg['name']} is not available.\n"
                     f"  Reason: npm package {pkg_spec!r} is not installed in the npx cache.\n"
@@ -226,12 +242,21 @@ async def register_builtin_servers(mcp_manager):
             try:
                 env = None
                 if server_id == "builtin_browser":
-                    cache_home = os.environ.get(
-                        "ODYSSEUS_BROWSER_MCP_CACHE",
-                        os.path.join(base_dir, "data", "local", "playwright-mcp-cache"),
+                    # Writable caches follow the canonical data authority;
+                    # resource discovery above still belongs to the app root.
+                    cache_home = os.environ.get("ODYSSEUS_BROWSER_MCP_CACHE") or os.path.join(
+                        DATA_DIR, "local", "playwright-mcp-cache",
                     )
-                    os.makedirs(cache_home, exist_ok=True)
+                    try:
+                        os.makedirs(cache_home, exist_ok=True)
+                    except OSError as error:
+                        raise RuntimeError(
+                            f"Browser cache is unavailable at {cache_home!r}. "
+                            "Check directory permissions or set ODYSSEUS_BROWSER_MCP_CACHE "
+                            "to a writable destination. Existing caches were left in place."
+                        ) from error
                     env = {
+                        **(browser_env or {}),
                         "XDG_CACHE_HOME": cache_home,
                         "PLAYWRIGHT_BROWSERS_PATH": os.path.join(cache_home, "browsers"),
                     }
@@ -273,7 +298,7 @@ def _npx_package_from_args(args):
     return None
 
 
-async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
+async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5, *, env=None):
     """Probe whether an npx package is already in the local cache.
 
     First checks the local `_npx` cache for an installed package. If the
@@ -288,6 +313,7 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
             npx_path, "--no-install", package_spec, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env} if env else None,
         )
     except NotImplementedError:
         try:
@@ -295,6 +321,7 @@ async def _is_npx_package_cached(npx_path, package_spec, timeout_s=5):
                 [npx_path, "--no-install", package_spec, "--version"],
                 capture_output=True,
                 timeout=timeout_s,
+                env={**os.environ, **env} if env else None,
             )
         except (subprocess.TimeoutExpired, OSError, ValueError):
             return False

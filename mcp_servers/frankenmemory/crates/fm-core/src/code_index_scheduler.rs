@@ -2,6 +2,7 @@
 //! CPU leases count coordinators and workers together; retained-data reservations
 //! do not claim parser/allocator/SQLite/process RSS. Workers are demand-created.
 use serde::{Deserialize, Serialize};
+use crate::code_index_limits::{IndexLimits,HARD_LIMITS};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
@@ -27,13 +28,27 @@ pub struct SchedulerStatus {
     pub effective_revision: u64,
     pub desired: usize,
     pub effective: usize,
+    pub desired_limits: IndexLimits,
+    pub effective_limits: IndexLimits,
+    pub hard_limits: SchedulerHardLimits,
     pub active: usize,
     pub queued: usize,
     pub drain_pending: bool,
 }
+#[derive(Clone,Debug,Serialize,PartialEq,Eq)]
+pub struct SchedulerHardLimits {
+    #[serde(flatten)] pub source:IndexLimits,
+    pub max_queued_jobs:usize,
+    pub max_descriptor_bytes:usize,
+    pub max_retained_data_bytes:usize,
+    pub max_generation_disk_bytes:u64,
+    pub max_source_records:usize,
+    pub max_resolution_records:usize,
+}
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SchedulerRequest {
+    ConfigureResources {origin:String,revision:u64,max_threads:u8,limits:IndexLimits},
     Status {
         origin: String,
     },
@@ -46,7 +61,7 @@ pub enum SchedulerRequest {
 impl SchedulerRequest {
     pub fn validate(&self) -> Result<(), String> {
         match self {
-            Self::Status { origin } | Self::Configure { origin, .. } if origin != "app" => {
+            Self::Status { origin } | Self::Configure { origin, .. } | Self::ConfigureResources {origin,..} if origin != "app" => {
                 Err("denied: indexing scheduler is app-only".into())
             }
             Self::Configure {
@@ -55,6 +70,10 @@ impl SchedulerRequest {
                 ..
             } if *revision == 0 || *revision > MAX_REVISION || !(1..=32).contains(max_threads) => {
                 Err("invalid: indexing scheduler configuration".into())
+            }
+            Self::ConfigureResources {revision,max_threads,limits,..} => {
+                if *revision==0||*revision>MAX_REVISION||!(1..=32).contains(max_threads){return Err("invalid: indexing scheduler configuration".into());}
+                limits.validate()
             }
             _ => Ok(()),
         }
@@ -73,6 +92,8 @@ struct State {
     effective_revision: u64,
     desired: usize,
     effective: usize,
+    desired_limits: IndexLimits,
+    effective_limits: IndexLimits,
     active: usize,
     interactive: usize,
     next: u64,
@@ -96,6 +117,8 @@ impl Default for State {
             effective_revision: 0,
             desired: 2,
             effective: 2,
+            desired_limits:crate::code_index_limits::current(),
+            effective_limits:crate::code_index_limits::current(),
             active: 0,
             interactive: 0,
             next: 0,
@@ -127,13 +150,22 @@ impl State {
             effective_revision: self.effective_revision,
             desired: self.desired,
             effective: self.effective,
+            desired_limits:self.desired_limits,
+            effective_limits:self.effective_limits,
+            hard_limits:SchedulerHardLimits{source:HARD_LIMITS,max_queued_jobs:MAX_QUEUED,
+                max_descriptor_bytes:MAX_DESCRIPTOR_BYTES,max_retained_data_bytes:MAX_DATA_BYTES,
+                max_generation_disk_bytes:crate::store::code_partitioned::MAX_DISK,
+                max_source_records:crate::store::code_partitioned::MAX_SOURCE_RECORDS,
+                max_resolution_records:crate::store::code_partitioned::MAX_RESOLUTIONS},
             active: self.active,
             queued: self.queued.len(),
             drain_pending: self.revision != self.effective_revision,
         }
     }
     fn apply_drained(&mut self) {
-        if self.cohorts.is_empty() && self.active == 0 {
+        if self.cohorts.is_empty() && self.active == 0
+            && crate::code_index_limits::activate(self.desired_limits).is_ok() {
+            self.effective_limits=self.desired_limits;
             self.effective = self.desired;
             self.effective_revision = self.revision;
         }
@@ -293,6 +325,8 @@ impl IndexScheduler {
         request.validate()?;
         match request {
             SchedulerRequest::Status { .. } => Ok(self.status()),
+            SchedulerRequest::ConfigureResources {revision,max_threads,limits,..} =>
+                self.configure_with_limits(*revision,usize::from(*max_threads),*limits),
             SchedulerRequest::Configure {
                 revision,
                 max_threads,
@@ -301,6 +335,13 @@ impl IndexScheduler {
         }
     }
     pub fn configure(&self, revision: u64, desired: usize) -> Result<SchedulerStatus, String> {
+        self.configure_inner(revision,desired,None)
+    }
+    pub fn configure_with_limits(&self, revision:u64,desired:usize,limits:IndexLimits)->Result<SchedulerStatus,String>{
+        limits.validate()?;
+        self.configure_inner(revision,desired,Some(limits))
+    }
+    fn configure_inner(&self,revision:u64,desired:usize,limits:Option<IndexLimits>)->Result<SchedulerStatus,String>{
         if revision == 0 || revision > MAX_REVISION || !(1..=32).contains(&desired) {
             return Err("invalid: indexing scheduler configuration".into());
         }
@@ -308,14 +349,16 @@ impl IndexScheduler {
         if s.closing {
             return Err("unavailable: indexing scheduler closed".into());
         }
+        let limits=limits.unwrap_or(s.desired_limits);
         if revision < s.revision {
             return Err("stale_configuration".into());
         }
-        if revision == s.revision && desired != s.desired {
+        if revision == s.revision && (desired != s.desired || limits != s.desired_limits) {
             return Err("configuration_conflict".into());
         }
         s.revision = revision;
         s.desired = desired;
+        s.desired_limits=limits;
         s.apply_drained();
         let status = s.status();
         drop(s);
@@ -324,6 +367,7 @@ impl IndexScheduler {
     }
     pub fn reserve(self: &Arc<Self>, descriptor_bytes: usize) -> Result<Admission, String> {
         let mut s = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.desired_limits!=s.effective_limits{return Err("configuration_pending: indexing resource limits are draining".into());}
         if s.closing
             || s.queued.len() >= MAX_QUEUED
             || descriptor_bytes > MAX_DESCRIPTOR_BYTES

@@ -32,13 +32,13 @@ pub enum MapOperation { Overview, Children, Neighbors }
 pub enum MapDirection { Incoming, Outgoing, Both }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum RelationKind { Containment, Import, Call }
+pub enum RelationKind { Containment, Import, Call, ValueReference, TypeReference, Inherits, Implements, Render, Route, Overrides }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
 pub enum RelationState { Structure, Exact, Inferred }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum NodeKind { Repository, Folder, File }
+pub enum NodeKind { Repository, Folder, File, Symbol }
 
 /// Trusted owner/subject/root stay in the request binding, never these DTOs.
 /// Variant-specific fields make it impossible to invent a preview evidence head.
@@ -91,7 +91,7 @@ impl MapRequest {
         if self.schema!=SCHEMA{return Err("invalid_schema");}
         let l=&self.limits;
         if l.bytes<512||l.bytes>MAX_BYTES||l.nodes==0||l.nodes>MAX_NODES||l.edges==0||l.edges>MAX_EDGES||l.groups==0||l.groups>DEFAULT_GROUPS||l.work==0||l.work>MAX_WORK{return Err("invalid_limits");}
-        if self.relations.is_empty()||self.relations.len()>3{return Err("invalid_relations");}
+        if self.relations.is_empty()||self.relations.len()>10{return Err("invalid_relations");}
         for(i,r)in self.relations.iter().enumerate(){if self.relations[..i].contains(r){return Err("invalid_relations");}}
         if self.cursor.as_ref().is_some_and(|c|!bounded(c,MAX_CURSOR_BYTES)){return Err("invalid_cursor");}
         if (self.operation!=MapOperation::Overview||self.cursor.is_some())&&self.expected_authority.is_none(){return Err("missing_authority");}
@@ -133,6 +133,10 @@ pub struct LanguageCount { pub language: String, pub count: u64 }
 pub struct MapNode {
     pub id: String, pub label: String, pub kind: NodeKind, pub parent: Option<String>,
     pub source_files: u64, pub asset_files: u64, pub languages: Vec<LanguageCount>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub resource_id:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub symbol_kind:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub qualified_name:Option<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub file_resource_id:Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -243,7 +247,7 @@ impl MapResult {
         request.validate()?;self.authority.validate()?;
         if !safe_cost(&self.cost)||[Some(self.coverage.observed_entries),self.coverage.total_entries,self.coverage.indexed_files,self.coverage.parse_failed_files,Some(self.coverage.ignored_entries),Some(self.coverage.unsupported_entries),Some(self.coverage.unavailable_entries),self.page.remaining_nodes,self.page.remaining_edges].iter().flatten().any(|n|*n>JS_INTEGER){return Err("invalid_numeric_count");}
         if self.schema!=SCHEMA||self.operation!=request.operation||self.direction!=request.direction||self.relations!=request.relations||request.expected_authority.as_ref().is_some_and(|a|a!=&self.authority){return Err("map_authority_changed");}
-        if self.nodes.len()>request.limits.nodes||self.nodes.iter().filter(|n|n.kind!=NodeKind::File).count()>request.limits.groups||self.edges.len()>request.limits.edges||self.page.returned_nodes!=self.nodes.len()||self.page.returned_edges!=self.edges.len()||self.cost.source_bytes_read!=0{return Err("invalid_map_bounds");}
+        if self.nodes.len()>request.limits.nodes||self.nodes.iter().filter(|n|!matches!(n.kind,NodeKind::File|NodeKind::Symbol)).count()>request.limits.groups||self.edges.len()>request.limits.edges||self.page.returned_nodes!=self.nodes.len()||self.page.returned_edges!=self.edges.len()||self.cost.source_bytes_read!=0{return Err("invalid_map_bounds");}
         if self.page.complete&&(self.page.truncated||self.page.next_cursor.is_some()||self.page.remaining_nodes!=Some(0)||self.page.remaining_edges!=Some(0)){return Err("invalid_completion");}
         if self.page.next_cursor.as_ref().is_some_and(|s|!bounded(s,MAX_CURSOR_BYTES))||(!self.page.complete&&!self.page.truncated&&self.page.next_cursor.is_none()){return Err("invalid_progress");}
         if self.operation!=MapOperation::Overview&&self.root.is_none(){return Err("missing_selected_root");}
@@ -252,6 +256,10 @@ impl MapResult {
         if preview&&(self.coverage.indexed_files.is_some()||self.coverage.parse_failed_files.is_some()||self.coverage.dependencies!=DependencyCoverage::Indexing||self.selection.is_some()){return Err("preview_evidence_forbidden");}
         let mut ids=std::collections::BTreeSet::new();
         for node in &self.nodes {
+            if node.resource_id.as_ref().is_some_and(|s|!canonical_resource(s))||node.file_resource_id.as_ref().is_some_and(|s|!canonical_resource(s)||!s.starts_with("file:"))||node.symbol_kind.as_ref().is_some_and(|s|!bounded(s,64))||node.qualified_name.as_ref().is_some_and(|s|!bounded(s,1024)){return Err("invalid_symbol_metadata");}
+            if node.kind!=NodeKind::Symbol&&(node.symbol_kind.is_some()||node.qualified_name.is_some()||node.file_resource_id.is_some()){return Err("invalid_symbol_metadata");}
+            if node.resource_id.as_ref().is_some_and(|s|node.kind==NodeKind::File&&!s.starts_with("file:")||!matches!(node.kind,NodeKind::File|NodeKind::Symbol)){return Err("invalid_symbol_metadata");}
+            if node.kind==NodeKind::Symbol&&(preview||node.resource_id.as_ref().is_none_or(|s|!s.starts_with("decl:"))||node.symbol_kind.is_none()||node.file_resource_id.is_none()){return Err("invalid_symbol_metadata");}
             if !bounded(&node.id,MAX_ID_BYTES)||!bounded(&node.label,MAX_LABEL_BYTES)||!ids.insert(node.id.clone())||node.languages.len()>8||node.languages.iter().any(|l|!bounded(&l.language,32)){return Err("invalid_map_node");}
             let mut languages=std::collections::BTreeSet::new();let mut count=0u64;for language in &node.languages{if !languages.insert(&language.language)||language.count>JS_INTEGER{return Err("invalid_language_count");}count=count.checked_add(language.count).ok_or("invalid_language_count")?;}if count>node.source_files||node.source_files>JS_INTEGER||node.asset_files>JS_INTEGER{return Err("invalid_language_count");}
         }
@@ -262,7 +270,7 @@ impl MapResult {
             if edge.relation==RelationKind::Containment {if edge.state!=RelationState::Structure||edge.selection_id.is_some(){return Err("invalid_containment");}}
             else if preview||edge.state==RelationState::Structure||edge.selection_id.as_ref().is_none_or(|s|!bounded(s,MAX_ID_BYTES)){return Err("missing_guarded_selection");}
         }
-        if let Some(selection)=&self.selection {if !ids.contains(&selection.visual_id)||!canonical_resource(&selection.resource_id)||!selection.resource_id.starts_with("file:")||!matches!(&self.authority,MapAuthority::Published{receipt,..}if receipt==&selection.receipt){return Err("invalid_selection_binding");}}
+        if let Some(selection)=&self.selection {if !ids.contains(&selection.visual_id)||!canonical_resource(&selection.resource_id)||!matches!(&self.authority,MapAuthority::Published{receipt,..}if receipt==&selection.receipt){return Err("invalid_selection_binding");}}
         if let Some(MapRoot::Resource{receipt,..})=&request.root{if self.selection.as_ref().is_none_or(|s|&s.receipt!=receipt||Some(&s.visual_id)!=self.root.as_ref()){return Err("selected_root_changed");}}
         let bytes=serde_json::to_vec(self).map_err(|_|"invalid_map_result")?.len();if bytes>request.limits.bytes{return Err("budget_exceeded");}if self.cost.serialized_bytes!=bytes{return Err("invalid_measured_size");}Ok(())
     }

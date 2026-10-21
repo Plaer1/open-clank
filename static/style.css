@@ -44393,3 +44393,13 @@ body.theme-clanker-light [data-settings-panel="added-models"] > .provider-contro
   .code-map-footer { display:none; }
 }
 @media(prefers-reduced-motion:reduce) { .code-map-workbench * { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
+
+/* Code Graph uses the shared applet menu; only presentation stays in chrome. */
+.code-map-alpha { flex:none; font-weight:600; }
+.code-map-header { flex-wrap:wrap; }
+.code-map-primary-tools label { display:flex; align-items:center; gap:8px; }
+.code-map-status { flex-wrap:wrap; overflow-wrap:anywhere; }
+.code-map-diagnostics { max-height:35vh; overflow:auto; flex:none; }
+.code-map-diagnostics pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.code-map-list [role="treeitem"] { text-align:start; width:100%; overflow:hidden; text-overflow:ellipsis; }
+.code-map-evidence .code-workbench-panels { min-height:0; }

@@ -32,6 +32,10 @@ def _invalidate_caches():
 
 DEFAULT_SETTINGS = {
     "code_index_max_threads": 2,
+    "code_index_max_files": 10000,
+    "code_index_max_source_bytes": 64 * 1024 * 1024,
+    "code_index_max_file_bytes": 512 * 1024,
+    "code_index_max_generation_bytes": 2 * 1024 * 1024 * 1024,
     "code_index_settings_revision": 0,  # internal monotonic revision, not client writable
     "agent_settings": {"compaction": {"auto": True, "prune": True, "tail_turns": 2, "preserve_recent_tokens": None, "reserved": 20000, "max_context": None}, "checkpoint": {"reserved": 13000, "max_writer_failures": 3, "fork": False, "push_caps": {}}},
     # Agent email safety: when True, the MCP send_email / reply_to_email

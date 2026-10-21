@@ -1,8 +1,6 @@
-name: Beta release macOS build
+name: Beta 2 macOS release build
 
 on:
-  push:
-    branches: [codex/beta1-macos-release-build-20261006]
   workflow_dispatch:
     inputs:
       emoji_release_tag:
@@ -15,12 +13,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: beta-macos-release-build-${{ github.ref }}
+  group: beta2-macos-release-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   macos:
-    if: github.ref == 'refs/heads/codex/beta1-macos-release-build-20261006'
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/tags/v1.0.3-beta.2'
     runs-on: macos-15
     timeout-minutes: 180
     defaults:
@@ -96,7 +94,7 @@ jobs:
           python3 -B - <<'PYTHON'
           import hashlib, json, os
           from pathlib import Path
-          paths = ["dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg", "dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256", "dist/macos-provenance/build-provenance.json", "dist/macos-provenance/package-manifest.json"]
+          paths = ["dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg", "dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256", "dist/macos-provenance/build-provenance.json", "dist/macos-provenance/package-manifest.json"]
           entries = []
           for name in paths:
               path = Path(name)
@@ -111,8 +109,8 @@ jobs:
         with:
           name: Open-Clank-macos-arm64-build-unqualified
           path: |
-            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg
-            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256
+            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
+            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
             dist/macos-provenance/build-provenance.json
             dist/macos-provenance/package-manifest.json
             dist/macos-provenance/build-identity.json
@@ -133,14 +131,14 @@ jobs:
       - name: Qualify actual mounted and relocated package
         run: |
           set -euo pipefail
-          python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
+          python3 -B scripts/qualify_macos_package.py --dmg dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg --output dist/macos-qualification --emoji-pack "$QUALIFICATION_EMOJI_PACK"
           # AppKit GUI Quit and Screen Recording permission journeys require separate native manual evidence.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Open-Clank-macos-arm64
           path: |
-            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg
-            dist/macos-arm64/Open-Clank-1.0.2-macos-arm64.dmg.sha256
+            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg
+            dist/macos-arm64/Open-Clank-1.0.3-macos-arm64.dmg.sha256
             dist/macos-provenance/*.json
             dist/macos-qualification/receipt.json
           if-no-files-found: error

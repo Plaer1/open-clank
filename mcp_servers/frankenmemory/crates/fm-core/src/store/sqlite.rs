@@ -25,6 +25,7 @@ pub struct SqliteStore {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) code_query_audit: std::sync::Arc<super::code_partitioned::AuditMemo>,
     pub(crate) code_visual_cache: super::code_visual::SummaryCache,
+    pub(crate) index_progress: Mutex<BTreeMap<(String,String,String),serde_json::Value>>,
     pub(crate) index_scheduler: std::sync::Arc<crate::code_index_scheduler::IndexScheduler>,
     embedding_dim: usize,
     capabilities: StoreCapabilities,
@@ -334,6 +335,34 @@ impl Drop for MemoryLease<'_> {
 }
 
 impl SqliteStore {
+    // Presentation telemetry only: bounded, process-local and exact-run keyed.
+    // Durable schema, source snapshots, publication and cancellation authority
+    // remain in code_index_runs. A process restart has no invented phase.
+    pub(crate) fn record_index_progress(&self,scope:&crate::graph::GraphScope,checkout:&str,run:&str,phase:&str,completed:Option<usize>,total:Option<usize>,unit:&str){
+        if [scope.owner.as_str(),scope.workspace_id.as_str(),checkout,run].iter().any(|v|v.len()>4096){return;}
+        let key=(scope.owner.clone(),scope.workspace_id.clone(),checkout.to_owned());
+        let mut rows=self.index_progress.lock().unwrap_or_else(|p|p.into_inner());
+        if !rows.contains_key(&key)&&rows.len()>=64 {if let Some(old)=rows.keys().next().cloned(){rows.remove(&old);}}
+        rows.insert(key,serde_json::json!({"run_id":run,"phase":phase,"phase_completed":completed,"phase_total":total,"phase_unit":unit,"phase_observed_at":chrono::Utc::now().to_rfc3339()}));
+    }
+    pub(crate) fn set_index_progress(&self,scope:&crate::graph::GraphScope,checkout:&str,run:&str,phase:&str,completed:Option<usize>,total:Option<usize>,unit:&str)->Result<(),String>{
+        if !matches!(phase,"inventory"|"verification"|"extraction"|"dependency_resolution"|"visual_summary"|"sealing"|"publication")||completed.zip(total).is_some_and(|(a,b)|a>b){return Err("invalid index progress".into());}
+        let files=matches!(phase,"extraction"|"verification");
+        let changed={let conn=self.conn.lock().unwrap();conn.execute("UPDATE code_index_runs SET heartbeat_at=?1,completed_files=COALESCE(?2,completed_files),total_files=COALESCE(?3,total_files) WHERE owner=?4 AND workspace_id=?5 AND codebase=?6 AND run_id=?7 AND status='running'",
+            params![chrono::Utc::now().to_rfc3339(),if files{completed.map(|n|n as i64)}else{None},if files{total.map(|n|n as i64)}else{None},scope.owner,scope.workspace_id,checkout,run]).map_err(|e|e.to_string())?};
+        if changed!=1{return Err("superseded_or_cancelled".into());}
+        self.record_index_progress(scope,checkout,run,phase,completed,total,unit);Ok(())
+    }
+    pub(crate) fn lifecycle_progress(&self,scope:&crate::graph::GraphScope,checkout:&str,mut value:serde_json::Value)->serde_json::Value{
+        let run=value.get("run_id").and_then(|v|v.as_str()).unwrap_or("").to_owned();
+        let lifecycle=value.get("lifecycle").and_then(|v|v.as_str()).unwrap_or("").to_owned();
+        if lifecycle=="ready"{value["progress"]["phase"]=serde_json::json!("ready");return value;}
+        if !matches!(lifecycle.as_str(),"building"|"running"|"failed"|"cancelled"){return value;}
+        let rows=self.index_progress.lock().unwrap_or_else(|p|p.into_inner());
+        if let Some(row)=rows.get(&(scope.owner.clone(),scope.workspace_id.clone(),checkout.to_owned())).filter(|r|r["run_id"].as_str()==Some(run.as_str())){
+            for key in ["phase","phase_completed","phase_total","phase_unit","phase_observed_at"]{value["progress"][key]=row[key].clone();}
+        }value
+    }
     pub fn index_scheduler(&self)->std::sync::Arc<crate::code_index_scheduler::IndexScheduler>{self.index_scheduler.clone()}
     pub fn new(path: &str, embedding_dim: usize) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
@@ -346,6 +375,7 @@ impl SqliteStore {
         let store = Self {
             conn: Mutex::new(conn),
             code_query_audit: Default::default(),
+            index_progress: Default::default(),
             code_visual_cache: Default::default(),
             index_scheduler: Default::default(),
             embedding_dim,
@@ -424,6 +454,7 @@ impl SqliteStore {
         let store = Self {
             conn: Mutex::new(conn),
             code_query_audit: Default::default(),
+            index_progress: Default::default(),
             code_visual_cache: Default::default(),
             index_scheduler: Default::default(),
             embedding_dim,

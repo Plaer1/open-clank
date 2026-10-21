@@ -33,6 +33,22 @@ pub(super) fn store_error(error: CodeEvidenceError) -> QueryError {
     failure(&code, &error.message)
 }
 impl SqliteStore {
+    /// Optional current selection-policy fence for the existing owned read
+    /// lane. Source-content scans call this at their boundaries, not per file.
+    pub fn code_policy_fence(&self,scope:&GraphScope,binding:&WorkspaceBinding,expected:Option<&QueryReceipt>)->Result<String,QueryError>{
+        let before=self.code_read_fence(scope,binding,expected)?;
+        let identity=crate::code::directory_identity(&binding.root).map_err(|_|failure("denied","Code directory unavailable"))?;
+        let scan=crate::code::scan_codebase_pinned(&binding.root,&identity).map_err(|_|failure("unavailable","Current code selection policy unavailable"))?;
+        let digest=scan.policy.digest();
+        if let Some(receipt)=expected {
+            let conn=self.conn.lock().unwrap();
+            let snapshot:Option<String>=conn.query_row("SELECT CASE WHEN length(CAST(source_snapshot AS BLOB))<=65536 THEN source_snapshot END FROM code_index_runs WHERE owner=?1 AND workspace_id=?2 AND codebase=?3 AND run_id=?4 AND status IN('ready','verified')",rusqlite::params![scope.owner,scope.workspace_id,receipt.evidence.checkout_id,receipt.evidence.head_generation],|r|r.get(0)).map_err(|_|failure("reindex_required","Code policy snapshot unavailable"))?;
+            let snapshot:crate::code::CodeSourceSnapshot=serde_json::from_str(&snapshot.ok_or_else(||failure("reindex_required","Code policy snapshot unavailable"))?).map_err(|_|failure("invalid_evidence","Invalid code policy snapshot"))?;
+            if snapshot.selection_policy_digest!=digest{return Err(failure("reindex_required","Current selection policy requires index refresh"));}
+        }
+        if before!=self.code_read_fence(scope,binding,expected)?{return Err(failure("stale_cursor","Code selection authority changed"));}
+        Ok(blake3::hash(&serde_json::to_vec(&(before,digest)).map_err(|_|failure("unavailable","Policy fence unavailable"))?).to_hex().to_string())
+    }
     /// Private raw-read fence, including the deliberately missing-head state.
     /// No admission, registration or other row is created by this read.
     pub fn code_read_fence(
@@ -161,7 +177,7 @@ impl SqliteStore {
             return Err(failure("denied", "Code directory changed"));
         }
         Ok(blake3::hash(
-            &serde_json::to_vec(&(binding, &identity, epochs, rows))
+            &serde_json::to_vec(&(binding, &identity, epochs, rows, crate::code::producer_fingerprint()))
                 .map_err(|_| failure("unavailable", "Code fence serialization unavailable"))?,
         )
         .to_hex()

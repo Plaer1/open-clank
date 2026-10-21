@@ -69,10 +69,12 @@ def _known_nested(value, fields: set[str]):
 def _edge(edge: dict, fields: set[str]) -> dict:
     if not isinstance(edge, dict):
         raise CodeGraphProjectionError("Invalid code evidence edge", code="invalid_evidence")
-    keys = {"from", "to", "occurrence_id", "resolution_state"} | (fields & {"source", "witnesses"})
+    keys = {"from", "to", "occurrence_id", "relation_kind", "resolution_state"} | (fields & {"source", "witnesses"})
     if (any(not isinstance(edge.get(key), str) for key in ("from", "to", "occurrence_id", "resolution_state"))
             or any(not CANONICAL_ID.fullmatch(edge[key]) for key in ("from", "to", "occurrence_id"))
             or not edge["occurrence_id"].startswith("occ:")
+            or not isinstance(edge.get("relation_kind"), str)
+            or edge["relation_kind"] not in {"call", "import", "value_reference", "type_reference", "inherits", "implements", "render", "route", "overrides"}
             or ("witnesses" in edge and (not isinstance(edge["witnesses"], list) or any(not isinstance(row, dict) for row in edge["witnesses"])))):
         raise CodeGraphProjectionError("Invalid code evidence edge identity", code="invalid_evidence")
     return {key: _known_nested(value, fields) for key, value in edge.items() if key in keys}
@@ -137,7 +139,8 @@ def project_code_graph(result: dict, *, query: dict, caller_budget: dict) -> dic
     hits = []
     for hit in public.get("hits", []):
         raw = (isinstance(hit, dict) and isinstance(hit.get("id"), str) and hit["id"].startswith("raw:")
-               and hit.get("kind") == "raw_window" and result.get("operation") in {"read", "search"})
+               and (hit.get("kind") == "raw_window" and result.get("operation") in {"read", "search"}
+                    or hit.get("kind") == "raw_file_match" and result.get("operation") == "search" and query.get("channels") == ["raw"] and query.get("read") is None))
         if not isinstance(hit, dict) or not isinstance(hit.get("kind"), str) or not isinstance(hit.get("id"), str) or (not raw and not CANONICAL_ID.fullmatch(hit["id"])):
             raise CodeGraphProjectionError("Invalid canonical code identity", code="invalid_evidence")
         allowed = IDENTITY_FIELDS | (fields - {"witnesses"}) | ({"raw_source"} if "excerpt" in fields else set())

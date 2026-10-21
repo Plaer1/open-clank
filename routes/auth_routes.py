@@ -34,6 +34,7 @@ from src.settings import (
 )
 from src.openclank.code_index_settings import (
     REVISION_KEY as CODE_INDEX_REVISION_KEY,
+    MANAGED_KEYS as CODE_INDEX_MANAGED_KEYS,
     prepare_settings as prepare_code_index_settings,
     readback as code_index_settings_readback,
 )
@@ -4184,7 +4185,7 @@ def setup_auth_routes(
                 result = current
         result["code_index_scheduler"] = await code_index_settings_readback(
             getattr(request.app.state, "memory_provider", None), current,
-            apply="code_index_max_threads" in global_update,
+            apply=any(key in global_update for key in CODE_INDEX_MANAGED_KEYS),
         )
         return result if user and auth_manager.is_admin(user) else scrub_settings(result)
 

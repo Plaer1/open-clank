@@ -47,9 +47,9 @@ def admit(args):
         raise RuntimeError('Preserve existing artifact/receipt paths')
     api = 'repos/' + repo
     run = fetch(f'{api}/actions/runs/{args.run_id}')
-    if (run['status'], run['conclusion'], run['head_sha'], run['head_branch'], run['path'], run['event']) != (
-            'completed', 'success', args.source, 'codex/beta1-release-build-20261006',
-            '.github/workflows/beta-release-build.yml', 'push'):
+    if (run['status'], run['conclusion'], run['head_sha'], run['path'], run['event']) != (
+            'completed', 'success', args.source,
+            '.github/workflows/beta-release-build.yml', 'workflow_dispatch') or run['head_branch'] not in ('main', 'v1.0.3-beta.2'):
         raise RuntimeError('Require successful exact-source Windows build run')
     if run['repository']['full_name'] != repo or run['head_repository']['full_name'] != repo:
         raise RuntimeError('Foreign run repository refused')

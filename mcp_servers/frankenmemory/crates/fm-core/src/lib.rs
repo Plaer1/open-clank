@@ -1,6 +1,7 @@
 pub mod code;
 pub mod code_metrics;
 pub mod code_index_scheduler;
+pub mod code_index_limits;
 pub mod code_evidence;
 pub mod code_query;
 pub mod code_visual;

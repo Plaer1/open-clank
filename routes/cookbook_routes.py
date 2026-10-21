@@ -638,12 +638,11 @@ def setup_cookbook_routes(
         return load_stored_hf_token(state_path=_cookbook_state_path)
 
     def _normalize_minimax_m3_vllm_cmd(cmd: str) -> str:
-        """Patch MiniMax M3 vLLM launches into the known-good local form.
+        """Apply MiniMax M3 runtime flags without replacing the selected model.
 
-        The browser form can be stale or omit advanced-only fields. MiniMax M3
-        is sensitive to several flags: using the HF repo id with block-size 128
-        fails KV-cache setup, and FlashInfer sampler JIT fails on this host's
-        system nvcc. Normalize server-side before writing the tmux runner.
+        The browser form can be stale or omit advanced-only fields. Retain the
+        explicit path or repo ID: vLLM resolves repo IDs on the execution target
+        using that target's Hugging Face configuration, including for SSH runs.
         """
         cmd_lower = (cmd or "").lower()
         if not cmd or "vllm serve" not in cmd_lower or "minimax" not in cmd_lower or "m3" not in cmd_lower:
@@ -666,14 +665,6 @@ def setup_cookbook_routes(
             return cmd
 
         repo_id = "cyankiwi/MiniMax-M3-AWQ-INT4"
-        snapshot = (
-            "/home/pewds/.cache/huggingface/hub/"
-            "models--cyankiwi--MiniMax-M3-AWQ-INT4/"
-            "snapshots/4082acbbec1236d21828d55b6bb0fe02ade4ab5b"
-        )
-        if body[serve_i + 1] == repo_id:
-            body[serve_i + 1] = snapshot
-
         def add_env(key: str, value: str) -> None:
             if not any(p.startswith(f"{key}=") for p in env_parts):
                 env_parts.append(f"{key}={value}")

@@ -1,4 +1,5 @@
 //! App-only visual projection. No admission/index/source read API lives here.
+#[path="code_visual_semantic.rs"] mod semantic;
 #[cfg(test)]
 #[path="code_visual_tests.rs"]
 mod tests;
@@ -155,7 +156,7 @@ fn append_link(links:&mut BTreeMap<(usize,usize,u8,u8),u64>,from:usize,to:usize,
  append_link_count(links,from,to,kind,state,1,work)
 }
 fn append_link_count(links:&mut BTreeMap<(usize,usize,u8,u8),u64>,from:usize,to:usize,kind:&str,state:&str,count:u64,work:&mut Work)->Result<(),QueryError>{
- if count==0{return Err(fail("invalid_evidence"));}work.charge(usize::try_from(count).map_err(|_|fail("budget_exceeded"))?)?;let kind=match kind{"call"=>1,"import_reference"=>2,"value_reference"|"type_reference"=>return Ok(()),_=>return Err(fail("invalid_evidence"))};
+ if count==0{return Err(fail("invalid_evidence"));}work.charge(usize::try_from(count).map_err(|_|fail("budget_exceeded"))?)?;let kind=match kind{"call"=>1,"import_reference"=>2,"value_reference"=>3,"type_reference"=>4,"inherits"=>5,"implements"=>6,"jsx_render"|"render"=>7,"fastapi_route_registration"|"route"=>8,"overrides"=>9,_=>return Err(fail("invalid_evidence"))};
  let state=match state{"exact"=>1,"inferred"=>2,_=>return Ok(())};
  let key=(from,to,kind,state);if !links.contains_key(&key)&&links.len()>=SUMMARY_RELATIONS{return Err(fail("budget_exceeded"));}
  let value=links.entry(key).or_default();*value=value.checked_add(count).ok_or_else(||fail("budget_exceeded"))?;Ok(())
@@ -166,7 +167,7 @@ fn sql_guard(db:&rusqlite::Connection,work:&Work,cancel:&Arc<AtomicBool>){let ca
 // occurrence identity before its typed metadata: a file-only automatic join can
 // otherwise multiply work by all occurrences in the same file. These are the
 // original membership/state predicates; no dependency is inferred or omitted.
-const PARTITION_HAS_UNRESOLVED_SQL:&str="SELECT EXISTS(SELECT 1 FROM edges e CROSS JOIN nodes o INDEXED BY sqlite_autoindex_nodes_1 ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' CROSS JOIN occurrence_kinds k ON k.occurrence=o.row WHERE k.kind IN(1,2) AND (e.state NOT IN('exact','inferred') OR e.target IS NULL))";
+const PARTITION_HAS_UNRESOLVED_SQL:&str="SELECT EXISTS(SELECT 1 FROM edges e CROSS JOIN nodes o INDEXED BY sqlite_autoindex_nodes_1 ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' CROSS JOIN occurrence_kinds k ON k.occurrence=o.row WHERE k.kind BETWEEN 1 AND 9 AND (e.state NOT IN('exact','inferred') OR e.target IS NULL))";
 // Keep files outermost: scanning every occurrence node is unnecessary here.
 const PARTITION_FILE_MAPPING_SQL:&str="SELECT f.id,CASE WHEN length(CAST(f.path AS BLOB))<=4096 THEN f.path END,CASE WHEN length(CAST(n.id AS BLOB))<=256 THEN n.id END FROM files f CROSS JOIN nodes n INDEXED BY nodes_file ON n.file=f.id AND n.kind='file' ORDER BY f.id LIMIT 10001";
 
@@ -182,7 +183,7 @@ fn project_partition_file(summary:&mut Summary,by_path:&BTreeMap<String,usize>,b
 impl Generation {
  pub(crate) fn map_typed_metadata(&self)->Result<(),QueryError>{
   let version:Option<String>=self.db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=16 THEN value END FROM meta WHERE key='visual_kind_version'",[],|r|r.get(0)).optional().map_err(bad)?.flatten();
-  if version.as_deref()!=Some("1"){return Err(fail("reindex_required"));}
+  if version.as_deref()!=Some("2"){return Err(fail("reindex_required"));}
   let count:i64=self.db.query_row("SELECT count(*) FROM occurrence_kinds",[],|r|r.get(0)).map_err(bad)?;
   let expected:Option<String>=self.db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=32 THEN value END FROM meta WHERE key='visual_occurrences'",[],|r|r.get(0)).optional().map_err(bad)?.flatten();
   if count<0||count as usize>4_000_000||Some(count.to_string())!=expected{return Err(fail("reindex_required"));}Ok(())
@@ -191,7 +192,7 @@ impl Generation {
   use super::code_partitioned::{VisualSummaryMetadata,VISUAL_LINKS,visual_summary_hash,visual_file_hash,visual_link_hash,visual_finish_hash};
   let raw:Option<String>=self.db.query_row("SELECT CASE WHEN octet_length(value)<=4096 THEN value END FROM meta WHERE key='visual_summary'",[],|r|r.get(0)).optional().map_err(bad)?.flatten();
   let metadata:VisualSummaryMetadata=serde_json::from_str(&raw.ok_or_else(||fail("reindex_required"))?).map_err(bad)?;
-  if metadata.version!=1||metadata.files>10_000||metadata.links>VISUAL_LINKS||metadata.resolved_rows>4_000_000||metadata.digest.len()!=64||!metadata.digest.bytes().all(|b|b.is_ascii_hexdigit()){return Err(fail("reindex_required"));}
+  if metadata.version!=2||metadata.files>10_000||metadata.links>VISUAL_LINKS||metadata.resolved_rows>4_000_000||metadata.digest.len()!=64||!metadata.digest.bytes().all(|b|b.is_ascii_hexdigit()){return Err(fail("reindex_required"));}
   let overflow=metadata.status=="budget_exceeded";if !overflow&&metadata.status!="complete"{return Err(fail("reindex_required"));}if overflow&&(metadata.links!=0||metadata.resolved_rows!=0){return Err(fail("reindex_required"));}
   let mut summary=structure(rows,work)?;summary.coverage=coverage(rows,true);work.charge(1)?;if metadata.partial{summary.coverage.dependencies=DependencyCoverage::Partial;}
   let mut hash=visual_summary_hash();let mut files=0usize;
@@ -209,7 +210,7 @@ impl Generation {
    resolved_rows=resolved_rows.checked_add(count).ok_or_else(||fail("budget_exceeded"))?;if resolved_rows>4_000_000{return Err(fail("budget_exceeded"));}
    visual_link_hash(&mut hash,src,dst,kind,state,count);
    let from=*by_file.get(&src).ok_or_else(||fail("invalid_evidence"))?;let to=*by_file.get(&dst).ok_or_else(||fail("invalid_evidence"))?;
-   let kind=match kind{1=>"call",2=>"import_reference",_=>return Err(fail("invalid_evidence"))};let state=match state{1=>"exact",2=>"inferred",_=>return Err(fail("invalid_evidence"))};append_link_count(&mut links,from,to,kind,state,count,work)?;
+   let kind=match kind{1=>"call",2=>"import_reference",3=>"value_reference",4=>"type_reference",5=>"inherits",6=>"implements",7=>"render",8=>"route",9=>"overrides",_=>return Err(fail("invalid_evidence"))};let state=match state{1=>"exact",2=>"inferred",_=>return Err(fail("invalid_evidence"))};append_link_count(&mut links,from,to,kind,state,count,work)?;
    if links.len().saturating_mul(256)+summary.charged>SUMMARY_ENTRY_BYTES{return Err(fail("budget_exceeded"));}
   }
   visual_finish_hash(&mut hash,&metadata.status,metadata.partial);if count_rows!=metadata.links||resolved_rows!=metadata.resolved_rows||hash.finalize().to_hex().as_str()!=metadata.digest{return Err(fail("reindex_required"));}
@@ -237,18 +238,18 @@ fn small_summary(conn:&rusqlite::Connection,scope:&GraphScope,context:&Context,w
  for row in stmt.query_map(params![scope.owner,scope.workspace_id,context.checkout],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?))).map_err(bad)? {
   work.charge(1)?;let(path,id)=row.map_err(bad)?;let id=limited(id,64)?;bytes+=id.len()+128;if bytes>SUMMARY_ENTRY_BYTES{return Err(fail("budget_exceeded"));}declarations.insert(id,*by_path.get(&limited(path,4096)?).ok_or_else(||fail("invalid_evidence"))?);
  }
- let mut stmt=conn.prepare("SELECT CASE WHEN length(CAST(f.rel_path AS BLOB))<=4096 THEN f.rel_path END,CASE WHEN length(CAST(json_extract(o.value,'$.id') AS BLOB))=64 THEN json_extract(o.value,'$.id') END,CASE WHEN length(CAST(json_extract(o.value,'$.kind') AS BLOB))<=32 THEN json_extract(o.value,'$.kind') END FROM code_file_evidence f,json_each(f.payload_json,'$.occurrences') o WHERE f.owner=?1 AND f.workspace_id=?2 AND f.checkout_id=?3").map_err(bad)?;
+ let mut stmt=conn.prepare("SELECT CASE WHEN length(CAST(f.rel_path AS BLOB))<=4096 THEN f.rel_path END,CASE WHEN length(CAST(json_extract(o.value,'$.id') AS BLOB))=64 THEN json_extract(o.value,'$.id') END,CASE WHEN length(CAST((CASE WHEN json_extract(o.value,'$.syntax_kind') IN('inherits','implements','jsx_render','fastapi_route_registration','overrides') THEN json_extract(o.value,'$.syntax_kind') ELSE json_extract(o.value,'$.kind') END) AS BLOB))<=32 THEN CASE WHEN json_extract(o.value,'$.syntax_kind') IN('inherits','implements','jsx_render','fastapi_route_registration','overrides') THEN json_extract(o.value,'$.syntax_kind') ELSE json_extract(o.value,'$.kind') END END FROM code_file_evidence f,json_each(f.payload_json,'$.occurrences') o WHERE f.owner=?1 AND f.workspace_id=?2 AND f.checkout_id=?3").map_err(bad)?;
  for row in stmt.query_map(params![scope.owner,scope.workspace_id,context.checkout],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(bad)? {
   work.charge(1)?;let(path,id,kind)=row.map_err(bad)?;let id=limited(id,64)?;let kind=limited(kind,32)?;bytes+=id.len()+kind.len()+128;if bytes>SUMMARY_ENTRY_BYTES{return Err(fail("budget_exceeded"));}kinds.insert(id,(*by_path.get(&limited(path,4096)?).ok_or_else(||fail("invalid_evidence"))?,kind));
  }
  let mut links=BTreeMap::new();let mut stmt=conn.prepare(SMALL_RESOLUTION_METADATA_SQL).map_err(bad)?;
  for row in stmt.query_map(params![scope.owner,scope.workspace_id,context.checkout],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(bad)?{
-  work.charge(1)?;let(occurrence,target,state)=row.map_err(bad)?;let occurrence=limited(occurrence,64)?;let(from,kind)=kinds.get(&occurrence).ok_or_else(||fail("invalid_evidence"))?;if matches!(kind.as_str(),"value_reference"|"type_reference"){continue;}if !matches!(kind.as_str(),"call"|"import_reference"){return Err(fail("invalid_evidence"));}let state=limited(state,32)?;if !matches!(state.as_str(),"exact"|"inferred"){summary.coverage.dependencies=DependencyCoverage::Partial;continue;}let target=target.ok_or_else(||fail("invalid_evidence"))?;let to=*declarations.get(&target).ok_or_else(||fail("invalid_evidence"))?;append_link(&mut links,*from,to,kind,&state,work)?;
+  work.charge(1)?;let(occurrence,target,state)=row.map_err(bad)?;let occurrence=limited(occurrence,64)?;let(from,kind)=kinds.get(&occurrence).ok_or_else(||fail("invalid_evidence"))?;if !matches!(kind.as_str(),"call"|"import_reference"|"value_reference"|"type_reference"|"inherits"|"implements"|"jsx_render"|"fastapi_route_registration"|"overrides"){return Err(fail("invalid_evidence"));}let state=limited(state,32)?;if !matches!(state.as_str(),"exact"|"inferred"){summary.coverage.dependencies=DependencyCoverage::Partial;continue;}let target=target.ok_or_else(||fail("invalid_evidence"))?;let to=*declarations.get(&target).ok_or_else(||fail("invalid_evidence"))?;append_link(&mut links,*from,to,kind,&state,work)?;
   if links.len().saturating_mul(256)+bytes+summary.charged>2*SUMMARY_ENTRY_BYTES{return Err(fail("budget_exceeded"));}
  }
  summary.links=links.into_iter().map(|((from,to,kind,state),count)|Link{from,to,kind,state,count}).collect();summary.charge()?;Ok(summary)
 }
-fn kind(value:u8)->RelationKind{match value{0=>RelationKind::Containment,1=>RelationKind::Call,_=>RelationKind::Import}}
+fn kind(value:u8)->RelationKind{if value==0{RelationKind::Containment}else{semantic::relation(value as i64).expect("validated typed relation")}}
 fn state(value:u8)->RelationState{match value{0=>RelationState::Structure,1=>RelationState::Exact,_=>RelationState::Inferred}}
 fn namespace(scope:&GraphScope,binding:&WorkspaceBinding,authority:&MapAuthority)->Result<String,QueryError>{
  let raw=serde_json::to_vec(&(scope,binding.owner_subject_id.as_str(),binding.location_id.as_str(),binding.workspace_revision,binding.policy_generation,authority)).map_err(bad)?;
@@ -266,7 +267,7 @@ fn untoken(value:&str,tag:&str,count:usize,ns:&str,secret:&[u8;32])->Result<Vec<
 }
 fn node(summary:&Summary,index:usize,ns:&str,secret:&[u8;32])->MapNode{
  let n=&summary.nodes[index];let mut label=if n.path.is_empty(){"Repository".into()}else{std::path::Path::new(&n.path).file_name().unwrap().to_string_lossy().into_owned()};while label.len()>MAX_LABEL_BYTES{label.pop();}
- MapNode{id:token("vn1",&[index],ns,secret),label,kind:n.kind,parent:n.parent.map(|p|token("vn1",&[p],ns,secret)),source_files:n.source,asset_files:n.assets,languages:n.languages.iter().map(|(language,count)|LanguageCount{language:language.clone(),count:*count}).collect()}
+ MapNode{id:token("vn1",&[index],ns,secret),label,kind:n.kind,parent:n.parent.map(|p|token("vn1",&[p],ns,secret)),source_files:n.source,asset_files:n.assets,languages:n.languages.iter().map(|(language,count)|LanguageCount{language:language.clone(),count:*count}).collect(),resource_id:n.resource.clone(),symbol_kind:None,qualified_name:None,file_resource_id:None}
 }
 fn contains(summary:&Summary,parent:usize,child:usize)->bool{
  let p=&summary.nodes[parent].path;let c=&summary.nodes[child].path;parent==child||p.is_empty()||c.strip_prefix(p).is_some_and(|rest|rest.starts_with('/'))
@@ -299,7 +300,7 @@ fn rendered_page(summary:&Summary,authority:&MapAuthority,request:&MapRequest,ro
   if unit<vertices.len(){let i=vertices[unit];if included.insert(i){result.nodes.push(node(summary,i,ns,secret));}if request.relations.contains(&RelationKind::Containment){result.edges.push(MapEdge{id:token("ve1",&[root,i,0,0],ns,secret),from:token("vn1",&[root],ns,secret),to:token("vn1",&[i],ns,secret),relation:RelationKind::Containment,state:RelationState::Structure,count:1,selection_id:None});}}
   else{let((a,b,k,s),count)=all_links[unit-vertices.len()];for i in [a,b]{if included.insert(i){result.nodes.push(node(summary,i,ns,secret));}}result.edges.push(MapEdge{id:token("ve1",&[a,b,k as usize,s as usize],ns,secret),from:token("vn1",&[a],ns,secret),to:token("vn1",&[b],ns,secret),relation:kind(k),state:state(s),count,selection_id:(k!=0).then(||token("vs1",&[a,b,k as usize,s as usize],ns,secret))});}
   // Reserve worst-case small cursor/cost counters before allocating final JSON.
-  let fits=result.nodes.len()<=request.limits.nodes&&result.nodes.iter().filter(|n|n.kind!=NodeKind::File).count()<=request.limits.groups&&result.edges.len()<=request.limits.edges&&serde_json::to_vec(&result).map_err(bad)?.len()+1024<=request.limits.bytes;
+  let fits=result.nodes.len()<=request.limits.nodes&&result.nodes.iter().filter(|n|!matches!(n.kind,NodeKind::File|NodeKind::Symbol)).count()<=request.limits.groups&&result.edges.len()<=request.limits.edges&&serde_json::to_vec(&result).map_err(bad)?.len()+1024<=request.limits.bytes;
   if !fits{result.nodes.truncate(old_nodes);result.edges.truncate(old_edges);included=old_included;if unit==offset{return Err(fail("budget_exceeded"));}break;}
   next=unit+1;
  }
@@ -324,7 +325,7 @@ impl SqliteStore {
   let receipt=context.receipt.as_ref().ok_or_else(||fail("published_required"))?;let source=context.source.as_ref().unwrap();
   self.map_policy(binding,context,crate::code_metrics::Stage::MapPolicyEntry)?;
   let generation={let conn=self.conn.lock().unwrap();if is_partitioned(&conn,scope,&receipt.evidence).map_err(bad)?{Some(Generation::open_memoized(&conn,scope,&receipt.evidence,&source.evidence_cache_identity,&self.code_query_audit).map_err(bad)?)}else{None}};
-  if let Some(g)=&generation{g.verify_stamp(&source.evidence_cache_identity).map_err(bad)?;let version:Option<String>=g.db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=16 THEN value END FROM meta WHERE key='visual_kind_version'",[],|r|r.get(0)).optional().map_err(bad)?.flatten();if version.as_deref()!=Some("1"){return Err(fail("reindex_required"));}}
+  if let Some(g)=&generation{g.verify_stamp(&source.evidence_cache_identity).map_err(bad)?;let version:Option<String>=g.db.query_row("SELECT CASE WHEN length(CAST(value AS BLOB))<=16 THEN value END FROM meta WHERE key='visual_kind_version'",[],|r|r.get(0)).optional().map_err(bad)?.flatten();if version.as_deref()!=Some("2"){return Err(fail("reindex_required"));}}
   let parts=vec![scope.owner.clone(),scope.workspace_id.clone(),context.checkout.clone(),binding.owner_subject_id.clone(),binding.location_id.clone(),scope.include_global.to_string(),binding.workspace_revision.to_string(),binding.policy_generation.to_string(),context.registration.clone(),receipt.evidence.head_generation.clone(),source.evidence_cache_identity.clone(),receipt.evidence.config_fingerprint.clone(),source.selection_policy_digest.clone(),SCHEMA.into()];
   if parts.iter().any(|s|s.len()>4096){return Err(fail("budget_exceeded"));}let key=serde_json::to_string(&parts).map_err(bad)?;if key.len()>16*1024{return Err(fail("budget_exceeded"));}
   if let Some(entry)=self.code_visual_cache.get(&key){return Ok((entry,generation,true));}
@@ -369,33 +370,51 @@ impl SqliteStore {
   let source=context.source.as_ref().unwrap();let receipt=context.receipt.as_ref().unwrap();
   let authority=MapAuthority::Published{receipt:receipt.clone(),selection_policy_digest:source.selection_policy_digest.clone(),summary_id:blake3::hash(entry.key.as_bytes()).to_hex().to_string()};
   if request.expected_authority.as_ref().is_some_and(|a|a!=&authority){return Err(fail("stale_cursor"));}
-  let ns=namespace(scope,binding,&authority)?;let root=match &request.root{None=>0,Some(MapRoot::Visual{id})=>untoken(id,"vn1",1,&ns,secret)?[0],Some(MapRoot::Resource{resource_id,..})=>self.resource_root(scope,&context,&entry.summary,generation.as_ref(),resource_id,cancel,&mut work)?};
-  let mut result=rendered_page(&entry.summary,&authority,request,root,&ns,secret,&mut work)?;
+  let ns=namespace(scope,binding,&authority)?;
+  let semantic_resource=match &request.root {
+   Some(MapRoot::Visual{id}) if id.starts_with("vd2:")=>Some(semantic::decode(id,"vd2",&ns,secret)?),
+   Some(MapRoot::Resource{resource_id,..}) if resource_id.starts_with("decl:")=>Some(resource_id.clone()),_=>None};
+  let root=if semantic_resource.is_some(){0}else{match &request.root{None=>0,Some(MapRoot::Visual{id})=>untoken(id,"vn1",1,&ns,secret)?[0],Some(MapRoot::Resource{resource_id,..})=>self.resource_root(scope,&context,&entry.summary,generation.as_ref(),resource_id,cancel,&mut work)?}};
+  let semantic_resource=semantic_resource.or_else(||(request.operation==MapOperation::Children).then(||entry.summary.nodes.get(root).filter(|n|n.kind==NodeKind::File).and_then(|n|n.resource.clone())).flatten());
+  let mut result=if let Some(resource)=&semantic_resource {
+   let conn=self.conn.lock().unwrap();let db=generation.as_ref().map(|g|&*g.db).unwrap_or(&conn);sql_guard(db,&work,cancel);
+   let result=semantic::page(db,generation.is_some(),scope,&context,&entry.summary,&authority,request,resource,&ns,secret,&mut work);
+   db.progress_handler(0,None::<fn()->bool>);result?
+  }else{rendered_page(&entry.summary,&authority,request,root,&ns,secret,&mut work)?};
   #[cfg(test)] visual_test_pause();
-  if request.operation!=MapOperation::Overview{if let Some(resource_id)=entry.summary.nodes.get(root).and_then(|n|n.resource.clone()){result.selection=Some(SelectionBinding{visual_id:result.root.clone().unwrap(),resource_id,receipt:receipt.clone()});}}
+  if semantic_resource.is_none()&&request.operation!=MapOperation::Overview{if let Some(resource_id)=entry.summary.nodes.get(root).and_then(|n|n.resource.clone()){result.selection=Some(SelectionBinding{visual_id:result.root.clone().unwrap(),resource_id,receipt:receipt.clone()});}}
   if let Some(g)=&generation{g.verify_stamp(&source.evidence_cache_identity).map_err(bad)?;}self.map_final(scope,binding,&context,cancel)?;if let Some(g)=&generation{g.verify_stamp(&source.evidence_cache_identity).map_err(bad)?;}
   result.cost.inspected_entries=request.limits.work-work.remaining;result.cost.sql_vm_steps=work.vm.load(Ordering::Relaxed);result.cost.summary_cache_hit=hit;result.cost.retained_summary_bytes=entry.summary.charged;result.cost.metadata_bytes=context.metadata_bytes.get();result.cost.policy_bytes_read=context.policy_bytes.get();finalize_map(&mut result,request)?;Ok(result)
  }
 }
 
 fn occurrence_rows(db:&rusqlite::Connection,partition:bool,scope:&GraphScope,context:&Context,from:&str,to:&str,kind:u8,state:u8,offset:usize,limit:usize,work:&mut Work)->Result<Vec<MapOccurrenceRef>,QueryError>{
- let wanted_kind=if kind==1{"call"}else{"import_reference"};let wanted_state=if state==1{"exact"}else{"inferred"};
+ let wanted_kind=match kind{1=>"call",2=>"import_reference",3=>"value_reference",4=>"type_reference",5=>"inherits",6=>"implements",7=>"jsx_render",8=>"fastapi_route_registration",9=>"overrides",_=>return Err(fail("invalid_evidence"))};let wanted_state=if state==1{"exact"}else{"inferred"};
  // No GROUP BY or unbounded sort. Partition occurrence primary key provides
  // stable witness order; filters are exact bound metadata, never browser paths.
  let partition_sql="SELECT CASE WHEN length(CAST(e.occurrence AS BLOB))=64 THEN e.occurrence END,CASE WHEN length(CAST(e.caller AS BLOB))=64 THEN e.caller END,CASE WHEN length(CAST(e.target AS BLOB))=64 THEN e.target END FROM edges e JOIN nodes o ON o.id='occ:'||e.occurrence AND o.file=e.file AND o.kind='occurrence' JOIN occurrence_kinds k ON k.occurrence=o.row JOIN files f ON f.id=e.file JOIN nodes n ON n.id='decl:'||e.target JOIN files t ON t.id=n.file WHERE k.kind=?1 AND e.state=?2 AND (?3='' OR f.path=?3 OR substr(f.path,1,length(?3)+1)=?3||'/') AND (?4='' OR t.path=?4 OR substr(t.path,1,length(?4)+1)=?4||'/') ORDER BY e.occurrence LIMIT ?5 OFFSET ?6";
- let small_sql="SELECT CASE WHEN length(CAST(r.occurrence_id AS BLOB))=64 THEN r.occurrence_id END,CASE WHEN length(CAST(json_extract(r.payload_json,'$.caller_id') AS BLOB))=64 THEN json_extract(r.payload_json,'$.caller_id') END,CASE WHEN length(CAST(json_extract(r.payload_json,'$.target_id') AS BLOB))=64 THEN json_extract(r.payload_json,'$.target_id') END FROM code_resolutions r JOIN code_file_evidence f ON f.owner=r.owner AND f.workspace_id=r.workspace_id AND f.checkout_id=r.checkout_id AND f.rel_path=r.rel_path JOIN json_each(f.payload_json,'$.occurrences') o ON json_extract(o.value,'$.id')=r.occurrence_id JOIN code_file_evidence t ON t.owner=r.owner AND t.workspace_id=r.workspace_id AND t.checkout_id=r.checkout_id JOIN json_each(t.payload_json,'$.declarations') d ON json_extract(d.value,'$.id')=json_extract(r.payload_json,'$.target_id') WHERE json_extract(o.value,'$.kind')=?1 AND json_extract(r.payload_json,'$.state')=?2 AND (?3='' OR f.rel_path=?3 OR substr(f.rel_path,1,length(?3)+1)=?3||'/') AND (?4='' OR t.rel_path=?4 OR substr(t.rel_path,1,length(?4)+1)=?4||'/') AND r.owner=?7 AND r.workspace_id=?8 AND r.checkout_id=?9 ORDER BY r.occurrence_id LIMIT ?5 OFFSET ?6";
+ let small_sql="SELECT CASE WHEN length(CAST(r.occurrence_id AS BLOB))=64 THEN r.occurrence_id END,CASE WHEN length(CAST(json_extract(r.payload_json,'$.caller_id') AS BLOB))=64 THEN json_extract(r.payload_json,'$.caller_id') END,CASE WHEN length(CAST(json_extract(r.payload_json,'$.target_id') AS BLOB))=64 THEN json_extract(r.payload_json,'$.target_id') END FROM code_resolutions r JOIN code_file_evidence f ON f.owner=r.owner AND f.workspace_id=r.workspace_id AND f.checkout_id=r.checkout_id AND f.rel_path=r.rel_path JOIN json_each(f.payload_json,'$.occurrences') o ON json_extract(o.value,'$.id')=r.occurrence_id JOIN code_file_evidence t ON t.owner=r.owner AND t.workspace_id=r.workspace_id AND t.checkout_id=r.checkout_id JOIN json_each(t.payload_json,'$.declarations') d ON json_extract(d.value,'$.id')=json_extract(r.payload_json,'$.target_id') WHERE CASE WHEN json_extract(o.value,'$.syntax_kind') IN('inherits','implements','jsx_render','fastapi_route_registration','overrides') THEN json_extract(o.value,'$.syntax_kind') ELSE json_extract(o.value,'$.kind') END=?1 AND json_extract(r.payload_json,'$.state')=?2 AND (?3='' OR f.rel_path=?3 OR substr(f.rel_path,1,length(?3)+1)=?3||'/') AND (?4='' OR t.rel_path=?4 OR substr(t.rel_path,1,length(?4)+1)=?4||'/') AND r.owner=?7 AND r.workspace_id=?8 AND r.checkout_id=?9 ORDER BY r.occurrence_id LIMIT ?5 OFFSET ?6";
  let mut stmt=db.prepare(if partition{partition_sql}else{small_sql}).map_err(bad)?;
  let mapper=|r:&rusqlite::Row<'_>|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?));
  let rows=if partition{stmt.query_map(params![kind,wanted_state,from,to,limit,offset],mapper)}else{stmt.query_map(params![wanted_kind,wanted_state,from,to,limit,offset,scope.owner,scope.workspace_id,context.checkout],mapper)}.map_err(bad)?;
- let mut references=Vec::new();for row in rows{work.charge(1)?;let(occurrence,caller,target)=row.map_err(bad)?;references.push(MapOccurrenceRef{occurrence_id:format!("occ:{}",limited(occurrence,64)?),caller_id:caller.map(|v|format!("decl:{v}")),target_id:format!("decl:{}",limited(target,64)?),relation:if kind==1{RelationKind::Call}else{RelationKind::Import},state:if state==1{RelationState::Exact}else{RelationState::Inferred}});}Ok(references)
+ let mut references=Vec::new();for row in rows{work.charge(1)?;let(occurrence,caller,target)=row.map_err(bad)?;references.push(MapOccurrenceRef{occurrence_id:format!("occ:{}",limited(occurrence,64)?),caller_id:caller.map(|v|format!("decl:{v}")),target_id:format!("decl:{}",limited(target,64)?),relation:semantic::relation(kind as i64)?,state:if state==1{RelationState::Exact}else{RelationState::Inferred}});}Ok(references)
 }
 impl SqliteStore {
  fn code_map_selection(&self,scope:&GraphScope,binding:&WorkspaceBinding,request:&MapSelectionRequest,cancel:&Arc<AtomicBool>,secret:&[u8;32])->Result<MapSelectionResult,QueryError>{
   request.validate().map_err(|_|fail("invalid"))?;check(cancel)?;let context=self.map_context(scope,binding)?;let receipt=context.receipt.as_ref().ok_or_else(||fail("published_required"))?;let source=context.source.as_ref().unwrap();let mut work=Work::new(MAX_WORK,cancel);
   let(entry,generation,hit)=self.published_entry(scope,binding,&context,cancel,&mut work)?;
   let authority=MapAuthority::Published{receipt:receipt.clone(),selection_policy_digest:source.selection_policy_digest.clone(),summary_id:blake3::hash(entry.key.as_bytes()).to_hex().to_string()};
-  if authority!=request.authority{return Err(fail("stale_cursor"));}let ns=namespace(scope,binding,&authority)?;let selection=untoken(&request.selection_id,"vs1",4,&ns,secret)?;let(a,b,k,s)=(selection[0],selection[1],selection[2],selection[3]);
-  if a>=entry.summary.nodes.len()||b>=entry.summary.nodes.len()||!matches!(k,1|2)||!matches!(s,1|2){return Err(fail("invalid"));}
+  if authority!=request.authority{return Err(fail("stale_cursor"));}let ns=namespace(scope,binding,&authority)?;
+  if request.selection_id.starts_with("vw2:") {
+   if request.cursor.is_some(){return Err(fail("stale_cursor"));}
+   let resource=semantic::decode(&request.selection_id,"vw2",&ns,secret)?;
+   let reference={let conn=self.conn.lock().unwrap();let db=generation.as_ref().map(|g|&*g.db).unwrap_or(&conn);sql_guard(db,&work,cancel);let result=semantic::witness(db,generation.is_some(),scope,&context,&resource,&mut work);db.progress_handler(0,None::<fn()->bool>);result?};
+   self.map_final(scope,binding,&context,cancel)?;if let Some(g)=&generation{g.verify_stamp(&source.evidence_cache_identity).map_err(bad)?;}
+   let mut result=MapSelectionResult{schema:SCHEMA.into(),authority,selection_id:request.selection_id.clone(),receipt:receipt.clone(),references:vec![reference],remaining:0,complete:true,next_cursor:None,cost:MapCost{inspected_entries:MAX_WORK-work.remaining,sql_vm_steps:work.vm.load(Ordering::Relaxed),metadata_bytes:context.metadata_bytes.get(),policy_bytes_read:context.policy_bytes.get(),summary_cache_hit:hit,retained_summary_bytes:entry.summary.charged,..Default::default()}};
+   for _ in 0..8{let size=serde_json::to_vec(&result).map_err(bad)?.len();if size==result.cost.serialized_bytes{result.validate(request).map_err(result_error)?;return Ok(result);}result.cost.serialized_bytes=size;}return Err(fail("invalid_evidence"));
+  }
+  let selection=untoken(&request.selection_id,"vs1",4,&ns,secret)?;let(a,b,k,s)=(selection[0],selection[1],selection[2],selection[3]);
+  if a>=entry.summary.nodes.len()||b>=entry.summary.nodes.len()||!(1..=9).contains(&k)||!matches!(s,1|2){return Err(fail("invalid"));}
   let mut total=0u64;for link in &entry.summary.links{work.charge(1)?;if link.kind==k as u8&&link.state==s as u8&&contains(&entry.summary,a,link.from)&&contains(&entry.summary,b,link.to){total=total.checked_add(link.count).ok_or_else(||fail("budget_exceeded"))?;}}
   if total==0{return Err(fail("unavailable"));}
   let selection_ns=format!("{ns}:{}:{}",request.selection_id,request.max_refs);let offset=match &request.cursor{None=>0,Some(c)=>untoken(c,"vsc1",1,&selection_ns,secret)?[0]};if offset as u64>=total{return Err(fail("stale_cursor"));}

@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 
 SCHEMA = "open-clank.code-query/v1"
 OPERATIONS = frozenset("capabilities search overview catalog facets outline inspect neighbors path impact read pipeline".split())
-CHANNELS = frozenset("exact identifier fuzzy structural raw semantic".split())
+CHANNELS = frozenset("exact identifier fuzzy lexical structural raw semantic".split())
 FIELDS = frozenset("label source signature documentation occurrences resolution properties excerpt witnesses".split())
 MAX_QUERY_WORK = 4_000_000
 DEFAULT_BUDGETS = dict(rows=50, bytes=65536, tokens=8192, hops=4, work=MAX_QUERY_WORK)
@@ -42,18 +42,18 @@ def search_code_schema():
     """One leaf schema source used by native function and lifetools registry."""
     filter_schema = {"type": "object", "additionalProperties": False, "properties": {
         "rel_path": {"type": "string", "maxLength": 4096}, "path_prefix": {"type": "string", "maxLength": 4096},
-        **{key: {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 128}} for key in ("kinds", "languages", "states")}}}
+        **{key: {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 128}} for key in ("kinds", "symbol_kinds", "languages", "states")}}}
     receipt = {"type": "object", "additionalProperties": False, "required": ["workspace_id", "registration_id", "source_snapshot_id", "checkout_id", "head_generation", "admission_epoch", "policy_generation", "config_fingerprint"],
         "properties": {**{k: {"type": "string", "minLength": 1, "maxLength": 256} for k in ("workspace_id", "registration_id", "source_snapshot_id", "checkout_id", "head_generation", "config_fingerprint")},
             "admission_epoch": {"type": "integer", "minimum": 0}, "policy_generation": {"type": "integer", "minimum": 0}}}
-    return {"type": "function", "function": {"name": "search_code", "description": "Read-only authorized active Workspace code: exact/identifier search, conservative typo suggestions, catalog/outline, witnessed neighbors, incoming impact and directed paths. Explicit relative read windows use the existing Files owner. Metadata is not current source proof; semantic capability is unavailable. No owner/root/index/erase inputs.",
+    return {"type": "function", "function": {"name": "search_code", "description": "Read-only authorized active Workspace code: exact/identifier/metadata lexical search, conservative typo suggestions, catalog/outline, witnessed neighbors, incoming impact and directed paths. Explicit relative read windows use the existing Files owner. Search with channels=[raw] and no read descriptor performs bounded case-sensitive literal Source contents search of current admitted catalog file bytes; new paths require ordinary index refresh, partial results are explicit, no body FTS or source-proof claim. Metadata is not current source proof; semantic capability is unavailable. No owner/root/index/erase inputs.",
         "parameters": {"type": "object", "additionalProperties": False, "properties": {
             "schema": {"type": "string", "enum": [SCHEMA]},
             "operation": {"type": "string", "enum": sorted(OPERATIONS - {"pipeline"}), "default": "search"},
             "query": {"type": "string", "maxLength": 1024},
             "seed_ids": {"type": "array", "maxItems": 200, "items": {"type": "string", "pattern": "^(file|decl|occ):[0-9a-fA-F]{1,128}$"}},
             "target_id": {"type": "string", "pattern": "^(file|decl|occ):[0-9a-fA-F]{1,128}$"},
-            "channels": {"type": "array", "maxItems": 6, "uniqueItems": True, "items": {"type": "string", "enum": sorted(CHANNELS)}},
+            "channels": {"type": "array", "maxItems": 7, "uniqueItems": True, "items": {"type": "string", "enum": sorted(CHANNELS)}},
             "fields": {"type": "array", "maxItems": 9, "uniqueItems": True, "items": {"type": "string", "enum": sorted(FIELDS)}},
             "filter": filter_schema, "direction": {"type": "string", "enum": ["incoming", "outgoing", "both"]},
             "budgets": {"type": "object", "additionalProperties": False, "properties": {k: {"type": "integer", "minimum": bounds[0], "maximum": bounds[1]} for k, bounds in LIMITS.items()}},
@@ -137,12 +137,12 @@ def validate_query(query):
 
 
 def _filter(value):
-    if not isinstance(value, dict) or set(value) - {"rel_path", "path_prefix", "kinds", "languages", "states"}:
+    if not isinstance(value, dict) or set(value) - {"rel_path", "path_prefix", "kinds", "symbol_kinds", "languages", "states"}:
         raise CodeQueryError("invalid", "Invalid code filter")
     for key in ("rel_path", "path_prefix"):
         if value.get(key) is not None:
             _relative(value[key])
-    for key in ("kinds", "languages", "states"):
+    for key in ("kinds", "symbol_kinds", "languages", "states"):
         if key in value and (not isinstance(value[key], list) or len(value[key]) > 64 or any(not isinstance(v, str) or len(v.encode()) > 128 for v in value[key])):
             raise CodeQueryError("invalid", "Invalid code filter values")
 
@@ -231,36 +231,44 @@ async def query_code(*, repository, provider, auth_manager, owner, workspace_id,
         invoke = getattr(provider, "code_query", None)
         if not callable(invoke):
             raise CodeQueryError("unavailable", "Code query provider unavailable")
-        native_query = copy.deepcopy(q)
-        wants_read = q["operation"] == "read" or ("raw" in q["channels"] and q.get("read") is not None)
-        if wants_read:
-            if q.get("read") is None:
-                raise CodeQueryError("invalid", "A bounded relative source window is required")
-            f = q["filter"]
-            rel = q["read"]["rel_path"]
-            if (f.get("rel_path") is not None and f["rel_path"] != rel) or (f.get("path_prefix") is not None and not rel.startswith(f["path_prefix"])):
-                raise CodeQueryError("missing", "Source window is outside selected filters")
-            if any(f.get(key) for key in ("kinds", "languages", "states")):
-                raise CodeQueryError("unsupported", "Raw windows support relative path filters only")
-            # Metadata locator only, internal fields are projected away below.
-            native_query.update(operation="catalog", fields=["label", "properties"], cursor=None)
-            native_query["filter"]["rel_path"] = q["read"]["rel_path"]
-        result = await invoke(binding=native_binding, query=native_query)
-        if not isinstance(result, dict):
-            raise CodeQueryError("unavailable", "Invalid code query response")
-        failure = result.get("error")
-        if failure is not None:
-            code = failure.get("code", "unavailable") if isinstance(failure, dict) else "unavailable"
-            if not (wants_read and code == "missing"):
-                raise CodeQueryError(code, "Code query unavailable")
-        if result.get("schema") != SCHEMA:
-            failure = result.get("error") or {}
-            if wants_read and failure.get("code") == "missing":
-                result = error_result(q, "missing", "No canonical code index; independent authorized raw window")
-            else:
-                raise CodeQueryError(failure.get("code", "unavailable"), "Code query unavailable")
-        if wants_read:
-            result = await _read_source(result=result, query=q, binding=native_binding, repository=repository, provider=provider, auth_manager=auth_manager, session=session, purpose=purpose)
+        wants_contents = q["operation"] == "search" and "raw" in q["channels"] and q.get("read") is None
+        if wants_contents:
+            from src.openclank.code_source_search import search_contents
+            result = error_result(q, "unavailable", "Source contents unavailable")
+            await search_contents(result=result, query=q, binding=native_binding,
+                repository=repository, provider=provider, auth_manager=auth_manager,
+                session=session, purpose=purpose)
+        else:
+            native_query = copy.deepcopy(q)
+            wants_read = q["operation"] == "read" or ("raw" in q["channels"] and q.get("read") is not None)
+            if wants_read:
+                if q.get("read") is None:
+                    raise CodeQueryError("invalid", "A bounded relative source window is required")
+                f = q["filter"]
+                rel = q["read"]["rel_path"]
+                if (f.get("rel_path") is not None and f["rel_path"] != rel) or (f.get("path_prefix") is not None and not rel.startswith(f["path_prefix"])):
+                    raise CodeQueryError("missing", "Source window is outside selected filters")
+                if any(f.get(key) for key in ("kinds", "symbol_kinds", "languages", "states")):
+                    raise CodeQueryError("unsupported", "Raw windows support relative path filters only")
+                # Metadata locator only, internal fields are projected away below.
+                native_query.update(operation="catalog", fields=["label", "properties"], cursor=None)
+                native_query["filter"]["rel_path"] = q["read"]["rel_path"]
+            result = await invoke(binding=native_binding, query=native_query)
+            if not isinstance(result, dict):
+                raise CodeQueryError("unavailable", "Invalid code query response")
+            failure = result.get("error")
+            if failure is not None:
+                code = failure.get("code", "unavailable") if isinstance(failure, dict) else "unavailable"
+                if not (wants_read and code == "missing"):
+                    raise CodeQueryError(code, "Code query unavailable")
+            if result.get("schema") != SCHEMA:
+                failure = result.get("error") or {}
+                if wants_read and failure.get("code") == "missing":
+                    result = error_result(q, "missing", "No canonical code index; independent authorized raw window")
+                else:
+                    raise CodeQueryError(failure.get("code", "unavailable"), "Code query unavailable")
+            if wants_read:
+                result = await _read_source(result=result, query=q, binding=native_binding, repository=repository, provider=provider, auth_manager=auth_manager, session=session, purpose=purpose)
     except asyncio.CancelledError:
         raise
     except CodeQueryError as exc:

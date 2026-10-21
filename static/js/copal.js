@@ -1,4 +1,6 @@
+import { normalizeGraphSettings, resolveGraphSettings, mountGraphSettings } from './copal/graphSettings.js';
 import { recordPresentation, acknowledgeVisible, achievementOwner } from './achievementProducer.js';
+import { mountWorkbenchMenu } from './workbenchMenu.js';
 import { uiIcon } from './uiIcons.js';
 import { openCalendar } from './calendar.js';
 import { formatBaseCell, makeDefaultBase, serializeBase, updateViewSort, canonicalSourceProperty, setFrontmatterProperty, flattenFilterToLines, hasNestedFilterGroups, parseFilterLines, removeBaseView, reorderBaseView, makeViewFromTemplate, VIEW_TYPES, parseDataviewQuery, reorderBaseColumn } from './copal/bases.js';
@@ -64,13 +66,19 @@ let wikiFeature = null;
 let wikiWorkspace = null;
 let graphRenderTicket = 0;
 let codeGraphController = null;
+let codeGraphMenuGeneration=0;
+let copalInitialization=null;
 let codeGraphSelection = null; // Canonical code workspace, never Copal's document workspace.
 let codeGraphContextEpoch = 0;
 let editorNavigationTicket = 0;
-function invalidateCodeGraphContext() {
+function invalidateCodeGraphContext(event) {
+  // Chat workspace display is independent from the explicitly bound Code folder.
+  if(event?.type==='workspace-change')return;
+  const account=event?.detail?.accountId;
+  if(typeof account==='string'&&account&&account===state.accountId)return;
   codeGraphContextEpoch += 1; codeGraphController?.dispose();
   const visible = state.windows.get('graph')?.window.body?.querySelector('[data-code-graph]');
-  if (visible) { visible.replaceChildren(h('p',{role:'status',text:'Code context changed — reopen Code Graph.'})); }
+  if (visible) { visible.replaceChildren(h('p',{role:'status',text:'Account authorization changed. Choose an authorized code folder after signing in.'})); state.windows.get('graph')?.window.setStatus('Code context unavailable'); }
 }
 for (const eventName of ['openclank:auth-context-changed','workspace-change']) window.addEventListener(eventName, invalidateCodeGraphContext);
 document.addEventListener('openclank:auth-context-changed', invalidateCodeGraphContext);
@@ -332,7 +340,7 @@ async function loadDocuments(render = true) {
       }
       activateView(active, {navigation:false});
     }
-    for (const [view, context] of state.windows) context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : ['achievements', 'treehouse'].includes(view) ? '' : `${state.docs.length} documents`);
+    for (const [view, context] of state.windows) if(view!=='graph'||getGraphView().mode!=='code')context.window.setStatus(planning.migrationRequired ? 'Saved Timeline notes need explicit workspace migration; source preserved.' : ['achievements', 'treehouse'].includes(view) ? '' : `${state.docs.length} documents`);
     reconcileCalendarProjection().catch(() => {});
   } catch (error) {
     if (!current()) return;
@@ -361,7 +369,15 @@ function markActive() {
 }
 
 async function open(view = 'notes', push = true) {
-  editorNavigationTicket += 1;
+  const navigationTicket=++editorNavigationTicket;
+  // Routes and applet actions may arrive before authenticated /status returns.
+  // Wait for the existing initializer; never invent an unscoped storage key.
+  if(!state.storageNamespace){
+    const pending=copalInitialization;
+    if(!pending)return;
+    await pending;
+    if(pending!==copalInitialization||navigationTicket!==editorNavigationTicket||!state.storageNamespace)return;
+  }
   if (view === 'calendar') {
     if (push || location.pathname.startsWith('/calendar')) {
       history.replaceState({}, '', '/calendar');
@@ -1135,6 +1151,24 @@ function getGraphView() {
   return graphView;
 }
 
+function readCodeSettings(workspaceId){
+  const key=graphStorageKey(state.accountId,'code:'+workspaceId);
+  try{return normalizeGraphState(JSON.parse(localStorage.getItem(key)||'{}')).settings;}catch{return normalizeGraphSettings();}
+}
+function writeCodeSettings(workspaceId,value){
+  const key=graphStorageKey(state.accountId,'code:'+workspaceId);if(!key||!workspaceId)return;
+  let saved={};try{saved=JSON.parse(localStorage.getItem(key)||'{}');}catch{}
+  localStorage.setItem(key,JSON.stringify({...normalizeGraphState(saved),settings:normalizeGraphSettings(value)}));
+}
+function showFamilyGraphSettings(){
+  const context=state.windows.get('graph');if(!context)return;
+  const view=getGraphView(),owner=state.accountId,key=graphScopeKey,mode=view.mode;
+  const panel=h('section',{class:'code-map-diagnostics','aria-label':'Graph settings'});context.window.body.append(panel);
+  let cleanup=()=>{};const close=()=>{cleanup();panel.remove();};
+  cleanup=mountGraphSettings(panel,{family:mode,mode:'common',read:()=>view.settings,write:value=>{if(owner!==state.accountId||key!==graphScopeKey)return;view.settings=value;persistGraphView(view);},isCurrent:()=>panel.isConnected&&owner===state.accountId&&key===graphScopeKey,onChange:()=>{close();if(mode==='structure')renderMind();else renderGraph();showFamilyGraphSettings();}});
+  panel.prepend(h('button',{class:'copal-btn',text:'Close settings',onclick:close}));
+}
+window.addEventListener('openclank:graph-settings',async()=>{const pending=copalInitialization;if(pending){await pending;if(pending!==copalInitialization)return;}const owner=state.accountId,epoch=state.contextEpoch;await open('graph');if(owner!==state.accountId||epoch!==state.contextEpoch)return;if(getGraphView().mode==='code')codeGraphController?.openSettings?.();else showFamilyGraphSettings();});
 function persistGraphView(view = getGraphView()) {
   if (view !== getGraphView() || !graphScopeKey) return;
   try {
@@ -1225,7 +1259,9 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
   let cameraStart = null;
   const cameraFacts = camera => ({ accepted:true, populatedView:nodes.length > 0, viewId:cameraViewId,
     scale:1000 / camera.w, panX:-camera.x * 1000 / camera.w, panY:-camera.y * 650 / camera.h });
-  const MIN_VIEW = 20, MAX_VIEW = 80000, MAX_MOUNTED = 300;
+  const graphSettings=resolveGraphSettings(view.settings),MAX_MOUNTED=view.mode==='galaxy'?graphSettings.galaxyItems:graphSettings.documentItems;
+  const MAX_EDGES=view.mode==='galaxy'?graphSettings.galaxyEdges:graphSettings.documentEdges;
+  const MIN_VIEW = 20, MAX_VIEW = 80000;
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const persist = () => {
     modeState.camera = { ...vb };
@@ -1360,13 +1396,16 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     svgEl.replaceChildren();
     edgeEls = [];
     nodeEls = [];
+    const drawnConnections=new Map();
     for (const edge of edges) {
+      if(edgeEls.length>=MAX_EDGES)break;
+      if((drawnConnections.get(edge.from)||0)>=graphSettings.documentConnections||(drawnConnections.get(edge.to)||0)>=graphSettings.documentConnections)continue;
       if (!mounted.has(edge.from) || !mounted.has(edge.to)) continue;
       const from = positions.get(edge.from); const to = positions.get(edge.to);
       if (!from || !to) continue;
       const line = svg('line', { x1: from.x, y1: from.y, x2: to.x, y2: to.y, class: `copal-graph-edge edge-${edge.type || 'link'}`, 'data-from': edge.from, 'data-to': edge.to });
       line.classList.toggle('edge-highlight', Boolean(selected) && (edge.from === selected || edge.to === selected));
-      edgeEls.push({ el: line, edge });
+      drawnConnections.set(edge.from,(drawnConnections.get(edge.from)||0)+1);drawnConnections.set(edge.to,(drawnConnections.get(edge.to)||0)+1);edgeEls.push({ el: line, edge });
       svgEl.append(line);
     }
     for (const node of nodes) {
@@ -1513,7 +1552,7 @@ function graphSvg(nodes, edges, onOpen, mode = getGraphView().mode, facets = nul
     pendingAchievementFacet = null;
     previousResultCount = visibleIds.size;
     const visibleEdges = edges.filter((edge) => visibleIds.has(edge.from) && visibleIds.has(edge.to)).length;
-    info.textContent = visibleIds.size ? `Graph showing ${visibleIds.size} nodes and ${visibleEdges} edges${visibleIds.size > MAX_MOUNTED ? ` · showing first ${MAX_MOUNTED}; search to navigate` : ''}` : 'No graph results. Reset filters or search again.';
+    info.textContent = visibleIds.size ? `Graph showing ${nodeEls.length} of ${visibleIds.size} matching items and ${edgeEls.length} of ${visibleEdges} matching edges · limits ${MAX_MOUNTED} items / ${MAX_EDGES} edges; search to navigate omitted items` : 'No graph results. Reset filters or search again.';
     if (facets?.incomplete) info.textContent += ` · Facets partial${facets.status ? ` (${facets.status})` : ''}`;
     updateInspector(graphState.selectedNodeId ? nodesById.get(graphState.selectedNodeId) : null);
     persist();
@@ -1634,9 +1673,10 @@ function renderGraph() {
   let mountedGraph = null;
   const isCurrent = () => ticket === graphRenderTicket && context?.window.body === body
     && body?.isConnected && context === state.windows.get('graph')
-    && (context?.window.visible !== false || context?.window.root?.classList?.contains('modal-minimized')) && sameSaveScope(scope, saveScope())
+    && (context?.window.visible !== false || context?.window.root?.classList?.contains('modal-minimized')) && (modeId==='code'?scope.accountId===state.accountId&&scope.epoch===state.contextEpoch:sameSaveScope(scope, saveScope()))
     && getGraphView().mode === modeId && (!mountedGraph || (mountedGraph.isConnected && !mountedGraph._copalDisposed));
   if (modeId === 'code') { renderCodeGraph({ body, isCurrent }); return; }
+  context?.window.setStatus(`${state.docs.length} documents`);
   // B2: respect dot-folder toggle from workspace settings
   let docs = visibleDocs();
   try {
@@ -1655,7 +1695,7 @@ function renderGraph() {
   const facetCatalog = view.mode === 'documents' ? makeGraphFacetCatalog() : null;
   // Mind is not offered as a Graph view. Both linked-document and
   // document-structure modes live here; Galaxy keeps its own projection.
-  const modeOptions = [h('option', { value:'documents', text:'Documents · links' }), h('option', { value:'structure', text:'Structure · headings and bullets' }), h('option', { value:'galaxy', text:'Galaxy · tracks and events' }), h('option', { value:'code', text:'Code · scoped evidence' })];
+  const modeOptions = [h('option', { value:'documents', text:'Documents · links' }), h('option', { value:'structure', text:'Structure · headings and bullets' }), h('option', { value:'galaxy', text:'Galaxy · tracks and events' }), h('option', { value:'code', text:'Code · scoped evidence (Alpha)' })];
   const mode = h('select', { 'aria-label':'Graph view', 'data-graph-mode':true }, modeOptions);
   mode.value = view.mode;
   mode.addEventListener('change', () => { view.mode = mode.value; persistGraphView(view); renderGraph(); updateRoute('graph', true); state.body.querySelector('[data-graph-mode]')?.focus(); });
@@ -1728,6 +1768,7 @@ export async function openCodeGraphBinding(binding,{isCurrent=()=>false,dirty=fa
 }
 
 function renderCodeGraph({ body, isCurrent }) {
+  codeGraphMenuGeneration++;const graphContext=state.windows.get('graph');if(graphContext)graphContext.search.hidden=true;
   const owner = state.accountId, epoch = state.contextEpoch, codeEpoch = codeGraphContextEpoch;
   if (codeGraphSelection?.owner !== owner) codeGraphSelection = { owner, workspaceId:'' };
   const selectedWorkspace = codeGraphSelection;
@@ -1735,7 +1776,7 @@ function renderCodeGraph({ body, isCurrent }) {
   const current = () => isCurrent() && epoch === state.contextEpoch && codeEpoch === codeGraphContextEpoch && owner === state.accountId
     && codeGraphSelection === selectedWorkspace && wrap.isConnected;
   const mode = h('select', { 'aria-label':'Graph view', 'data-graph-mode':true },
-    ...[['documents','Documents · links'],['structure','Structure · headings and bullets'],['galaxy','Galaxy · tracks and events'],['code','Code · scoped evidence']].map(([value,text]) => h('option',{value,text})));
+    ...[['documents','Documents · links'],['structure','Structure · headings and bullets'],['galaxy','Galaxy · tracks and events'],['code','Code · scoped evidence (Alpha)']].map(([value,text]) => h('option',{value,text})));
   mode.value = 'code';
   mode.onchange = () => { if (!current()) return; getGraphView().mode = mode.value; persistGraphView(); renderGraph(); updateRoute('graph', true); };
   const surface = h('div');
@@ -1749,8 +1790,10 @@ function renderCodeGraph({ body, isCurrent }) {
     if (typeof result.value !== 'boolean') throw new Error('Invalid preference');
     return result.value;
   };
-  const workbench = mountCodeGraphWorkbench({element:surface,isCurrent:current,workspaceId:selectedWorkspace.workspaceId,
+  const workbench = mountCodeGraphWorkbench({element:surface,isCurrent:current,onStatus:text=>{if(current())graphContext?.window.setStatus(text);},workspaceId:selectedWorkspace.workspaceId,
     workspaceLabel:selectedWorkspace.label || '',
+    readGraphSettings:()=>readCodeSettings(selectedWorkspace.workspaceId),
+    writeGraphSettings:value=>writeCodeSettings(selectedWorkspace.workspaceId,value),
     focusPath:selectedWorkspace.openRelative||'',savedSourceNotice:selectedWorkspace.savedSourceNotice===true,
     setWorkspace:(id,label)=>{if(current()){selectedWorkspace.workspaceId=id;selectedWorkspace.label=label;selectedWorkspace.openRelative='';selectedWorkspace.savedSourceNotice=false;}},
     subscribeIndex:(id,options)=>subscribeWorkspaceIndex(id,{...options,purpose:'app_folder',observe:true}),
@@ -1772,6 +1815,7 @@ function renderCodeGraph({ body, isCurrent }) {
       if(!response.ok&&!result?.error)throw new Error('Code map unavailable');
       return result;
     },
+    onRawOpen:async(destination,{isCurrent})=>{if(!isCurrent()||destination?.provider!=='host'||typeof destination.resource?.ref!=='string')return;await openResource(destination.resource.ref,{isCurrent});},
     onEvidenceAction:async(kind,selection)=>{
       const composer=window.chatModule;
       const draft=kind==='open'?null:composer?.captureCodeEvidenceDraft?.();
@@ -2121,14 +2165,16 @@ function renderMind() {
     return;
   }
   const entries = mindOutlineEntries(source);
-  const treeNodes = buildMindTree(entries);
+  const structureSettings=resolveGraphSettings(graphView.settings),allTreeNodes=buildMindTree(entries);let remaining=structureSettings.structureItems;
+  const boundedTree=(rows,depth=1)=>{const result=[];if(depth>structureSettings.structureDepth)return result;for(const node of rows){if(remaining<=0)break;remaining--;result.push({...node,children:boundedTree(node.children,depth+1)});}return result;};
+  const treeNodes=boundedTree(allTreeNodes);
   const mindEl = h('div', { class: 'copal-mind' });
 
   const familyMode = h('select', { class:'copal-mind-mode', 'aria-label':'Graph family mode', 'data-graph-mode':true },
     h('option', { value:'documents', text:'Documents · links' }),
     h('option', { value:'structure', text:'Structure · headings and bullets' }),
     h('option', { value:'galaxy', text:'Galaxy · tracks and events' }),
-    h('option', { value:'code', text:'Code · scoped evidence' }));
+    h('option', { value:'code', text:'Code · scoped evidence (Alpha)' }));
   familyMode.value = 'structure';
   familyMode.addEventListener('change', () => {
     const next = familyMode.value;
@@ -2162,6 +2208,7 @@ function renderMind() {
 
   // Tree
   const treePane = h('div', { class: 'copal-mind-tree' });
+  if(entries.length>structureSettings.structureItems||structureSettings.structureDepth<64)treePane.append(h('p',{role:'status',text:`Structure display is bounded to ${structureSettings.structureItems} items / ${structureSettings.structureDepth} levels. Source remains complete in Editor.`}));
   if (!treeNodes.length) {
     treePane.append(h('div', { class: 'copal-mind-empty-tree' }, h('p', { text: 'No headings or bullets found in this source.' }), h('button', { class:'copal-btn', text:'Open source', onclick:() => openDocument(doc.id, doc.kind === 'wiki' ? 'wiki' : 'notes') })));
   } else {
@@ -3085,7 +3132,7 @@ function buildDocumentFeature(view) { return createNotesFeature({
   loadDocuments,
   openDocument,
   persistActiveContext,
-  saveResource:saveResourceSnapshot,
+  saveResource:async(snapshot,options)=>{const receipt=await saveResourceSnapshot(snapshot,options);if(receipt?.snapshot?.envelope)window.dispatchEvent(new CustomEvent('openclank-files-resource-mutated',{detail:{action:'save',resource:options.resource,resourceRef:options.resource?.ref}}));return receipt;},
   uploadAttachment,
   commitAttachment,
   abortAttachment,
@@ -3327,6 +3374,7 @@ function ensureViewWindow(view) {
     icon: { notes:'code', wiki:'book', timeline:'timeline', graph:'graph', treehouse:'treehouse', achievements:'check', todo:'tasks' }[view] || 'document',
     subtitle:'Open Clank',
     navigationChrome:view !== 'achievements',
+    chatVisibleMaximize:view === 'graph',
     minWidth:view === 'timeline' ? 720 : 560,
     minHeight:420,
     sizeKey:copalStorageKey(`odysseus-copal-${view}-window-size`),
@@ -3370,6 +3418,8 @@ function ensureViewWindow(view) {
       h('button', { class:'copal-btn', icon:'search', title:'Quick switcher', 'aria-label':'Quick switcher', onclick:activate(() => featureFor(view)?.showChooser()) }),
       h('button', { class:'copal-btn', icon:'menu', title:'Editor commands', 'aria-label':'Editor commands', onclick:activate(() => featureFor(view)?.showCommands()) }),
     );
+  } else if (view==='graph') {
+    search.hidden=true;windowApi.actions.append(search);
   } else if (['achievements', 'treehouse'].includes(view)) {
     // Learning actions live inside TreeHouse; achievements update from events.
     // Keep shared navigation adapters available to other window consumers.
@@ -3381,6 +3431,23 @@ function ensureViewWindow(view) {
       h('button', { class:'copal-btn copal-header-secondary', icon:'upload', text:'Export', title:'Export for Obsidian', onclick:() => { window.location.href = `/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`; } }),
       h('button', { class:'copal-btn', icon:'refresh', title:`Refresh ${LABELS[view]}`, 'aria-label':`Refresh ${LABELS[view]}`, onclick:activate(() => loadDocuments()) }),
     );
+  }
+  if(view==='graph'){
+    const capture=()=>({account:state.accountId,epoch:state.contextEpoch,workspace:state.workspace,mode:getGraphView().mode,
+      generation:codeGraphMenuGeneration,code:getGraphView().mode==='code'?JSON.stringify(codeGraphController?.menuCapture?.()||null):null});
+    const isCurrent=c=>windowApi.root.isConnected&&c.account===state.accountId&&c.epoch===state.contextEpoch&&c.workspace===state.workspace&&c.mode===getGraphView().mode
+      &&(c.mode!=='code'||c.generation===codeGraphMenuGeneration&&codeGraphController?.menuScopeCurrent?.(JSON.parse(c.code)));
+    context.graphMenu=mountWorkbenchMenu({host:windowApi.root,container:windowApi.content,before:windowApi.body,id:modalId,kind:'graph',label:'Graph',surface:{capture,isCurrent,commands:c=>{
+      const family=['documents','structure','galaxy','code'].map(mode=>({id:'graph.family-'+mode,menu:'View',label:mode==='code'?'Code Graph (Alpha)':mode[0].toUpperCase()+mode.slice(1),checked:c.mode===mode,
+        run:()=>{getGraphView().mode=mode;persistGraphView();context.search.hidden=true;renderGraph();updateRoute('graph',true);}}));
+      if(c.mode==='code')return [...family,...(codeGraphController?.menuCommands?.(JSON.parse(c.code))||[])];
+      return [...family,
+        {id:'graph.document-import',menu:'File',label:'Import Obsidian vault…',run:activate(importVault)},
+        {id:'graph.document-export',menu:'File',label:'Export Obsidian vault…',run:()=>{window.location.href=`/api/copal/export/obsidian?workspace=${encodeURIComponent(state.workspace)}`;}},
+        {id:'graph.document-search',menu:'View',label:'Search documents…',run:()=>{context.search.hidden=false;context.search.focus();}},
+        {id:'graph.settings',menu:'View',label:'Graph settings…',run:activate(showFamilyGraphSettings)},
+        {id:'graph.document-refresh',menu:'Graph',label:'Refresh documents',run:activate(()=>loadDocuments())}];
+    }}});
   }
   return context;
 }
@@ -3571,9 +3638,15 @@ function suspendCopalScope() {
   graphView = null; graphScopeKey = null;
 }
 
-export async function init(apiBase = window.location.origin) {
+export function init(apiBase = window.location.origin) {
+  copalInitialization=initializeCopal(apiBase);
+  return copalInitialization;
+}
+
+async function initializeCopal(apiBase) {
   suspendCopalScope();
   const epoch = ++state.contextEpoch;
+  const initialNavigationTicket=editorNavigationTicket;
   // Context-menu object actions resolve against the same production command
   // owners as visible buttons and keyboard actions. The menu captures a
   // target before focus moves, then calls this owner directly.
@@ -3637,7 +3710,8 @@ export async function init(apiBase = window.location.origin) {
   }, { signal:state.navigationEvents.signal });
   {
     const view = _resolveEditorRoute();
-    if (view) { ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
+    // A route/action queued during scoped initialization owns the next open.
+    if (view && initialNavigationTicket===editorNavigationTicket) { ensureViewWindow(view).selected = new URLSearchParams(location.search).get('doc'); open(view, false); }
   }
 }
 

@@ -50,7 +50,8 @@ from typing import Any
 # v26 — explicit shared-storage availability and schema-only activation/retirement boundaries.
 # v27 — shared learning discovery, solo Records and per-window navigation labels.
 # v28 — editable shared/private course sources, explicit Save and metadata reindex.
-OFFICIAL_DOCS_SEED_VERSION = 28
+# v33 — current Beta 2 release/setup prose; historical media identities retained.
+OFFICIAL_DOCS_SEED_VERSION = 33
 
 # Top-level folder that holds every provisioned official page. Derived identity
 # (product/builtin markers) is the real recognition mechanism; this name is the

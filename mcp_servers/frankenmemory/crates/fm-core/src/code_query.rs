@@ -43,6 +43,7 @@ pub enum Channel {
     Exact,
     Identifier,
     Fuzzy,
+    Lexical,
     Structural,
     Raw,
     Semantic,
@@ -90,6 +91,7 @@ pub struct QueryFilter {
     pub rel_path: Option<String>,
     pub path_prefix: Option<String>,
     pub kinds: Vec<String>,
+    pub symbol_kinds: Vec<String>,
     pub languages: Vec<String>,
     pub states: Vec<String>,
 }
@@ -283,6 +285,7 @@ pub struct QueryEdge {
     pub from: String,
     pub to: String,
     pub occurrence_id: String,
+    pub relation_kind: String,
     pub resolution_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceLocator>,
@@ -385,7 +388,7 @@ pub fn validate_query(query: &CodeQuery) -> Result<(), QueryError> {
         || b.work > MAX_QUERY_WORK
         || query.query.as_ref().is_some_and(|s| s.len() > 1024)
         || query.seed_ids.len() > 200
-        || query.channels.len() > 6
+        || query.channels.len() > 7
         || query.fields.len() > 9
         || query.stages.len() > 8
         || query.cursor.as_ref().is_some_and(|s| s.len() > 4096)
@@ -459,7 +462,7 @@ pub fn validate_query(query: &CodeQuery) -> Result<(), QueryError> {
     Ok(())
 }
 fn validate_filter(filter: &QueryFilter) -> Result<(), QueryError> {
-    if [&filter.kinds, &filter.languages, &filter.states]
+    if [&filter.kinds, &filter.symbol_kinds, &filter.languages, &filter.states]
         .iter()
         .any(|values| values.len() > 64 || values.iter().any(|v| v.len() > 128))
     {
@@ -563,6 +566,9 @@ fn matches_filter(candidate: &Candidate, filter: &QueryFilter) -> bool {
             .as_ref()
             .is_none_or(|p| candidate.path.starts_with(p))
         && (filter.kinds.is_empty() || filter.kinds.contains(&candidate.hit.kind))
+        && (filter.symbol_kinds.is_empty() || candidate.hit.properties.as_ref()
+            .and_then(|p|p.get("declaration_kind")).and_then(|v|v.as_str())
+            .is_some_and(|kind|filter.symbol_kinds.iter().any(|wanted|wanted==kind)))
         && (filter.languages.is_empty() || filter.languages.contains(&candidate.language))
         && (filter.states.is_empty() || filter.states.contains(&candidate.state))
 }
@@ -980,6 +986,7 @@ pub fn run_query(
         Channel::Exact,
         Channel::Identifier,
         Channel::Fuzzy,
+        Channel::Lexical,
         Channel::Structural,
         Channel::Raw,
         Channel::Semantic,
@@ -1041,6 +1048,11 @@ pub fn run_query(
     prefilter.states.clear();
     let mut all = candidates(snapshot, &prefilter, &mut work)?;
     let mut edges = Vec::new();
+    let mut occurrence_kinds = BTreeMap::new();
+    for occurrence in snapshot.files.iter().flat_map(|file| &file.occurrences) {
+        work.tick(1)?;
+        occurrence_kinds.insert(occurrence.id.as_str(), crate::code_evidence::relation_name(occurrence));
+    }
     for resolution in &snapshot.resolutions {
         work.tick(1)?;
         let occ = format!("occ:{}", resolution.occurrence_id);
@@ -1066,7 +1078,8 @@ pub fn run_query(
                 edges.push(QueryEdge {
                     from,
                     to,
-                    occurrence_id: occ,
+                    occurrence_id: occ.clone(),
+                    relation_kind: occurrence_kinds.get(resolution.occurrence_id.as_str()).ok_or_else(|| error("invalid_evidence", "Missing typed occurrence"))?.to_string(),
                     resolution_state: serde_json::to_value(&resolution.state)
                         .unwrap()
                         .as_str()
@@ -1399,7 +1412,7 @@ pub fn run_query(
             && ((search_executed
                 && matches!(
                     lane.channel,
-                    Channel::Exact | Channel::Identifier | Channel::Fuzzy
+                    Channel::Exact | Channel::Identifier | Channel::Fuzzy | Channel::Lexical
                 ))
                 || (structural_executed && lane.channel == Channel::Structural))
         {
@@ -1528,6 +1541,15 @@ fn find(
     for (id, c) in all {
         work.tick(1 + text.len() + c.name.len())?;
         let mut matches = Vec::new();
+        if c.hit.kind == "declaration" && channels.contains(&Channel::Lexical) && !terms.is_empty() {
+            let documentation=c.hit.documentation.as_ref().and_then(|v|v.get("text")).and_then(|v|v.as_str()).unwrap_or("");
+            let metadata=format!("{} {} {} {} {}",c.name,c.hit.label.as_deref().unwrap_or(""),c.path,c.hit.signature.as_deref().unwrap_or(""),documentation);
+            work.tick(metadata.len())?;
+            let searchable=identifier_terms(&metadata);
+            if terms.iter().all(|term|searchable.iter().any(|word|word==term)) {
+                matches.push(ChannelMatch{channel:Channel::Lexical,rank:0,ordering_score:150,explanation:"lexical declaration name/qualified name/signature/documentation/path terms".into()});
+            }
+        }
         if channels.contains(&Channel::Exact)
             && (c.name == text || c.path == text || c.hit.label.as_deref() == Some(text))
         {
@@ -1564,6 +1586,7 @@ fn find(
             c.hit.evidence_state = "suggestion".into();
         }
         if !matches.is_empty() {
+            matches.sort_by(|a,b|b.ordering_score.cmp(&a.ordering_score));
             c.hit.matches = matches;
             out.insert(id.clone());
         }
