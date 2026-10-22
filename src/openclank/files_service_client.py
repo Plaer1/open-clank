@@ -191,9 +191,9 @@ class OdysseusFilesClient:
     def _start_grpc_locked(self) -> tuple[Path | str, str]:
         if self.transport != "grpc":
             raise FilesServiceError("Tonic transport was not selected", code="protocol_mismatch")
-        if sys.platform not in {"darwin", "win32"}:
+        if sys.platform not in {"darwin", "linux", "win32"}:
             raise FilesServiceError(
-                "Tonic filesystem transport is currently available only on macOS",
+                "Tonic filesystem transport is available only on macOS, Linux or Windows",
                 code="protocol_mismatch",
             )
         if (

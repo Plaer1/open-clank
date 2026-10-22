@@ -97,6 +97,10 @@ def verify_portable_payload() -> dict | None:
         from scripts.macos_package import verify_bundle
 
         return verify_bundle(Path(sys.executable).resolve().parents[2])
+    if sys.platform.startswith("linux"):
+        from scripts.linux_package import verify_bundle
+
+        return verify_bundle(Path(sys.executable).resolve().parent)
     bundle_root = Path(sys.executable).resolve().parent
     manifest_path = bundle_root / "portable-provenance.json"
     checksums_path = bundle_root / "SHA256SUMS"
@@ -302,7 +306,7 @@ def packaged_engine_expectations() -> dict[str, str]:
     manifest = verify_portable_payload()
     if not isinstance(manifest, dict):
         raise EngineBuildError("sealed Engine expectations require a frozen payload")
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
         from src.openclank.engine_build import default_install_root
         root = Path(default_install_root()).resolve()
         try:

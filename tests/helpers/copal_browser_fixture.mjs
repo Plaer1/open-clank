@@ -28,7 +28,7 @@ export async function withCopalBrowser({ page, overrides = {}, request = null, c
   });
   try {
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-    const chrome = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].find(fs.existsSync);
+    const chrome = [process.env.OPENCLANK_CHROMIUM_BIN, process.env.CHROMIUM_BIN, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome'].find(candidate => candidate && fs.existsSync(candidate));
     assert(chrome, 'Chrome executable required');
     profile = fs.mkdtempSync(path.join(os.tmpdir(), 'copal-fixture-'));
     browser = spawn(chrome, ['--headless=new', ...(disableGpu ? ['--disable-gpu'] : []), '--no-sandbox', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio:['ignore', 'pipe', 'pipe'] });

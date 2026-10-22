@@ -220,7 +220,7 @@ impl ThumbnailBroker {
     }
 
     pub const fn supported_on_this_host() -> bool {
-        cfg!(any(target_os = "macos", windows))
+        cfg!(any(target_os = "macos", target_os = "linux", windows))
     }
 
     pub fn stats(&self) -> ThumbnailStats {
@@ -462,7 +462,7 @@ fn platform_identity(metadata: &fs::Metadata) -> (i128, i128, u64, u64) {
     (modified, created, 0, 0)
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 mod platform {
     use super::*;
     use crate::quicklook_protocol::{
@@ -844,7 +844,13 @@ mod platform {
         ) -> Result<Self, ThumbnailError> {
             let token = random_token().map_err(|_| ThumbnailError::HelperUnavailable)?;
             stats.helper_starts.fetch_add(1, Ordering::Relaxed);
-            let mut child = Command::new(helper_path)
+            let mut command = Command::new(helper_path);
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -950,16 +956,24 @@ mod platform {
                 }
             }
             if self.child.try_wait().ok().flatten().is_none() {
-                let _ = self.child.kill();
+                self.kill_process_tree();
                 let _ = self.child.wait();
             }
+            // Reap native descendants even when the helper exited normally.
+            self.kill_process_tree();
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
             }
         }
 
-        fn kill(&mut self) {
+        fn kill_process_tree(&mut self) {
+            #[cfg(target_os = "linux")]
+            unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL); }
             let _ = self.child.kill();
+        }
+
+        fn kill(&mut self) {
+            self.kill_process_tree();
             let _ = self.child.wait();
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
@@ -969,7 +983,7 @@ mod platform {
 
     impl Drop for ChildSession {
         fn drop(&mut self) {
-            let _ = self.child.kill();
+            self.kill_process_tree();
             let _ = self.child.wait();
         }
     }
@@ -1007,7 +1021,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod platform {
     use super::*;
 

@@ -40,6 +40,7 @@ from fastapi import FastAPI, Request  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 import uvicorn  # noqa: E402
 from routes.memory.memory_routes import setup_memory_routes  # noqa: E402
+from routes.file_policy_routes import setup_file_policy_routes  # noqa: E402
 from routes.files_facade_routes import setup_files_facade_routes  # noqa: E402
 from src.openclank.filesystem_registry import FilesystemRootRegistry  # noqa: E402
 from src.openclank.files_service_client import close_all_clients  # noqa: E402
@@ -74,6 +75,8 @@ async def test_real_corpus_browser_graph_source_editor_and_invalidation(scope, t
     app = FastAPI()
     app.state.auth_manager = lifecycle.Auth()
     app.state.files_policy_repository = repository
+    app.state.memory_provider = provider
+    app.include_router(setup_file_policy_routes(repository=repository))
     held, release = asyncio.Event(), asyncio.Event()
     control = {"hold": False, "completed": 0}
 
@@ -113,7 +116,20 @@ async def test_real_corpus_browser_graph_source_editor_and_invalidation(scope, t
         elif name == "restore": selected_path.write_bytes(original)
         elif name == "hold": control["hold"] = True; held.clear(); release.clear()
         elif name == "release": control["hold"] = False; release.set()
-        elif name == "erase": await provider.code_index_lifecycle(**lifecycle.native_request(scope, action="remove"))
+        elif name == "erase":
+            from src.memory_provider import MemoryTransportError
+            try:
+                await provider.code_index_lifecycle(**lifecycle.native_request(scope, action="remove"))
+            except MemoryTransportError as error:
+                if "cache_cleanup_pending" not in str(error):
+                    raise
+                status = await provider.code_index_lifecycle(**lifecycle.native_request(scope, action="status"))
+                assert status["lifecycle"] == "erased", status
+                print("S11 observed cache_cleanup_pending after committed metadata erasure; verify source denial before owned-worker restart")
+                return {"ok": True, "cleanup_pending": True}
+        elif name == "cleanup":
+            await provider.shutdown()
+            await provider.code_index_lifecycle(**lifecycle.native_request(scope, action="remove"))
         elif name == "revoke":
             for kind in ("people", "agent"):
                 assert repository.revoke_binding(bindings["alice", kind].id, actor_subject_id="s03-admin")

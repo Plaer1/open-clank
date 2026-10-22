@@ -298,11 +298,12 @@ def ensure_native_workers():
         (root / "mcp_servers/frankenmemory", ("fm-mcp",)),
         (root / "packages/openclank-history", ("openclank-history-service",)),
     ]
-    if sys.platform in {"darwin", "win32"}:
-        thumbnail = "odysseus-quicklook-helper" if sys.platform == "darwin" else "odysseus-shell-thumbnail-helper"
+    if sys.platform in {"darwin", "win32", "linux"}:
+        thumbnail = {"darwin": "odysseus-quicklook-helper", "win32": "odysseus-shell-thumbnail-helper",
+                     "linux": "odysseus-linux-thumbnail-helper"}[sys.platform]
         builds.append((root / "packages/odysseus-files", ("odysseus-files-service", thumbnail)))
     else:
-        print("  [warn] Linux source support remains unqualified; native Files is not built")
+        raise RuntimeError("Unsupported native worker platform: " + sys.platform)
     suffix = ".exe" if os.name == "nt" else ""
     for crate, binaries in builds:
         command = [cargo, "build", "--locked", "--release", "--manifest-path", str(crate / "Cargo.toml"),
@@ -315,6 +316,22 @@ def ensure_native_workers():
             if not artifact.is_file() or (os.name != "nt" and not os.access(artifact, os.X_OK)):
                 raise RuntimeError(f"Native worker build did not produce {binary}")
             print(f"  [ok] Native worker built: {binary}")
+
+    if sys.platform == "linux":
+        cmake = shutil.which("cmake")
+        if cmake:
+            adapter_build = root / "packages/odysseus-files/target/linux-kde"
+            configured = subprocess.run([cmake, "-S", str(root / "native/linux"), "-B", str(adapter_build),
+                                         "-DCMAKE_BUILD_TYPE=Release"], cwd=root, check=False)
+            if configured.returncode == 0:
+                subprocess.run([cmake, "--build", str(adapter_build), "--parallel", "2"], cwd=root, check=True)
+                shutil.copy2(adapter_build / "odysseus-kde-thumbnail-adapter",
+                             root / "packages/odysseus-files/target/release/odysseus-kde-thumbnail-adapter")
+                print("  [ok] Optional KDE thumbnail adapter built")
+            else:
+                print("  [warn] KDE thumbnail adapter unavailable; install Qt6/KF6KIO development libraries for native generation")
+        else:
+            print("  [warn] CMake unavailable; native KDE thumbnails require the optional adapter (docs/linux-package.md)")
 
 
 def validate_existing_provider_store():

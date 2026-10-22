@@ -82,7 +82,7 @@ async def repository_provider(scope, tmp_path, monkeypatch):
     expected = os.environ["OPEN_CLANK_TEST_DEFAULT_FM_SHA256"]
     binary = Path(os.environ["OPEN_CLANK_TEST_FM_MCP_BIN"])
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == expected
-    assert hashlib.sha256(Path(os.environ["ODYSSEUS_FILES_SERVICE_BIN"]).read_bytes()).hexdigest() == "4844112f850113499b687e5212fe04e21259e43483e4d7ef25cbd6dd879ec478"
+    assert hashlib.sha256(Path(os.environ["ODYSSEUS_FILES_SERVICE_BIN"]).read_bytes()).hexdigest() == os.environ["OPEN_CLANK_TEST_FILES_SHA256"]
     return await lifecycle.native_provider(scope, tmp_path, monkeypatch)
 
 

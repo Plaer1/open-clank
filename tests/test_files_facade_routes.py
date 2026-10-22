@@ -317,7 +317,7 @@ def test_host_namespace_is_opaque_rust_backed_and_capability_truthful(tmp_path):
         }
         assert body["payload"]["resource"]["locator"]["opaqueRef"] == file_entry["ref"]
         expected_folder_caps = ["children", "search", "stat"]
-        if sys.platform == "darwin":
+        if sys.platform in {"darwin", "linux", "win32"}:
             expected_folder_caps.append("watch")
         expected_folder_caps.append("write")
         assert next(row for row in page if row["kind"] == "folder")["capabilities"] == expected_folder_caps

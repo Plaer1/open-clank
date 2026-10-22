@@ -1,6 +1,6 @@
 //! Opt-in production Tonic transport for the canonical filesystem service.
 //!
-//! macOS retains the private Unix endpoint and peer UID check. Windows uses a
+//! macOS and Linux retain the private Unix endpoint and peer UID check. Windows uses a
 //! supervisor-owned, already-bound authenticated loopback endpoint. Stable
 //! opened-object handles bind streams and native previews to authorized files.
 //! The framed stdio lane remains available for unary operations.
@@ -12,28 +12,26 @@ use crate::{
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use std::env;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::fs;
 use std::io;
-#[cfg(target_os = "macos")]
-use std::os::fd::AsRawFd;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio_stream::wrappers::UnixListenerStream;
 #[cfg(windows)]
 use tokio_stream::wrappers::TcpListenerStream;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio_stream::StreamExt;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Server;
@@ -478,14 +476,14 @@ fn protocol_status(error: ProtocolError) -> Status {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct SocketGuard {
     path: PathBuf,
     device: u64,
     inode: u64,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl SocketGuard {
     fn capture(path: PathBuf) -> io::Result<Self> {
         let metadata = fs::symlink_metadata(&path)?;
@@ -497,7 +495,7 @@ impl SocketGuard {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         let Ok(metadata) = fs::symlink_metadata(&self.path) else {
@@ -512,7 +510,7 @@ impl Drop for SocketGuard {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn validate_socket_path(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(io::Error::new(
@@ -523,7 +521,7 @@ pub fn validate_socket_path(path: &Path) -> io::Result<()> {
     if path.as_os_str().as_encoded_bytes().len() > 96 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "gRPC socket path is too long for the macOS endpoint",
+            "gRPC socket path is too long for the private Unix endpoint",
         ));
     }
     let parent = path
@@ -578,14 +576,11 @@ fn validate_session_binding(value: &str) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn verify_peer(stream: &UnixStream) -> io::Result<()> {
-    let mut uid: libc::uid_t = 0;
-    let mut gid: libc::gid_t = 0;
-    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    // Tokio uses SO_PEERCRED on Linux and getpeereid on Darwin. Failure
+    // to obtain kernel credentials rejects the connection on both platforms.
+    let uid = stream.peer_cred()?.uid();
     if uid != unsafe { libc::geteuid() } {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -595,7 +590,7 @@ fn verify_peer(stream: &UnixStream) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub async fn serve(
     service: Arc<FileService>,
     socket_path: PathBuf,
@@ -646,7 +641,7 @@ pub async fn serve(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn shutdown_signal() {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
@@ -699,6 +694,36 @@ mod tests {
                 .kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn socket_parent_symlinks_and_replaced_socket_cleanup_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("private");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = root.path().join("alias");
+        symlink(&real, &alias).unwrap();
+        assert_eq!(validate_socket_path(&alias.join("files.sock")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let path = real.join("files.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let guard = SocketGuard::capture(path.clone()).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        drop(guard);
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        drop(listener);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn unix_peer_credentials_match_effective_owner() {
+        let (left, right) = UnixStream::pair().unwrap();
+        assert_eq!(left.peer_cred().unwrap().uid(), unsafe { libc::geteuid() });
+        verify_peer(&left).unwrap();
+        verify_peer(&right).unwrap();
     }
 
     #[test]

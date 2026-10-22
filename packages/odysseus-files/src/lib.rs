@@ -11,7 +11,7 @@ mod engine;
 pub mod windows_fs;
 pub mod history_capture;
 pub use history_capture::HistoryServiceHook;
-#[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
+#[cfg(all(feature = "tonic-transport", any(target_os = "macos", target_os = "linux", windows)))]
 pub mod grpc_transport;
 #[cfg(unix)]
 mod local_ipc;

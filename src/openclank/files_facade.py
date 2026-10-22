@@ -19,7 +19,7 @@ import stat
 from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence
 
 from src.openclank.file_policy import FilePolicyError
-from src.openclank.macos_host_apps import MacOSHostApps, MacOSHostAppsError
+from src.openclank.host_apps import host_apps, HostAppsError
 from src.openclank.resource_refs import (
     PROVIDERS,
     RESOURCE_CAPABILITIES,
@@ -2673,8 +2673,8 @@ class FilesFacade:
         else:
             path = await self._native_content_path(provider, context, ref.origin_id)
             try:
-                applications = await MacOSHostApps().discover_async(path)
-            except MacOSHostAppsError as error:
+                applications = await host_apps().discover_async(path)
+            except HostAppsError as error:
                 raise FilesFacadeError(str(error), code=error.code) from error
         return {"version": FACADE_VERSION, "resource_ref": resource_ref, "applications": applications}
 
@@ -2688,8 +2688,8 @@ class FilesFacade:
         else:
             path = await self._native_content_path(provider, context, ref.origin_id)
             try:
-                application = await MacOSHostApps().launch_async(path, app_id)
-            except MacOSHostAppsError as error:
+                application = await host_apps().launch_async(path, app_id)
+            except HostAppsError as error:
                 raise FilesFacadeError(str(error), code=error.code) from error
         return {"version": FACADE_VERSION, "action": "open-host", "application": application}
 

@@ -82,6 +82,9 @@ def isolated_file_authority(tmp_path, monkeypatch):
 
 
 def _service_binary() -> str:
+    if configured := os.environ.get("ODYSSEUS_FILES_SERVICE_BIN"):
+        assert Path(configured).is_file(), "explicit Files binary is missing"
+        return configured
     return str(
         Path(__file__).resolve().parents[1]
         / "packages/odysseus-files/target/debug/odysseus-files-service"
@@ -333,7 +336,7 @@ def test_scoped_app_client_rejects_registry_generation_change(tmp_path, monkeypa
         client.close()
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="first production Tonic lane is macOS-only")
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="private Unix Tonic lane")
 def test_tonic_private_uds_has_unary_parity_streaming_and_session_rejection(tmp_path):
     grpc = pytest.importorskip("grpc")
     from src.openclank import files_transport_pb2 as wire
@@ -376,20 +379,6 @@ def test_tonic_private_uds_has_unary_parity_streaming_and_session_rejection(tmp_
             )
         ]
         assert b"".join(handle_chunks) == expected[17:700_017]
-
-        png_target = tmp_path / "thumbnail.png"
-        png_target.write_bytes(base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-        ))
-        png_handle = await tonic.open_handle(str(png_target))
-        thumbnail = await tonic.thumbnail_handle(
-            png_handle["handle"],
-            width=96,
-            height=96,
-            scale=1.0,
-        )
-        assert thumbnail.startswith(b"\x89PNG\r\n\x1a\n")
-        assert len(thumbnail) <= 4 * 1024 * 1024
 
         watched = tonic.watch_path(str(tmp_path))
         first_event = asyncio.create_task(anext(watched))
@@ -476,7 +465,26 @@ def test_tonic_private_uds_has_unary_parity_streaming_and_session_rejection(tmp_
         tonic.close()
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="first production Tonic lane is macOS-only")
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="native Unix thumbnails")
+def test_tonic_native_thumbnail_rpc(tmp_path):
+    pytest.importorskip("grpc")
+    target = tmp_path / "native-thumbnail.png"
+    target.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    ))
+    client = OdysseusFilesClient("owner", binary=_service_binary(), transport="grpc")
+    async def exercise():
+        opened = await client.open_handle(str(target))
+        rendered = await client.thumbnail_handle(opened["handle"], width=96, height=96, scale=1.0)
+        assert rendered.startswith(b"\x89PNG\r\n\x1a\n")
+        assert len(rendered) <= 4 * 1024 * 1024
+    try:
+        asyncio.run(exercise())
+    finally:
+        client.close()
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "linux"}, reason="private Unix Tonic lane")
 def test_tonic_stream_cancels_on_non_admin_policy_generation_change(tmp_path, monkeypatch):
     pytest.importorskip("grpc")
     visible = tmp_path / "visible"
@@ -682,3 +690,27 @@ def test_brokered_read_uses_rust_scope_without_legacy_path_ceiling(tmp_path, mon
     finally:
         tool_execution._active_workspace.reset(token)
         close_all_clients()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="optional Linux renderer startup")
+@pytest.mark.parametrize("failure", ["missing", "exit", "timeout"])
+def test_linux_unavailable_renderer_keeps_files_ready(tmp_path, monkeypatch, failure):
+    helper = tmp_path / "unavailable-helper"
+    if failure != "missing":
+        helper.write_text("#!" + sys.executable + "\n" +
+                          ("raise SystemExit(2)\n" if failure == "exit" else "import time; time.sleep(30)\n"))
+        helper.chmod(0o700)
+    monkeypatch.setenv("ODYSSEUS_LINUX_THUMBNAIL_HELPER_BIN", str(helper))
+    client = OdysseusFilesClient("owner", binary=_service_binary(), transport="grpc")
+    target = tmp_path / "ordinary.txt"
+    target.write_text("ordinary files remain available\n")
+    async def exercise():
+        assert (await client.request("health", "."))["ready"] is True
+        capabilities = await client.request("capabilities", ".")
+        assert capabilities["native_thumbnails"] is False
+        assert capabilities["native_icons"] is False
+        assert (await client.request("read_lines", str(target)))["data"]["text"] == target.read_text()
+    try:
+        asyncio.run(exercise())
+    finally:
+        client.close()

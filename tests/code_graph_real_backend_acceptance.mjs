@@ -12,16 +12,16 @@ const headers={'x-s11-token':process.env.S11_TOKEN,'content-type':'application/j
 const info=await (await fetch(new URL('/__fixture/info',backend),{headers})).json();
 const responses=[];
 const uiTimings=[];
-const controls=async action=>{const r=await fetch(new URL('/__fixture/control',backend),{method:'POST',headers,body:JSON.stringify({action})});assert(r.ok);};
+const controls=async action=>{const r=await fetch(new URL('/__fixture/control',backend),{method:'POST',headers,body:JSON.stringify({action})});assert(r.ok);return r.json();};
 const production=fs.readFileSync('static/js/copal.js','utf8');
 // Read-only fixture access to the real controller/buffer; no renderer, Files,
 // source action, open(), or CodeMirror implementation is replaced.
-const source=production.replace('export default { init,',`window.__s11={select:id=>codeGraphController.selectWorkspace(id),snapshot:()=>codeGraphController?.snapshot(),buffer:()=>notesFeature?.getAuthoritativeSnapshot(state.selected),view:()=>state.view};\nexport default { init,`)
+const source=production.replace('export default { init,',`window.__s11={run:(operation,extra)=>codeGraphController.run(operation,extra),select:id=>codeGraphController.selectWorkspace(id),snapshot:()=>codeGraphController?.snapshot(),buffer:()=>notesFeature?.getAuthoritativeSnapshot(state.selected),view:()=>state.view};\nexport default { init,`)
  .replace('  await opening;', '  await opening; window.__s11Handoff={sameScope:sameSaveScope(scope,saveScope()),sameNavigation:navigationTicket===editorNavigationTicket,current:handoffCurrent(),view:state.view};');
 assert.notEqual(source,production);
 const page=`<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/static/style.css"><main id="app"></main>
 <script type="module">
-class QuietEvents{addEventListener(){} close(){}}window.EventSource=QuietEvents;window.__sourceAcks=[];
+class QuietEvents{addEventListener(){} close(){}}window.EventSource=QuietEvents;window.__sourceAcks=[];window.__sourceAborts=0;
 const original=fetch;window.fetch=async(input,init={})=>{
  const u=new URL(String(input),location.origin),json=v=>new Response(JSON.stringify(v),{headers:{'content-type':'application/json'}});
  // Explicit unrelated shell boundary only. Never mock Graph/source/Files.
@@ -31,7 +31,11 @@ const original=fetch;window.fetch=async(input,init={})=>{
  if(u.pathname==='/api/prefs/copal_entry_visibility')return json({value:{}});
  if(u.pathname==='/api/prefs/code_context_enabled')return json({value:false});
  if(u.pathname==='/api/auth/status')return json({ok:true,username:'alice',is_admin:false});
- const response=await original(input,init);
+ let response;
+ try{response=await original(input,init);}catch(error){
+  if(u.pathname==='/api/memory/code/resource'&&init.body&&JSON.parse(init.body).operation==='resolve'&&error.name==='AbortError')window.__sourceAborts++;
+  throw error;
+ }
  if(u.pathname==='/api/memory/code/resource'&&init.body&&JSON.parse(init.body).operation==='resolve')window.__sourceAcks.push(await response.clone().json());
  return response;
 };
@@ -44,7 +48,7 @@ try { await withCopalBrowser({page,overrides:{'/static/js/copal.js':source},cdpT
   const started=performance.now();
   const response=await fetch(new URL(req.url,backend),{method:req.method,headers,body:body.length?body:undefined});
   const bytes=Buffer.from(await response.arrayBuffer());
-  if(req.url.startsWith('/api/memory/code/')||req.url==='/api/files-v1/open-resource')responses.push({url:req.url,request:body.length?JSON.parse(body):null,status:response.status,value:JSON.parse(bytes),elapsed_ms:Math.round((performance.now()-started)*1000)/1000,response_bytes:bytes.length});
+  if(req.url.startsWith('/api/memory/code/')||req.url.startsWith('/api/file-policy/')||req.url==='/api/files-v1/open-resource')responses.push({url:req.url,request:body.length?JSON.parse(body):null,status:response.status,value:JSON.parse(bytes),elapsed_ms:Math.round((performance.now()-started)*1000)/1000,response_bytes:bytes.length});
   res.writeHead(response.status,{'content-type':response.headers.get('content-type')||'application/json'});res.end(bytes);return true;
  }},async({evaluate,cdp})=>{
   // The shared static fixture's five-second wait is not a real native/Files
@@ -53,26 +57,29 @@ try { await withCopalBrowser({page,overrides:{'/static/js/copal.js':source},cdpT
   const until=async expression=>{
    const deadline=Date.now()+30000;
    do{if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25));}while(Date.now()<deadline);
-   throw new Error('Real backend fixture timeout: '+expression);
+   throw new Error('Real backend fixture timeout: '+expression+'; state='+JSON.stringify(await evaluate('({snapshot:window.__s11.snapshot(),text:document.querySelector(".code-workbench")?.textContent?.slice(0,1500)})')));
   };
   let groups=0;
   await cdp('Emulation.setDeviceMetricsOverride',{width:1440,height:1000,deviceScaleFactor:1,mobile:false});
   const screenshot=async name=>{
    if(process.env.S11_SCREENSHOTS!=='1'||process.env.S11_DENIAL!=='erase')return;
-   const folder='.clanker/artifacts/code-memory-graph-2026-10-13/s11-real-codebase',file=folder+'/'+name+'.png';
+   const folder=process.env.S11_SCREENSHOT_DIR||'.clanker/artifacts/code-memory-graph-2026-10-13/s11-real-codebase',file=folder+'/'+name+'.png';
    if(fs.existsSync(file)){assert(process.env.S11_IMAGE_PREIMAGE_PREFIX,'Fresh Hex+Git image preimage required');assert.deepEqual(fs.readFileSync(file),execFileSync('git',['cat-file','blob',process.env.S11_IMAGE_PREIMAGE_PREFIX+'-'+name]));}
    fs.mkdirSync(folder,{recursive:true});
    const result=await cdp('Page.captureScreenshot',{format:'png',captureBeyondViewport:true});fs.writeFileSync(file,Buffer.from(result.data,'base64'));
   };
-  const click=label=>evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent===${JSON.stringify(label)}&&!b.disabled).click()`);
+  const click=label=>evaluate(`[...document.querySelectorAll('button')].find(b=>b.textContent===${JSON.stringify(label)}&&!b.disabled&&b.getClientRects().length).click()`);
   const ready=async()=>{await until(`['ready','error','cancelled','stale'].includes(window.__s11.snapshot()?.status)`);const snapshot=await evaluate('window.__s11.snapshot()');assert.equal(snapshot.status,'ready',JSON.stringify(snapshot.error));};
   const graph=async()=>{await evaluate(`window.copalModule.open('graph')`);await evaluate(`{const mode=document.querySelector('[data-graph-mode]');if(mode.value!=='code'){mode.value='code';mode.dispatchEvent(new Event('change'));}if(document.querySelector('[data-code-workspace]').textContent!==${JSON.stringify(info.workspace_id)})window.__s11.select(${JSON.stringify(info.workspace_id)});}`);await ready();};
-  // Use the real Symbols control for a declaration handoff. Unfiltered search
-  // also returns occurrences, and a bounded first page need not contain the
-  // declaration when equal-score results are ordered by scoped opaque IDs.
+  // Current Graph defaults to the map. Its public controller enters the real
+  // Search & evidence surface; indexed queries and every source/Files call
+  // remain actual HTTP/native operations. Bound results to declarations.
   const wanted=n=>n.kind==='declaration'&&n.label==='resolve_resource'&&n.source?.rel_path===info.selected_rel_path;
   const search=async()=>{
-   await evaluate(`document.querySelector('[aria-label="Search scoped code"]').value='resolve_resource'`);await click('Symbols');await ready();
+   const before=responses.filter(r=>r.url==='/api/memory/code/graph').length;
+   await evaluate(`window.__s11.run('search',{query:'resolve_resource',filter:{kinds:['declaration']}})`);
+   await until(`window.__s11.snapshot()?.operation==='search'`);await ready();
+   assert(responses.filter(r=>r.url==='/api/memory/code/graph').length>before,'Search must execute actual native Graph query');
    // The byte/token envelope can paginate even a small symbol result set.
    // Follow actual native cursors through the visible Load more control.
    for(let page=0;page<20;page++){
@@ -147,22 +154,25 @@ try { await withCopalBrowser({page,overrides:{'/static/js/copal.js':source},cdpT
   for(const change of ['mode','workspace']){
    await graph();await search();await evaluate(`document.querySelector('[data-code-id="${hit.id}"]').click()`);
    await until(`[...document.querySelectorAll('button')].some(b=>b.textContent==='Open source'&&!b.disabled)`);
-   await controls('hold');const before=responses.filter(r=>r.url==='/api/files-v1/open-resource').length,acks=await evaluate('window.__sourceAcks.length');
+   await controls('hold');const before=responses.filter(r=>r.url==='/api/files-v1/open-resource').length,acks=await evaluate('window.__sourceAcks.length+window.__sourceAborts');
    await click('Open source');
    while(!(await (await fetch(new URL('/__fixture/info',backend),{headers})).json()).held)await new Promise(r=>setTimeout(r,10));
    if(change==='mode')await evaluate(`document.querySelector('[data-graph-mode]').value='documents';document.querySelector('[data-graph-mode]').dispatchEvent(new Event('change'))`);
    else await evaluate(`window.__s11.select(${JSON.stringify(info.bob_workspace_id)})`);
    await controls('release');
    if(change==='mode')await until(`!document.querySelector('.code-workbench')`);
-   await until(`window.__sourceAcks.length===${acks+1}`);
-   assert.equal(await evaluate('window.__sourceAcks.at(-1).state'),'current');
+   await until(`window.__sourceAcks.length+window.__sourceAborts===${acks+1}`);
+   // Current UI cancels source resolution when its Graph scope is replaced.
+   // Either cancellation or an acknowledged response must yield no Files open.
+   if(await evaluate('window.__sourceAcks.length')>acks)assert.equal(await evaluate('window.__sourceAcks.at(-1).state'),'current');
    await evaluate(`new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))`);
    assert.equal(responses.filter(r=>r.url==='/api/files-v1/open-resource').length,before);groups++;
   }
   // Independent fresh published corpus per parameter: revocation must deny
   // a live ready index, not merely an already erased one.
-  await controls(process.env.S11_DENIAL);const denied=await resolve();
+  const removal=await controls(process.env.S11_DENIAL);const denied=await resolve();
   assert.equal(denied.state,process.env.S11_DENIAL==='erase'?'erased':'denied');assert.equal(denied.destination,null);assert.equal(denied.excerpt,null);groups++;
+  if(removal.cleanup_pending)await controls('cleanup');
   const wrong=await evaluate(`fetch('/api/memory/code/graph',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({workspace_id:${JSON.stringify(info.bob_workspace_id)},query:{operation:'catalog'}})}).then(r=>r.json())`);
   assert.equal(wrong.error.code,'denied');assert.equal(wrong.receipt,null);groups++;
   console.log(`S11 real backend browser: ${groups} groups passed (${process.env.S11_DENIAL}); corpus manifest ${info.manifest.sha256}; actual Graph/source/Files HTTP and cold CodeMirror, no model/copied-code execution`);

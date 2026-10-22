@@ -1715,7 +1715,7 @@ impl FileService {
         }
         })();
         result.map(|mut response| {
-            #[cfg(windows)]
+            #[cfg(any(target_os = "linux", windows))]
             { response["native_thumbnails"] = json!(self.native_thumbnails_available()); response["native_icons"] = json!(self.native_icon_broker.is_some()); }
             if mutation {
                 if let Some(status) = self.last_capture_status() {
@@ -2115,10 +2115,16 @@ mod thumbnail_cache_tests {
     #[test]
     fn staging_reaps_expired_owned_markers_across_restart_and_preserves_active_or_foreign_files() {
         let root = StageStore::ensure_root().unwrap();
-        let nonce = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let old_id = format!("fs-stage-{nonce:064x}");
-        let active_id = format!("fs-stage-{:064x}", nonce + 1);
-        let foreign_id = format!("fs-stage-{:064x}", nonce + 2);
+        // Other tests construct services/reap in parallel against the same
+        // process temp root. Give this fixture independent IDs AND identities.
+        let mut random = [0_u8; 24];
+        getrandom::fill(&mut random).unwrap();
+        let nonce = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let owner = format!("reap-owner-{nonce}");
+        let foreign_owner = format!("reap-foreign-{nonce}");
+        let old_id = format!("fs-stage-{nonce}0000000000000000");
+        let active_id = format!("fs-stage-{nonce}0000000000000001");
+        let foreign_id = format!("fs-stage-{nonce}0000000000000002");
         let write_marker = |stage_id: &str, owner: &str, created_unix_ms: u64| {
             let marker = StageMarker {
                 version: 1,
@@ -2134,13 +2140,13 @@ mod thumbnail_cache_tests {
             fs::write(root.join(format!("{stage_id}.json")), serde_json::to_vec(&marker).unwrap()).unwrap();
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        write_marker(&old_id, "owner", now.saturating_sub(STAGE_TTL.as_millis() as u64 + 1));
-        write_marker(&active_id, "owner", now);
-        write_marker(&foreign_id, "other-owner", now.saturating_sub(STAGE_TTL.as_millis() as u64 + 1));
+        write_marker(&old_id, &owner, now.saturating_sub(STAGE_TTL.as_millis() as u64 + 1));
+        write_marker(&active_id, &owner, now);
+        write_marker(&foreign_id, &foreign_owner, now.saturating_sub(STAGE_TTL.as_millis() as u64 + 1));
         let foreign_data = root.join(format!("foreign-{nonce}.data"));
         fs::write(&foreign_data, b"unmarked").unwrap();
 
-        let _restarted = staging_service("owner", "principal", "new-session");
+        let _restarted = staging_service(&owner, "principal", "new-session");
         assert!(!root.join(format!("{old_id}.data")).exists());
         assert!(!root.join(format!("{old_id}.json")).exists());
         assert!(root.join(format!("{active_id}.data")).exists());

@@ -466,7 +466,7 @@ class HostFilesProvider:
             return self.client_factory(
                 context.owner_username,
                 app_scope=None if scope.get("host") else scope,
-                transport="grpc" if sys.platform in {"darwin", "win32"} else "framed",
+                transport="grpc" if sys.platform in {"darwin", "linux", "win32"} else "framed",
             )
         return self.client_factory(context.owner_username) if scope.get("host") else self.client_factory(
             context.owner_username, app_scope=scope,
@@ -477,7 +477,7 @@ class HostFilesProvider:
             return self.client_factory(
                 context.owner_username,
                 app_scope=None if scope.get("host") else scope,
-                transport="grpc" if sys.platform in {"darwin", "win32"} else "framed",
+                transport="grpc" if sys.platform in {"darwin", "linux", "win32"} else "framed",
             )
         return self._client(context, scope)
 
@@ -493,7 +493,7 @@ class HostFilesProvider:
         # can be opened through the same Rust read-lines service used by Code;
         # writes still require the caller's existing app-scoped service grant.
         if kind in {"folder", "directory", "recursive_directory"}:
-            return ("children", "stat", "search", *(('watch',) if sys.platform in {"darwin", "win32"} else ()), *(('write',) if writable else ()))
+            return ("children", "stat", "search", *(('watch',) if sys.platform in {"darwin", "linux", "win32"} else ()), *(('write',) if writable else ()))
         if kind == "file":
             return ("stat", "preview", "download", "open", *(('write', 'rename', 'move') if writable else ()))
         return ("stat",)

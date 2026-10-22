@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/files_transport.proto");
     if std::env::var_os("CARGO_FEATURE_TONIC_TRANSPORT").is_none()
-        || !matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos" | "windows"))
+        || !matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos" | "linux" | "windows"))
     {
         return Ok(());
     }

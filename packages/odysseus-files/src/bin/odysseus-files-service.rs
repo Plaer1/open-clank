@@ -100,6 +100,12 @@ fn main() -> io::Result<()> {
             .map_err(|error| io::Error::other(error.to_string()))?;
         service = service.with_thumbnail_broker(broker);
     }
+    #[cfg(target_os = "linux")]
+    if let Some(helper_path) = linux_thumbnail_helper_path()? {
+        let broker = ThumbnailBroker::new(ThumbnailBrokerConfig::new(helper_path))
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        service = service.with_thumbnail_broker(broker);
+    }
     #[cfg(windows)]
     if let Some(helper_path) = shell_thumbnail_helper_path()? {
         let mut icons = ThumbnailBrokerConfig::new(&helper_path);
@@ -112,16 +118,16 @@ fn main() -> io::Result<()> {
     let service = Arc::new(service);
 
     if let Some(socket_path) = env::var_os("ODYSSEUS_FILES_GRPC_SOCKET") {
-        #[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
+        #[cfg(all(feature = "tonic-transport", any(target_os = "macos", target_os = "linux", windows)))]
         {
             return run_grpc(service, socket_path.into());
         }
-        #[cfg(not(all(feature = "tonic-transport", any(target_os = "macos", windows))))]
+        #[cfg(not(all(feature = "tonic-transport", any(target_os = "macos", target_os = "linux", windows))))]
         {
             let _ = (service, socket_path);
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Tonic filesystem transport requires a feature-enabled macOS or Windows build",
+                "Tonic filesystem transport requires a feature-enabled macOS, Linux or Windows build",
             ));
         }
     }
@@ -140,6 +146,33 @@ fn main() -> io::Result<()> {
         }
     }
     run_stdio(service)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thumbnail_helper_path() -> io::Result<Option<PathBuf>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let candidate = env::var_os("ODYSSEUS_LINUX_THUMBNAIL_HELPER_BIN").map(PathBuf::from)
+        .or_else(|| env::current_exe().ok()?.parent().map(|parent| parent.join("odysseus-linux-thumbnail-helper")));
+    let Some(path) = candidate.filter(|path| path.metadata().map(|metadata|
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0).unwrap_or(false)) else {
+        return Ok(None);
+    };
+    // A broken/missing optional desktop renderer must not disable ordinary Files
+    // or advertise native thumbnails that cannot be generated from a cold cache.
+    let Ok(mut probe) = Command::new(&path).arg("--probe")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+        return Ok(None);
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match probe.try_wait() {
+            Ok(Some(status)) => return Ok(status.success().then_some(path)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => { let _ = probe.kill(); let _ = probe.wait(); return Ok(None); }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -166,7 +199,7 @@ fn quicklook_helper_path() -> io::Result<Option<PathBuf>> {
     Ok(None)
 }
 
-#[cfg(all(feature = "tonic-transport", any(target_os = "macos", windows)))]
+#[cfg(all(feature = "tonic-transport", any(target_os = "macos", target_os = "linux", windows)))]
 fn run_grpc(service: Arc<FileService>, socket_path: std::path::PathBuf) -> io::Result<()> {
     let session = odysseus_files::grpc_transport::session_binding_from_env()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

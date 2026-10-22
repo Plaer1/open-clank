@@ -5,8 +5,10 @@ This guide covers installation, deployment, troubleshooting and configuration.
 build/dogfood focus. Windows source support is working and tested, including
 Files, Editor save/reopen and History restore, and native image/video thumbnails.
 Install only the native ARM64 or x64 Windows architectures offered by the
-published release, and check the artifact provenance. Linux support is
-coming later. See [known limits](known-limits.md) and
+published release, and check the artifact provenance. The native Linux x86_64
+GNU/glibc build and local tarball workflow is described in [Linux packaging](linux-package.md).
+Linux qualification is scoped to the recorded KDE host; it is not a published
+release or a universal distribution compatibility claim. See [known limits](known-limits.md) and
 [Beta 2 notes](beta2.md). Machine version: `1.0.3`.
 
 Docker is not officially supported or tested. Docker/Compose instructions in

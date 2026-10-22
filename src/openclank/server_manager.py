@@ -130,6 +130,20 @@ class LocalServerManager:
             if getattr(sys, "frozen", False):
                 return "__managed-server" in process_command
             return "openclank_bootstrap.py" in process_command and "serve" in process_command
+        if getattr(sys, "frozen", False) and sys.platform.startswith("linux"):
+            # Linux exposes the actual executable and NUL-delimited argv.
+            # Compare both so a reused PID, a lookalike command string, or a
+            # relocated path containing spaces cannot admit another process.
+            try:
+                process = Path("/proc") / str(pid)
+                expected = Path(sys.executable).resolve()
+                executable = (process / "exe").resolve(strict=True)
+                arguments = (process / "cmdline").read_bytes().split(b"\0")
+                return (executable == expected and len(arguments) >= 3
+                        and os.fsdecode(arguments[0]) == str(expected)
+                        and arguments[1] == b"__managed-server")
+            except (OSError, RuntimeError, ValueError):
+                return False
         try:
             ps_command = ["ps", "-p", str(pid), "-o", "command="]
             if getattr(sys, "frozen", False) and sys.platform == "darwin":

@@ -20,4 +20,7 @@ def host_apps() -> HostApps:
     if sys.platform == "win32":
         from src.openclank.windows_host_apps import WindowsHostApps
         return WindowsHostApps()
+    if sys.platform == "linux":
+        from src.openclank.linux_host_apps import LinuxHostApps
+        return LinuxHostApps()
     return MacOSHostApps()

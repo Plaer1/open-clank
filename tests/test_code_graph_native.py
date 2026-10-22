@@ -152,7 +152,7 @@ async def test_actual_friendly_discovery_dispatch_matches_graph_without_graph_mo
             workspace=repository.get_location(workspaces["alice"].location_id).canonical_path,
             authority_workspace_id=workspaces["alice"].id)
         assert description.startswith("registry: search_code"), (description, tool)
-        assert tool.get("exit_code") == 0, tool
+        assert tool.get("exit_code") == 0, json.loads(tool["output"]).get("error", tool)
         friendly = json.loads(tool["output"])
         graph = await post(mounted(scope, provider), workspaces["alice"].id, original)
         assert friendly["error"] is None and graph["error"] is None
