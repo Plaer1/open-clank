@@ -1,6 +1,9 @@
 .archive/
 .references/
 references/
+# Personal root working notes stay local, including filename case variants.
+/[Mm][Ee][Aa][Tt][Bb][Aa][Gg][Ss]
+/[Mm][Ee][Aa][Tt][Bb][Aa][Gg][Ss].[Mm][Dd]
 # All singular Clanker workspaces are private, including Hexes and local tools.
 **/.clanker/
 # History credentials and their authority/root sidecars are runtime state.
