@@ -29,7 +29,7 @@ RUN python scripts/openclank_engine.py \
 # ---- builder: compile the authenticated history writer shipped in Linux images ----
 # Keeping this in a dedicated Rust stage makes the final image independent of
 # a host target/debug tree while preserving the vendored Lore provenance.
-FROM rust:1.89-bookworm AS openclank-history-builder
+FROM rust:1.99-bookworm AS openclank-history-builder
 WORKDIR /build/packages/openclank-history
 COPY packages/openclank-history/ ./
 RUN cargo build --locked --release --bin openclank-history-service
