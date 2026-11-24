@@ -91,6 +91,8 @@ pypdf and charset-normalizer support extraction/encoding; PyMuPDF is optional fo
 
 ## Thanks to
 
+The [upstream credit record](https://github.com/Plaer1/open-clank/commits/main/ACKNOWLEDGMENTS.md) acknowledges people, GitHub Apps, and service bots in the projects we studied. Its commit message lists their original roles and source commits.
+
 The inherited Odysseus acknowledgments thanked these models and contributors.
 We preserve that historical credit:
 
